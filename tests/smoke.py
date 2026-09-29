@@ -224,6 +224,7 @@ class Smoke:
         check(rc != 0, "the root filesystem is writable")
         var = vm.fstype("/var")
         check(" - tmpfs " in var, f"/var is not a tmpfs: {var}")
+        check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
         check(vm.run("readlink -f /root") == "/var/roothome", "/root is not on /var")
         check("NAME=Cherry" in vm.run("cat /etc/os-release"), "unexpected os-release")
         check("console=ttyS0" in vm.run("cat /proc/cmdline"), "the UKI command line was not used")
