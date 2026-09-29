@@ -239,7 +239,7 @@ class Smoke:
               "the ssh.authorized_keys.root credential was not applied")
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
                "networkctl; exit 1", timeout=90)
-        check(vm.run("cat /sys/class/watchdog/watchdog0/state") == "active", "hardware watchdog not armed")
+        vm.run("test -c /dev/watchdog0 && journalctl -b -o cat _PID=1 | grep -q 'Using hardware watchdog'")
         self.machine_id = vm.run("cat /etc/machine-id")
         log("memory of the booted OS, before any container:\n" + vm.run(
             "free -k; df -k / /var /run | sed 's/^/  /'; "
