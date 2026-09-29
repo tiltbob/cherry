@@ -244,7 +244,7 @@ class Smoke:
         check(vm.run("systemctl show -p RuntimeWatchdogUSec --value") == "30s", "RuntimeWatchdogSec not applied")
         self.machine_id = vm.run("cat /etc/machine-id")
         log("memory of the booted OS, before any container:\n" + vm.run(
-            "free -k; df -k / /var /run | sed 's/^/  /'; "
+            "free -k; df -k /var /run | sed 's/^/  /'; "
             "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' /proc/meminfo"))
 
     def s2_nspawn(self):

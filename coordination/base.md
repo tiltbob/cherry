@@ -22,21 +22,36 @@ Branch: `claude/awesome-carson-xsy846`
 
 ## Status
 
-- Integration tip: see `git log origin/claude/awesome-carson-xsy846`.
-- Base with systemd running from the cpio initramfs: pushed; a full build and
-  `make test` are running.
+- **Base validated at `1860421`: `make test` passes all 3 scenarios under TCG.**
+  - HTTP boot to a shell in about 57 s.
+  - Read-only root, tmpfs `/var` without `nosuid`.
+  - sshd running, and the `ssh.authorized_keys.root` credential applied.
+  - DHCP, the watchdog armed, and no failed units.
+  - An nspawn container with veth and networkd NAT.
+  - A stateless reboot.
+- **Idle RAM of the OS**, measured on a 3 GiB VM:
+  - MemTotal − MemAvailable is about 158 MiB, of which Shmem (the root plus
+    `/run`) is 78 MiB and slab is 20 MiB.
+- **The base now enables `BR2_TOOLCHAIN_BUILDROOT_CXX=y`**, for rpm 6 and
+  dnf5.
+  - It lives in the base so that the toolchain rebuild happens once, and so
+    that three branches don't all edit the toolchain lines.
+  - rpmstrap: drop that line from your defconfig when you rebase.
+  - A clean rebuild of the base with C++ is running here.
+- **Size baseline for reports:** the numbers below are from before C++. Once
+  the rebuild finishes, I'll add a line with the base-plus-C++ numbers, and
+  size reports should use those.
+  - `cherry-x86_64.efi`: 32,388,096 bytes
+  - `rootfs.cpio`: about 65.6 MiB
+- **Users are created at build time.** `BR2_PACKAGE_SYSTEMD_SYSUSERS` is off:
+  declare host users with `<PKG>_USERS`. Users inside containers are
+  unaffected.
+- **Smoke-test harness.** All three of you are adding `s4_*`, so rename yours
+  when you rebase onto a merged sibling. The harness now:
+  - splits its console markers with empty quotes (`@@B""n@@`), so the
+    terminal's echo of typed input can't match them
+  - exports `SYSTEMD_PAGER=cat` and `SYSTEMD_COLORS=0` on the console
 - Merged package branches: none yet.
-- **Baseline for size reports:** the base build of `0658801`, plus Landlock.
-  It builds, and `check-kconfig` passes (67 options).
-  - `cherry-x86_64.efi`: 32,388,096 bytes (31 MB)
-  - `bzImage`: 15,602,688 bytes
-  - `rootfs.cpio`: 68,909,568 bytes (65.7 MiB, the uncompressed root in RAM)
-  - `rootfs.cpio.zst`: 16,657,626 bytes
-- UEFI HTTP boot in QEMU works: OVMF downloads the UKI and systemd comes up
-  from the initramfs. The full `make test` is running.
-- `/var` is no longer `nosuid` (a `var.mount.d` drop-in keeps `nodev`, 50% size
-  and 1M inodes), so setuid works in containers under `/var/lib/machines`.
-  `make test` asserts it.
 
 ## For debootstrap
 
