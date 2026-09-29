@@ -155,7 +155,7 @@ class VM:
         for _ in range(60):
             self.send("echo @@READY@@\n")
             try:
-                self.console.expect(r"^@@READY@@$", 5)
+                self.console.expect(r"@@READY@@$", 5)
                 break
             except Timeout:
                 continue
@@ -169,8 +169,8 @@ class VM:
         self.n += 1
         n = self.n
         self.send(f"echo @@B{n}@@; ( {cmd} ) 2>&1; echo @@E{n}:$?@@\n")
-        self.console.expect(rf"^@@B{n}@@$", timeout)
-        m, output = self.console.expect(rf"^@@E{n}:(\d+)@@$", timeout)
+        self.console.expect(rf"@@B{n}@@$", timeout)
+        m, output = self.console.expect(rf"@@E{n}:(\d+)@@$", timeout)
         rc = int(m[1])
         output = output.strip("\n")
         if check_rc and rc != 0:
