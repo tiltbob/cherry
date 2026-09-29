@@ -1,0 +1,98 @@
+# Cherry kernel configuration, applied on top of arch/x86/configs/x86_64_defconfig.
+# check-kconfig.sh fails the build if any line below does not survive into the
+# final .config, so only list symbols that are valid for this kernel version.
+
+# x86_64_defconfig turns this on; it would make toolchain upgrades fragile.
+# CONFIG_WERROR is not set
+
+# Direct UEFI boot of a UKI, no initramfs. The built-in command line holds the
+# slot-independent options plus a slot-A safety root=. It must never contain
+# rauc.slot=: RAUC uses the first match, and each UKI appends its own.
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFIVAR_FS=y
+CONFIG_EFI_PARTITION=y
+CONFIG_CMDLINE_BOOL=y
+CONFIG_CMDLINE="root=PARTLABEL=cherry-root-a rootfstype=squashfs ro rootwait=30 panic=10 init=/usr/lib/cherry/init systemd.gpt_auto=0 console=tty0 console=ttyS0,115200"
+# CONFIG_CMDLINE_OVERRIDE is not set
+CONFIG_PANIC_TIMEOUT=10
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+# Everything needed to reach the root filesystem is built in.
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_SCSI_VIRTIO=y
+CONFIG_BLK_DEV_NVME=y
+CONFIG_ATA=y
+CONFIG_SATA_AHCI=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_STORAGE=y
+
+# Network interfaces commonly found on servers and VMs.
+CONFIG_VIRTIO_NET=y
+CONFIG_E1000E=y
+CONFIG_IGB=y
+CONFIG_R8169=y
+
+# Filesystems: squashfs slots, ext4 /var, vfat ESPs, overlayfs /etc.
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_SQUASHFS_ZLIB=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_OVERLAY_FS=y
+CONFIG_AUTOFS_FS=y
+
+# RAUC: verity bundles (dm-verity over a loop-mounted squashfs) and streaming.
+CONFIG_MD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_BLK_DEV_NBD=y
+
+# systemd and systemd-nspawn: namespaces, cgroup v2 controllers, BPF device policy.
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CFS_BANDWIDTH=y
+CONFIG_PSI=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUP_BPF=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_DMI_SYSFS=y
+
+# Container networking.
+CONFIG_VETH=y
+CONFIG_BRIDGE=y
+CONFIG_MACVLAN=y
+CONFIG_IPVLAN=y
+CONFIG_TUN=y
+
+# nftables, as used by systemd-networkd IPMasquerade= for nspawn veth/zones.
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_FIB_INET=y
+CONFIG_NFT_FIB_IPV4=y
+CONFIG_NFT_FIB_IPV6=y
+
+# Watchdog (i6300esb is QEMU's) for systemd RuntimeWatchdogSec, and entropy.
+CONFIG_WATCHDOG=y
+CONFIG_I6300ESB_WDT=y
+CONFIG_HW_RANDOM=y
+CONFIG_HW_RANDOM_VIRTIO=y

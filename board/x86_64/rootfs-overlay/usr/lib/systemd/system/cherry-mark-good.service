@@ -1,0 +1,23 @@
+# Promote the booted slot once boot-complete.target is reached, i.e. after
+# cherry-health.service and systemd-boot-check-no-failures.service succeeded.
+# For RAUC's efi backend this moves the slot's entry to the front of BootOrder.
+[Unit]
+Description=Cherry: mark the booted slot good
+# Default dependencies would order this after multi-user.target's
+# dependencies and create a cycle with systemd-boot-check-no-failures.service.
+DefaultDependencies=no
+Requires=boot-complete.target
+After=local-fs.target boot-complete.target rauc.service cherry-efi-entries.service
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecCondition=/usr/lib/cherry/need-mark-good
+ExecStart=/usr/bin/rauc status mark-good
+ExecStartPost=/usr/bin/rm -f /var/lib/cherry/redirected
+
+[Install]
+WantedBy=multi-user.target

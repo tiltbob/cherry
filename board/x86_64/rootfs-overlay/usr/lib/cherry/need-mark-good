@@ -1,0 +1,17 @@
+#!/bin/sh
+# ExecCondition for cherry-mark-good.service: exit 1 (skip) when the booted slot
+# is already first in BootOrder and no BootNext is pending, to avoid rewriting
+# NVRAM on every boot.
+set -eu
+. /usr/lib/cherry/lib.sh
+
+slot=$(cmdline_slot) || exit 0
+efi_refresh
+n=$(efi_nums "cherry-$slot" | head -n 1)
+[ -n "$n" ] || exit 0
+set -- $(efi_bootorder)
+if [ "${1:-}" = "$n" ] && [ -z "$(efi_bootnext)" ]; then
+	echo "cherry-$slot (Boot$n) is already the confirmed default"
+	exit 1
+fi
+exit 0

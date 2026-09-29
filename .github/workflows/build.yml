@@ -1,0 +1,88 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          large-packages: false
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe provides the image version
+
+      - name: Check out Buildroot
+        run: git submodule update --init --depth 1 buildroot
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential file cpio unzip rsync bc wget git python3 libncurses-dev \
+            qemu-system-x86 qemu-utils ovmf zstd
+
+      - name: Restore download cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: dl-${{ hashFiles('.gitmodules', 'configs/*', 'board/*/linux.fragment') }}-${{ github.sha }}
+          restore-keys: dl-
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
+          restore-keys: ccache-
+
+      - name: Generate ephemeral signing keys
+        run: make keys
+
+      - name: Build
+        run: make
+
+      - name: Save download cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: dl-${{ hashFiles('.gitmodules', 'configs/*', 'board/*/linux.fragment') }}-${{ github.sha }}
+
+      - name: Save ccache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke test
+        run: make test
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          images=output/cherry_x86_64/images
+          if [ -f $images/disk.img ]; then zstd -q -T0 $images/disk.img -o artifacts/cherry-x86_64-disk.img.zst; fi
+          if [ -f $images/cherry-x86_64.raucb ]; then cp $images/cherry-x86_64.raucb artifacts/; fi
+          if [ -f output/cherry_x86_64/test/serial.log ]; then cp output/cherry_x86_64/test/serial.log artifacts/; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cherry-x86_64
+          path: artifacts/
+          retention-days: 14

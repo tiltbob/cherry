@@ -1,0 +1,8 @@
+# DHCP on physical Ethernet links. Container links (ve-*, vz-*) are handled by
+# systemd's 80-container-*.network (DHCP server + IP masquerading).
+[Match]
+Type=ether
+Kind=!*
+
+[Network]
+DHCP=yes

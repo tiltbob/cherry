@@ -1,0 +1,10 @@
+# Sorts before systemd's 90-systemd.preset; the first match wins.
+enable cherry-efi-entries.service
+enable cherry-health.service
+enable cherry-mark-good.service
+enable cherry-trial-deadline.timer
+enable systemd-boot-check-no-failures.service
+# Nothing may pull in network-online.target on a container host without links.
+disable systemd-networkd-wait-online.service
+# The ESPs are RAUC slots; systemd-boot is not used.
+disable systemd-boot-update.service

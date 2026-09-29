@@ -1,0 +1,49 @@
+#!/bin/sh
+# Health gate for boot-complete.target: RAUC only marks this boot good (and
+# keeps it as the default) if everything the design relies on holds.
+set -eu
+. /usr/lib/cherry/lib.sh
+
+fail() {
+	echo "cherry-health: $*" >&2
+	exit 1
+}
+
+slot=$(cmdline_slot) || fail "the kernel command line must name exactly one rauc.slot=cherry-a|b: $(cat /proc/cmdline)"
+
+root=$(root_partname)
+[ "$root" = "cherry-root-$slot" ] || fail "/ is on $root, expected cherry-root-$slot"
+
+[ "$(fstype_of /var)" = ext4 ] || fail "/var is not the persistent ext4 partition (it is $(fstype_of /var))"
+[ "$(fstype_of /etc)" = overlay ] || fail "/etc is not the writable overlay"
+
+for f in /etc/rauc/system.conf /run/rauc/system.conf; do
+	[ ! -e "$f" ] || fail "$f overrides /usr/lib/rauc/system.conf"
+done
+
+# The kernel must come from the same slot as the root filesystem. They only
+# disagree after a removable-media fallback boot from the other slot's ESP.
+esp=$(stub_esp_partuuid)
+[ -n "$esp" ] || fail "systemd-stub did not report the ESP it was loaded from"
+want=$(part_uuid "$(part_by_name "cherry-efi-$slot")")
+if [ "$esp" != "$want" ]; then
+	own=
+	for s in $CHERRY_SLOTS; do
+		p=$(part_by_name "cherry-efi-$s") || continue
+		[ "$(part_uuid "$p")" = "$esp" ] && own=$s
+	done
+	marker=/var/lib/cherry/redirected
+	if [ -n "$own" ] && [ ! -e "$marker" ]; then
+		efi_refresh
+		n=$(efi_nums "cherry-$own" | head -n 1)
+		if [ -n "$n" ]; then
+			touch "$marker"
+			echo "cherry-health: kernel from slot $own, rootfs from slot $slot: rebooting into cherry-$own once" >&2
+			efibootmgr -q -n "$n"
+			systemctl --no-block reboot
+		fi
+	fi
+	fail "kernel was loaded from the ESP of slot ${own:-?} ($esp) but / is slot $slot"
+fi
+
+echo "cherry-health: slot $slot is consistent and healthy"

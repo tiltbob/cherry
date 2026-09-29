@@ -1,0 +1,17 @@
+# Replaces Buildroot's tmpfs var.mount (installed by post-fakeroot.sh).
+# /usr/lib/cherry/init mounts the cherry-data partition on /var before systemd
+# starts; systemd adopts that mount through this unit and grows the filesystem
+# after systemd-repart has grown the partition.
+[Unit]
+Description=Cherry persistent state (/var)
+Documentation=file:/usr/lib/cherry/init
+DefaultDependencies=no
+Before=local-fs.target
+
+[Mount]
+What=/dev/disk/by-partlabel/cherry-data
+Where=/var
+Type=ext4
+# x-initrd.mount: never unmounted by units at shutdown (the /etc overlay's
+# upper layer lives here), systemd-shutdown handles it last.
+Options=noatime,x-initrd.mount

@@ -1,0 +1,14 @@
+[Unit]
+Description=Cherry: check that this boot is consistent and healthy
+Documentation=file:/usr/lib/cherry/health
+ConditionVirtualization=!container
+After=cherry-efi-entries.service local-fs.target
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/cherry/health
+
+[Install]
+RequiredBy=boot-complete.target

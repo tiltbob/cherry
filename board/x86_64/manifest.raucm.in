@@ -1,0 +1,13 @@
+[update]
+compatible=cherry-x86_64
+version=@VERSION@
+
+[bundle]
+format=verity
+
+# The root filesystem is written first, then the slot's ESP.
+[image.rootfs]
+filename=rootfs.squashfs
+
+[image.efi]
+filename=efi.vfat

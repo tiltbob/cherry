@@ -1,0 +1,78 @@
+#!/bin/sh
+# Cherry pre-init. The kernel runs this as PID 1 (init= on the built-in command
+# line) before systemd, because two things must exist before systemd starts:
+#
+#  - /var: persistent state lives on the cherry-data partition of the boot disk;
+#  - /etc: a writable overlay over the read-only /etc, with its upper layer in
+#    /var/lib/cherry/etc. This lets machinectl enable, .nspawn files, SSH host
+#    keys, network config and /etc/machine-id persist across A/B updates.
+#
+# Keep this minimal: a bug here breaks every boot of the slot. Errors are logged
+# and we always fall through to systemd; cherry-health.service then refuses to
+# mark the boot good.
+
+PATH=/usr/bin
+export PATH
+
+log() {
+	echo "cherry-init: $*" > /dev/kmsg 2>/dev/null || echo "cherry-init: $*"
+}
+
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+
+# Only look at the disk that holds /, so another disk carrying a Cherry image
+# (e.g. a USB stick used for installation) can never provide our /var.
+data=
+root_mm=$(mountpoint -d /)
+root_disk=$(readlink -f "/sys/dev/block/$root_mm/..")
+for uevent in "$root_disk"/*/uevent; do
+	if grep -qx 'PARTNAME=cherry-data' "$uevent" 2>/dev/null; then
+		data=/dev/$(sed -n 's/^DEVNAME=//p' "$uevent")
+		break
+	fi
+done
+
+var_ok=
+if [ -z "$data" ]; then
+	log "no cherry-data partition on ${root_disk##*/}"
+else
+	e2fsck -p "$data"
+	rc=$?
+	if [ "$rc" -ge 4 ]; then
+		log "e2fsck -p $data returned $rc, retrying with -fy"
+		e2fsck -fy "$data"
+		rc=$?
+	fi
+	if [ "$rc" -ge 4 ]; then
+		log "$data is damaged (e2fsck returned $rc), not mounting it"
+	elif mount -t ext4 -o noatime "$data" /var; then
+		var_ok=1
+	else
+		log "mounting $data on /var failed"
+	fi
+fi
+if [ -z "$var_ok" ]; then
+	log "using a volatile /var: nothing will persist"
+	mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /var
+fi
+
+# `touch /var/lib/cherry/factory-reset` and reboot to drop all /etc changes.
+if [ -e /var/lib/cherry/factory-reset ]; then
+	log "factory reset: discarding changes to /etc"
+	rm -rf /var/lib/cherry/etc /var/lib/cherry/factory-reset
+fi
+
+# index/metacopy/redirect_dir/xino stay off: the lower layer is replaced by
+# every update, which overlayfs only supports without these features.
+mkdir -p /var/lib/cherry/etc/upper /var/lib/cherry/etc/work
+if ! mount -t overlay overlay \
+	-o lowerdir=/etc,upperdir=/var/lib/cherry/etc/upper,workdir=/var/lib/cherry/etc/work,index=off,metacopy=off,redirect_dir=off,xino=off \
+	/etc; then
+	log "mounting the /etc overlay failed, /etc is read-only"
+fi
+
+umount /sys
+umount /proc
+
+exec /usr/lib/systemd/systemd "$@"
