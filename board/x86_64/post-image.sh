@@ -1,39 +1,34 @@
 #!/bin/sh
-# Buildroot post-image script: check the kernel configuration, build one UKI
-# per slot, assemble disk.img and the signed RAUC bundle.
+# Buildroot post-image script: check the kernel configuration, then wrap the
+# kernel, an initramfs holding the squashfs root filesystem, and the kernel
+# command line into a single EFI binary (UKI) for UEFI HTTP boot.
 set -eu
 
 BOARD_DIR=$(dirname "$(readlink -f "$0")")
-version=${BR2_EXTERNAL_CHERRY_VERSION#-}
-version=${version:-unknown}
-
 linux_dir=$(ls -d "$BUILD_DIR"/linux-[0-9]* | tail -n 1)
+
 "$BOARD_DIR/check-kconfig.sh" "$BOARD_DIR/linux.fragment" "$linux_dir/.config"
 
-# One UKI per slot, differing only in the embedded command line. The UEFI
-# entries carry no load options, so systemd-stub always uses this one.
-stub="$TARGET_DIR/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
-for s in a b; do
-	rm -f "$BINARIES_DIR/cherry-$s.efi"
-	"$HOST_DIR/bin/python3" "$HOST_DIR/bin/ukify" build \
-		--linux="$BINARIES_DIR/bzImage" \
-		--stub="$stub" \
-		--os-release="@$TARGET_DIR/usr/lib/os-release" \
-		--cmdline="root=PARTLABEL=cherry-root-$s rauc.slot=cherry-$s" \
-		--output="$BINARIES_DIR/cherry-$s.efi"
-done
+# Uncompressed cpio: the squashfs image is already compressed. The kernel's
+# gen_init_cpio creates /dev/console without needing root privileges.
+cat > "$BUILD_DIR/cherry-initramfs.list" <<EOT
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /newroot 0755 0 0
+file /init $BINARIES_DIR/cherry-init 0755 0 0
+file /rootfs.squashfs $BINARIES_DIR/rootfs.squashfs 0444 0 0
+EOT
+"$linux_dir/usr/gen_init_cpio" "$BUILD_DIR/cherry-initramfs.list" > "$BINARIES_DIR/initramfs.cpio"
 
-support/scripts/genimage.sh -c "$BOARD_DIR/genimage.cfg"
-
-bundle_dir="$BUILD_DIR/cherry-bundle"
-bundle="$BINARIES_DIR/cherry-x86_64.raucb"
-rm -rf "$bundle_dir" "$bundle"
-mkdir -p "$bundle_dir"
-cp "$BINARIES_DIR/rootfs.squashfs" "$BINARIES_DIR/efi.vfat" "$bundle_dir/"
-sed "s/@VERSION@/$version/" "$BOARD_DIR/manifest.raucm.in" > "$bundle_dir/manifest.raucm"
-"$HOST_DIR/bin/rauc" bundle \
-	--cert="$CHERRY_RAUC_CERT" \
-	--key="$CHERRY_RAUC_KEY" \
-	--signing-keyring="$CHERRY_RAUC_KEYRING" \
-	"$bundle_dir" "$bundle"
-"$HOST_DIR/bin/rauc" info --keyring="$CHERRY_RAUC_KEYRING" "$bundle"
+efi="$BINARIES_DIR/cherry-x86_64.efi"
+rm -f "$efi"
+"$HOST_DIR/bin/python3" "$HOST_DIR/bin/ukify" build \
+	--linux="$BINARIES_DIR/bzImage" \
+	--initrd="$BINARIES_DIR/initramfs.cpio" \
+	--stub="$TARGET_DIR/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+	--os-release="@$TARGET_DIR/usr/lib/os-release" \
+	--cmdline="console=tty0 console=ttyS0,115200 panic=10" \
+	--output="$efi"
+echo "post-image: $(du -h "$efi" | cut -f1) $efi"

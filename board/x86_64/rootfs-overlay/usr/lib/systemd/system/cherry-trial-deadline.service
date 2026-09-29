@@ -1,9 +1,0 @@
-[Unit]
-Description=Cherry: reboot out of an unhealthy trial boot
-Documentation=file:/usr/lib/cherry/trial-deadline
-ConditionVirtualization=!container
-After=cherry-efi-entries.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/lib/cherry/trial-deadline

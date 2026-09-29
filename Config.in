@@ -1,1 +1,1 @@
-# Cherry has no custom packages yet; add package/*/Config.in sources here.
+source "$BR2_EXTERNAL_CHERRY_PATH/package/cherry-init/Config.in"

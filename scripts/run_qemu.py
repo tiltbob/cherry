@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Boot a Cherry disk image in QEMU (q35 + OVMF).
+"""UEFI HTTP boot of Cherry in QEMU (q35 + OVMF).
 
-The VM state lives in --state: a qcow2 overlay on top of images/disk.img (so
-the build output stays pristine and the disk can be larger than the image, to
-exercise systemd-repart) and a private copy of the OVMF variable store (the
-UEFI boot entries RAUC switches between persist there across runs).
+Serves the images directory over HTTP on the host, writes a fresh OVMF
+variable store whose BootNext is an HTTP boot entry for the EFI binary
+(http://10.0.2.2:<port>/cherry-x86_64.efi, as seen from QEMU's user-mode
+network), and starts QEMU with the serial console on this terminal.
 
-Never add bootindex=/-boot: OVMF would then rewrite BootOrder and prune the
-cherry-a/cherry-b entries. Never add pvpanic: QEMU would exit on a kernel panic
-instead of resetting, which breaks the panic=10 rollback path.
+Cherry keeps no state yet, so every run starts from scratch.
+
+Needs qemu-system-x86_64, OVMF and virt-fw-vars (python3-virt-firmware, or
+`pip install virt-firmware`; set VIRT_FW_VARS to use a specific copy).
+
+Never add pvpanic: QEMU would exit on a kernel panic instead of resetting.
 
 Also used as a module by tests/smoke.py.
 """
 
 import argparse
+import functools
+import http.server
 import os
 import shutil
 import subprocess
 import sys
+import threading
+
+EFI_NAME = "cherry-x86_64.efi"
 
 OVMF_CANDIDATES = [
     # Debian/Ubuntu
@@ -44,34 +52,38 @@ def kvm_usable():
     return os.access("/dev/kvm", os.R_OK | os.W_OK)
 
 
-class State:
-    """Paths of one VM's persistent state."""
+class ImageHandler(http.server.SimpleHTTPRequestHandler):
+    """Static files; EFI binaries are served as application/efi."""
 
-    def __init__(self, images, state_dir):
-        self.images = os.path.abspath(images)
-        self.dir = os.path.abspath(state_dir)
-        self.disk = os.path.join(self.dir, "disk.qcow2")
-        self.vars = os.path.join(self.dir, "OVMF_VARS.fd")
+    extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map, ".efi": "application/efi"}
+    requests = []
 
-    def prepare(self, disk_size="4G", fresh_vars=False):
-        os.makedirs(self.dir, exist_ok=True)
-        image = os.path.join(self.images, "disk.img")
-        if not os.path.exists(image):
-            sys.exit(f"{image} not found; build first")
-        if not os.path.exists(self.disk):
-            subprocess.run(
-                ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b", image, self.disk, disk_size],
-                check=True,
-            )
-        if fresh_vars or not os.path.exists(self.vars):
-            self.reset_vars()
-
-    def reset_vars(self):
-        """Start over with empty NVRAM, as on a new machine."""
-        shutil.copyfile(find_ovmf()[1], self.vars)
+    def log_message(self, fmt, *args):
+        ImageHandler.requests.append(self.path)
 
 
-def qemu_command(state, serial="mon:stdio", ssh_port=None, credentials=(), smbios_strings=(), memory="2048", cpus="2"):
+def serve(directory, port=0):
+    """Serve `directory` on 127.0.0.1 (10.0.2.2 inside the VM)."""
+    handler = functools.partial(ImageHandler, directory=directory)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def boot_url(server, name=EFI_NAME):
+    return f"http://10.0.2.2:{server.server_address[1]}/{name}"
+
+
+def write_vars(path, url):
+    """Fresh UEFI variable store that HTTP boots `url` once (BootNext)."""
+    tool = os.environ.get("VIRT_FW_VARS") or shutil.which("virt-fw-vars")
+    if not tool:
+        sys.exit("virt-fw-vars not found: apt install python3-virt-firmware, or pip install virt-firmware")
+    subprocess.run([tool, "--input", find_ovmf()[1], "--output", path, "--set-boot-uri", url],
+                   check=True, stdout=subprocess.DEVNULL)
+
+
+def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), memory="3072", cpus="2"):
     code, _ = find_ovmf()
     cmd = ["qemu-system-x86_64", "-machine", "q35", "-m", str(memory), "-smp", str(cpus)]
     if kvm_usable():
@@ -80,47 +92,53 @@ def qemu_command(state, serial="mon:stdio", ssh_port=None, credentials=(), smbio
         cmd += ["-accel", "tcg,thread=multi", "-cpu", "max"]
     cmd += [
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={code}",
-        "-drive", f"if=pflash,format=raw,unit=1,file={state.vars}",
-        "-drive", f"if=none,id=disk0,format=qcow2,file={state.disk}",
-        "-device", "virtio-blk-pci,drive=disk0",
+        "-drive", f"if=pflash,format=raw,unit=1,file={vars_path}",
         "-device", "virtio-rng-pci",
         "-device", "i6300esb",
         "-action", "watchdog=reset",
         "-display", "none",
         "-serial", serial,
     ]
+    if not serial.startswith("mon:"):
+        cmd += ["-monitor", "none"]
     netdev = "user,model=virtio-net-pci"
     if ssh_port:
         netdev += f",hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
     cmd += ["-nic", netdev]
-    # SMBIOS type 11 strings: systemd credentials (io.systemd.credential:k=v)
-    # and systemd-stub options (io.systemd.stub.*).
+    # systemd credentials via SMBIOS type 11 strings.
     for key_value in credentials:
         cmd += ["-smbios", f"type=11,value=io.systemd.credential:{key_value}"]
-    for value in smbios_strings:
-        cmd += ["-smbios", f"type=11,value={value}"]
-    if not serial.startswith("mon:"):
-        cmd += ["-monitor", "none"]
     return cmd
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--images", default="output/cherry_x86_64/images")
-    parser.add_argument("--state", default="output/cherry_x86_64/qemu")
-    parser.add_argument("--disk-size", default="4G", help="size of the overlay disk (default: %(default)s)")
-    parser.add_argument("--fresh-vars", action="store_true", help="start with empty UEFI NVRAM")
+    parser.add_argument("--state", default="output/cherry_x86_64/qemu", help="directory for the variable store")
+    parser.add_argument("--port", type=int, default=0, help="HTTP server port (default: any free port)")
     parser.add_argument("--ssh-port", type=int, default=2222, help="host port forwarded to the guest's SSH")
     parser.add_argument("--credential", action="append", default=[], metavar="KEY=VALUE",
-                        help="pass a systemd credential via SMBIOS (repeatable)")
+                        help="pass a systemd credential via SMBIOS, e.g. "
+                             "ssh.authorized_keys.root=\"$(cat ~/.ssh/id_ed25519.pub)\" (repeatable)")
     args = parser.parse_args()
 
-    state = State(args.images, args.state)
-    state.prepare(args.disk_size, args.fresh_vars)
-    cmd = qemu_command(state, ssh_port=args.ssh_port, credentials=args.credential)
+    images = os.path.abspath(args.images)
+    if not os.path.exists(os.path.join(images, EFI_NAME)):
+        sys.exit(f"{os.path.join(images, EFI_NAME)} not found; build first")
+    os.makedirs(args.state, exist_ok=True)
+    vars_path = os.path.join(args.state, "OVMF_VARS.fd")
+
+    server = serve(images, args.port)
+    url = boot_url(server)
+    write_vars(vars_path, url)
+    cmd = qemu_command(vars_path, ssh_port=args.ssh_port, credentials=args.credential)
+    print(f"HTTP boot from {url}", file=sys.stderr)
     print("Serial console on this terminal; Ctrl-A x quits, Ctrl-A c toggles the QEMU monitor.", file=sys.stderr)
     print(" ".join(cmd), file=sys.stderr)
-    os.execvp(cmd[0], cmd)
+    try:
+        sys.exit(subprocess.call(cmd))
+    finally:
+        server.shutdown()
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential file cpio unzip rsync bc wget git python3 libncurses-dev \
-            qemu-system-x86 qemu-utils ovmf zstd
+            qemu-system-x86 ovmf python3-virt-firmware
 
       - name: Restore download cache
         uses: actions/cache/restore@v4
@@ -41,9 +41,6 @@ jobs:
           path: .ccache
           key: ccache-${{ github.run_id }}
           restore-keys: ccache-
-
-      - name: Generate ephemeral signing keys
-        run: make keys
 
       - name: Build
         run: make
@@ -75,10 +72,8 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts
-          images=output/cherry_x86_64/images
-          if [ -f $images/disk.img ]; then zstd -q -T0 $images/disk.img -o artifacts/cherry-x86_64-disk.img.zst; fi
-          if [ -f $images/cherry-x86_64.raucb ]; then cp $images/cherry-x86_64.raucb artifacts/; fi
-          if [ -f output/cherry_x86_64/test/serial.log ]; then cp output/cherry_x86_64/test/serial.log artifacts/; fi
+          cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
+          cp output/cherry_x86_64/test/serial.log artifacts/ || true
 
       - uses: actions/upload-artifact@v4
         if: always()

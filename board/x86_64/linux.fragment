@@ -5,23 +5,20 @@
 # x86_64_defconfig turns this on; it would make toolchain upgrades fragile.
 # CONFIG_WERROR is not set
 
-# Direct UEFI boot of a UKI, no initramfs. The built-in command line holds the
-# slot-independent options plus a slot-A safety root=. It must never contain
-# rauc.slot=: RAUC uses the first match, and each UKI appends its own.
+# Direct UEFI (HTTP) boot of a UKI whose initramfs holds the root filesystem.
+# The kernel command line is embedded in the UKI.
 CONFIG_EFI=y
 CONFIG_EFI_STUB=y
 CONFIG_EFIVAR_FS=y
 CONFIG_EFI_PARTITION=y
-CONFIG_CMDLINE_BOOL=y
-CONFIG_CMDLINE="root=PARTLABEL=cherry-root-a rootfstype=squashfs ro rootwait=30 panic=10 init=/usr/lib/cherry/init systemd.gpt_auto=0 console=tty0 console=ttyS0,115200"
-# CONFIG_CMDLINE_OVERRIDE is not set
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_BLK_DEV_LOOP=y
 CONFIG_PANIC_TIMEOUT=10
 CONFIG_DEVTMPFS=y
-CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_IKCONFIG=y
 CONFIG_IKCONFIG_PROC=y
 
-# Everything needed to reach the root filesystem is built in.
+# Local storage, for containers on disks later.
 CONFIG_VIRTIO_PCI=y
 CONFIG_VIRTIO_BLK=y
 CONFIG_SCSI_VIRTIO=y
@@ -37,24 +34,15 @@ CONFIG_E1000E=y
 CONFIG_IGB=y
 CONFIG_R8169=y
 
-# Filesystems: squashfs slots, ext4 /var, vfat ESPs, overlayfs /etc.
+# Filesystems: squashfs root, tmpfs /var, overlayfs for containers.
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_ZSTD=y
-CONFIG_SQUASHFS_ZLIB=y
 CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 CONFIG_OVERLAY_FS=y
 CONFIG_AUTOFS_FS=y
-
-# RAUC: verity bundles (dm-verity over a loop-mounted squashfs) and streaming.
-CONFIG_MD=y
-CONFIG_BLK_DEV_DM=y
-CONFIG_DM_VERITY=y
-CONFIG_CRYPTO_SHA256=y
-CONFIG_BLK_DEV_LOOP=y
-CONFIG_BLK_DEV_NBD=y
 
 # systemd and systemd-nspawn: namespaces, cgroup v2 controllers, BPF device policy.
 CONFIG_NAMESPACES=y
