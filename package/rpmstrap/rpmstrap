@@ -3,7 +3,7 @@
 # rpmstrap: install an RPM-based distribution into a directory with dnf5,
 # for systemd-nspawn, e.g.
 #
-#   rpmstrap fedora 43 /var/lib/machines/fedora
+#   rpmstrap fedora 44 /var/lib/machines/fedora
 #
 # Each distribution is a profile directory in /usr/share/rpmstrap: its
 # *.repo files, and a "profile" file sourced by this script, which sets:
@@ -25,7 +25,7 @@ usage() {
 Usage: rpmstrap [-h|-l] <distro> <release> <directory> [package|dnf5-option]...
 
 Installs <release> of <distro> into <directory> with dnf5, e.g.
-  rpmstrap fedora 43 /var/lib/machines/fedora
+  rpmstrap fedora 44 /var/lib/machines/fedora
 
   <distro>       a profile in $profiles (see -l), or a path to a
                  profile directory of your own
