@@ -276,8 +276,9 @@ class Smoke:
     def s4_debootstrap(self):
         vm = self.vm
         mirror = "http://deb.debian.org/debian"
-        rc, out = vm.run(f"wget -q -T 15 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease", timeout=60,
-                         check_rc=False)
+        # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
+        rc, out = vm.run(f"for i in $(seq 12); do wget -q -T 10 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease "
+                         "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1", timeout=240, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {mirror}: {out}")
             return
