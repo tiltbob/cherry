@@ -62,6 +62,10 @@ CONFIG_TMPFS_XATTR=y
 CONFIG_TMPFS_POSIX_ACL=y
 CONFIG_DMI_SYSFS=y
 
+# Landlock: pacman 7 inside Arch containers sandboxes downloads with it
+# (DownloadUser=alpm); CONFIG_LSM already lists landlock.
+CONFIG_SECURITY_LANDLOCK=y
+
 # Container networking.
 CONFIG_VETH=y
 CONFIG_BRIDGE=y
