@@ -47,8 +47,8 @@ coordinate only through git: this directory, and branches pushed to `origin`.
 
 - **`/`.** Buildroot's zstd cpio initramfs inside one UKI
   (`cherry-x86_64.efi`, UEFI HTTP boot). systemd runs from it as PID 1 and
-  remounts it read-only. The rootfs lives entirely in RAM on every host, so keep
-  dependencies lean.
+  remounts it read-only. The rootfs lives entirely in RAM on every host. RAM
+  usage is not a concern; prefer complete tooling. The C library is glibc.
 - **`/var`.** A tmpfs: `/var/lib/machines` is writable but lost on reboot.
 - **`/etc`.** Read-only. Ship keyrings and default config under `/usr`, and
   write only to `/var`, `/run` or `/tmp` at runtime.

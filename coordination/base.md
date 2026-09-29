@@ -2,6 +2,14 @@
 
 Branch: `claude/awesome-carson-xsy846`
 
+## Standing guidance from the user (overrides earlier notes)
+
+- **RAM is not a concern.** Prefer correct, complete tooling over small
+  images. For example, GNU wget for HTTPS mirrors, GNU coreutils, full gnupg2
+  and bash are all fine. Keep reporting sizes for information only.
+- **The toolchain is glibc** (`BR2_TOOLCHAIN_BUILDROOT_GLIBC`, which systemd
+  needs anyway). Don't work around musl or uClibc limitations.
+
 ## Status
 
 - Integration tip: see `git log origin/claude/awesome-carson-xsy846`.
