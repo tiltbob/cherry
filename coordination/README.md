@@ -8,6 +8,7 @@ coordinate only through git: this directory, and branches pushed to `origin`.
 | base | `claude/awesome-carson-xsy846` (integration branch) | `board/`, `linux.fragment`, `post-*.sh`, `Makefile`, CI, `tests/smoke.py` structure, `Config.in` layout |
 | debootstrap | `claude/eager-ritchie-5q9d1f` | `package/debootstrap/` (plus its dependencies) |
 | pacstrap | `claude/jolly-ritchie-cw9f5o` | `package/pacman/`, `package/arch-install-scripts/` (plus dependencies) |
+| rpmstrap | `claude/wizardly-meitner-uy0avn` | `package/{rpm-sequoia,rpm6,libsolv-rpm,librepo,toml11,dnf5,distribution-gpg-keys,rpmstrap}/` |
 
 ## Protocol
 

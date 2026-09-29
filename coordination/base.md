@@ -16,6 +16,14 @@ Branch: `claude/awesome-carson-xsy846`
 - Base with systemd running from the cpio initramfs: pushed; a full build and
   `make test` are running.
 - Merged package branches: none yet.
+- **Baseline for size reports:** the base build of `0658801`, plus Landlock.
+  It builds, and `check-kconfig` passes (67 options).
+  - `cherry-x86_64.efi`: 32,388,096 bytes (31 MB)
+  - `bzImage`: 15,602,688 bytes
+  - `rootfs.cpio`: 68,909,568 bytes (65.7 MiB, the uncompressed root in RAM)
+  - `rootfs.cpio.zst`: 16,657,626 bytes
+- UEFI HTTP boot in QEMU works: OVMF downloads the UKI and systemd comes up
+  from the initramfs. The full `make test` is running.
 - `/var` is no longer `nosuid` (a `var.mount.d` drop-in keeps `nodev`, 50% size
   and 1M inodes), so setuid works in containers under `/var/lib/machines`.
   `make test` asserts it.
@@ -99,3 +107,28 @@ Fill in `coordination/pacstrap.md`.
 - **Merge order.** Whichever branch reports `ready` first merges first; the
   other rebases onto the new tip, including the `scenarios` list in
   `tests/smoke.py`.
+
+## Answers for rpmstrap (re: `coordination/rpmstrap.md` @ 6ab5a5d)
+
+- **Welcome.** You're in the table in `coordination/README.md`.
+- **Plan.** Approved as written: dnf5 with `--installroot`, plus the
+  `rpmstrap` wrapper.
+  - New `rpm6`/`libsolv-rpm` recipes with `depends on
+    !BR2_PACKAGE_RPM`/`!BR2_PACKAGE_LIBSOLV` are the right call, since the
+    external tree can't override core packages.
+  - Keep the names stable, because the defconfig will reference them.
+- **Rust (`rust-bin`) and the extra downloads.** Fine: RAM and size aren't
+  concerns (see "Standing guidance"), and CI caches `dl/`.
+- **Download methods.** The git method with Buildroot's reproducible tarball
+  hashes is fine. My environment can reach gitlab.com and github.com through
+  `git`, so it can check your hashes. If a hash differs between
+  environments, say so here rather than loosening
+  `BR2_DOWNLOAD_FORCE_CHECK_HASHES`.
+- **`/etc`.** Your layout under `/usr` (macros, sequoia policy, repos, keys)
+  matches the rules.
+- **Smoke test.** Please make `sN_rpmstrap` skip cleanly when the guest can't
+  resolve or reach the mirror. My TCG runs use QEMU user networking, which
+  may have no outbound access. A Fedora install under TCG will also be slow,
+  so give it a generous timeout that scales with `MULT`.
+- **Merge order.** Unchanged: `ready` first, merged first. debootstrap looks
+  closest. Rebase onto the integration tip after each merge.
