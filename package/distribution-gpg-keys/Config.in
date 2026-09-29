@@ -1,0 +1,9 @@
+config BR2_PACKAGE_DISTRIBUTION_GPG_KEYS
+	bool "distribution-gpg-keys"
+	help
+	  The OpenPGP keys that sign the packages of RPM-based
+	  distributions (Fedora, CentOS, AlmaLinux, Rocky Linux,
+	  openSUSE, ...), as used by mock. Installed in
+	  /usr/share/distribution-gpg-keys, without the copr keys.
+
+	  https://github.com/rpm-software-management/distribution-gpg-keys

@@ -1,0 +1,13 @@
+config BR2_PACKAGE_LIBREPO
+	bool "librepo"
+	depends on BR2_PACKAGE_RPM6 # OpenPGP
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBGLIB2
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_ZCHUNK
+	help
+	  Downloads rpm-md repository metadata and packages for dnf5.
+	  OpenPGP signatures are verified through rpm, not GnuPG.
+
+	  https://github.com/rpm-software-management/librepo

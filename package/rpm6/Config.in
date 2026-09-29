@@ -1,0 +1,42 @@
+config BR2_PACKAGE_RPM6
+	bool "rpm6"
+	depends on !BR2_PACKAGE_RPM # same files
+	depends on BR2_INSTALL_LIBSTDCPP # C++20
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_11 # C++20
+	depends on !BR2_STATIC_LIBS # plugins
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_USE_MMU # fork()
+	depends on BR2_USE_WCHAR # libarchive
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS # rpm-sequoia
+	depends on BR2_PACKAGE_LUA && !BR2_PACKAGE_LUA_5_1
+	select BR2_PACKAGE_BZIP2
+	select BR2_PACKAGE_FILE # libmagic
+	select BR2_PACKAGE_LIBARCHIVE
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_POPT
+	select BR2_PACKAGE_RPM_SEQUOIA
+	select BR2_PACKAGE_SQLITE
+	select BR2_PACKAGE_XZ
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_ZSTD
+	help
+	  The RPM Package Manager, version 6. Buildroot's rpm package
+	  is 4.18, which is too old for dnf5 and for current
+	  distributions, whose packages rely on rpm creating their
+	  sysusers.d users.
+
+	  Signatures are verified by rpm-sequoia. The rpmdb backends
+	  are sqlite (the default) and ndb.
+
+	  Installing packages that declare sysusers.d users runs
+	  /usr/lib/rpm/sysusers.sh, which needs bash and useradd,
+	  groupadd and usermod (e.g. from shadow-useradd).
+
+	  https://rpm.org/
+
+comment "rpm6 needs a toolchain w/ C++, wchar, threads, dynamic library, gcc >= 11, and lua >= 5.3"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_USE_MMU
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_GCC_AT_LEAST_11 || \
+		BR2_STATIC_LIBS || !BR2_TOOLCHAIN_HAS_THREADS || \
+		!BR2_USE_WCHAR || !BR2_PACKAGE_LUA || BR2_PACKAGE_LUA_5_1

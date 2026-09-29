@@ -1,0 +1,31 @@
+config BR2_PACKAGE_RPMSTRAP
+	bool "rpmstrap"
+	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # bash
+	depends on BR2_TOOLCHAIN_HEADERS_AT_LEAST_4_14 # shadow-useradd
+	depends on !BR2_PACKAGE_LIBSOLV # dnf5
+	depends on !BR2_PACKAGE_RPM # dnf5
+	depends on BR2_INSTALL_LIBSTDCPP # dnf5
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_11 # dnf5
+	depends on !BR2_STATIC_LIBS # dnf5
+	depends on BR2_TOOLCHAIN_HAS_THREADS # dnf5
+	depends on BR2_USE_MMU # dnf5, bash
+	depends on BR2_USE_WCHAR # dnf5
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS # dnf5
+	depends on BR2_PACKAGE_LUA && !BR2_PACKAGE_LUA_5_1 # dnf5
+	select BR2_PACKAGE_BASH
+	select BR2_PACKAGE_DISTRIBUTION_GPG_KEYS
+	select BR2_PACKAGE_DNF5
+	select BR2_PACKAGE_SHADOW_USERADD if !BR2_PACKAGE_SHADOW # rpm6: sysusers.sh
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_MOUNT
+	select BR2_PACKAGE_UTIL_LINUX_UNSHARE
+	help
+	  Bootstrap an RPM-based distribution (Fedora, CentOS Stream,
+	  AlmaLinux, Rocky Linux) into a directory, e.g.
+	  /var/lib/machines/<name> for systemd-nspawn:
+
+	    rpmstrap fedora 44 /var/lib/machines/fedora
+
+	  A wrapper around dnf5 --installroot, with the repositories
+	  of each distribution in /usr/share/rpmstrap and their keys
+	  from distribution-gpg-keys.

@@ -9,6 +9,8 @@
   3. a second boot starts from scratch again (nothing persists)
   4. debootstrap installs Debian into /var/lib/machines and the container boots
      (skipped when the guest cannot reach deb.debian.org)
+  5. rpmstrap installs Fedora into /var/lib/machines and the container boots
+     (skipped when the guest cannot reach mirrors.fedoraproject.org)
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -302,8 +304,37 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
+    def s5_rpmstrap(self):
+        vm = self.vm
+        host = "mirrors.fedoraproject.org"
+        # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
+        rc, out = vm.run(f"for i in $(seq 12); do timeout 10 bash -c 'exec 3<>/dev/tcp/{host}/443' && exit 0; "
+                         f"sleep 5; done; resolvectl query {host}; exit 1", timeout=240, check_rc=False)
+        if rc != 0:
+            log(f"skipped: the guest cannot reach {host}: {out}")
+            return
+        root = "/var/lib/machines/fedora"
+        vm.run(f"rpmstrap fedora 44 {root} >/tmp/rpmstrap.log 2>&1 || {{ tail -n 40 /tmp/rpmstrap.log; exit 1; }}",
+               timeout=1800)
+        check("VERSION_ID=44" in vm.run(f"cat {root}/etc/os-release"), "rpmstrap did not install Fedora 44")
+        vm.run("machinectl start fedora")
+        # As for Debian: wait for the container's boot in the host journal.
+        vm.run("for i in $(seq 120); do journalctl -u systemd-nspawn@fedora --no-pager "
+               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "journalctl -u systemd-nspawn@fedora --no-pager | tail -n 40; exit 1", timeout=300)
+        rc, state = vm.run("systemctl -M fedora is-system-running", check_rc=False)
+        check(state in ("running", "degraded"), f"the Fedora container is {state!r}")
+        if state != "running":
+            log("the Fedora container is degraded:\n" + vm.run("systemctl -M fedora --failed --no-legend --plain"))
+        # The container's own rpm finds the database that the host's rpm wrote.
+        vm.run("systemd-run -M fedora --wait -q -P rpm -q fedora-release systemd dnf5")
+        vm.run("machinectl terminate fedora; for i in $(seq 30); do machinectl show fedora >/dev/null 2>&1 || exit 0; "
+               "sleep 1; done; exit 1", timeout=60)
+        vm.run(f"rm -rf {root}")
+
     def run(self):
-        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap]
+        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
+                     self.s5_rpmstrap]
         try:
             for i, scenario in enumerate(scenarios, 1):
                 name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")

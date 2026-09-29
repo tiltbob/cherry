@@ -1,0 +1,16 @@
+config BR2_PACKAGE_SHADOW_USERADD
+	bool "shadow-useradd"
+	depends on !BR2_PACKAGE_SHADOW # same files
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_TOOLCHAIN_HEADERS_AT_LEAST_4_14
+	select BR2_PACKAGE_LIBXCRYPT if BR2_TOOLCHAIN_USES_GLIBC
+	help
+	  useradd, groupadd and usermod from shadow, without the rest
+	  of the suite (login, passwd, ...), which would replace
+	  BusyBox's.
+
+	  rpm's sysusers.sh runs them with --root to create the
+	  sysusers.d users and groups of packages it installs into
+	  another root.
+
+	  https://github.com/shadow-maint/shadow
