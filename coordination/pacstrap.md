@@ -1,43 +1,88 @@
 # pacstrap: status
 
-Branch: `claude/jolly-ritchie-cw9f5o`, on `f0f7ef4`. I'll rebase onto `aa177e0`
-once the build running here finishes.
+Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `aa177e0`.
 
 ## Status
 
-**Not ready yet.**
+**Not ready yet. pacstrap works end to end from the Buildroot-built tools.**
+Still running here:
+- a clean build on `aa177e0` (C++ toolchain, Landlock kernel)
+- `make test` plus a proxied `s4_pacstrap` in QEMU under TCG. QEMU and OVMF
+  are installed in this environment.
+- a WKD key-fetch test
 
-- The baseline `f0f7ef4` build is done: `cherry-x86_64.efi` is 32,188,416
-  bytes and `rootfs.cpio` is 68,329,472 bytes.
-- The recipes are now wired in: three `source` lines in `Config.in`, and
-  `BR2_PACKAGE_PACMAN=y` plus `BR2_PACKAGE_ARCH_INSTALL_SCRIPTS=y` in the
-  defconfig via `savedefconfig`.
-- An incremental build on top of the baseline is running, to measure the size
-  delta. My packages are all C, so base's C++ toolchain doesn't affect it.
-- QEMU and OVMF are installed in this environment. `make test` and a proxied
-  `s4_pacstrap` run follow, reporting `pacman-init` timing under TCG. Then
-  comes a clean rebuild on the integration tip.
+I'll set `ready` with the sha after those pass.
 
-Changes since `f83a8b2`, following base's answers:
-- **`pacman-init.service`** uses `DefaultDependencies=no`, ordered after
-  `sysinit.target` and `time-sync.target`. Without that, a target orders
-  itself after everything it `Wants=`, so `multi-user.target` would have
-  waited for it. It's offline and idempotent. The README will tell pacstrap
-  users to run `systemctl start pacman-init` first.
-- **pacman now selects `BR2_PACKAGE_GNUTLS`.** When a package is signed by an
-  unknown key, pacman fetches that key through gpgme, via WKD and then a
-  keyserver. Both lookups go through gnupg2's dirmngr, which Buildroot builds
-  without TLS unless gnutls is enabled. With gnutls, a packager key newer than
-  the image's keyring is fetched and validated through the lsigned master
-  keys, as on Arch. Without it, pacstrap fails until the image is rebuilt.
-- **Landlock.** Confirmed off in the `f0f7ef4` kernel (`# CONFIG_SECURITY_LANDLOCK
-  is not set`, while `CONFIG_LSM` already lists landlock). Thanks for adding
-  it. `s4_pacstrap` will run the container's own `pacman -Sy` under
-  systemd-nspawn, to check that nspawn's seccomp filter lets the Landlock
-  syscalls through.
-- **Host users.** None needed. The Cherry `pacman.conf` sets no
-  `DownloadUser`, and pacstrap comments it out and passes `--disable-sandbox`
-  anyway.
+- **Chroot run.** I ran pacstrap from a chroot of the Buildroot target
+  (`f0f7ef4` + this branch), with a `nodev` tmpfs `/var`, through this
+  sandbox's TLS-intercepting proxy.
+  - `pacman-key --init` took 1 s and `--populate archlinux` took 4 s,
+    leaving 183 keys and 38 revoked keys disabled.
+  - `pacstrap -K -c /var/lib/machines/arch base` installed 137 packages in
+    26 s. The tree is 594 MB, plus a 123 MB host package cache.
+  - `newuidmap` keeps `cap_setuid=ep`, so libarchive's xattr support (via
+    attr) works.
+  - The container gets its own 183-key keyring and its own master key
+    (`-K`).
+  - Warnings, both harmless: pacman's "directory permissions differ on
+    `<root>/run/`", and systemd's "Current root is not booted" from hooks
+    running in a chroot.
+- **Found while building.** GnuPG 2.5 **does not build dirmngr at all**
+  without a TLS library (config.log: "Neither NTBTLS nor GNUTLS available -
+  not building dirmngr"). The gnutls select is therefore what lets pacman
+  fetch any key over the network.
+- **Kernel options needed:** none beyond Landlock, which base already added.
+
+## Size report (agreed format)
+
+My baseline is my own `f0f7ef4` build, and the delta is an incremental build of
+this branch on it. My packages are all C, so the C++ toolchain doesn't change
+them. I'll add absolute numbers from the clean `aa177e0` build once base posts
+its base+C++ numbers.
+
+| | base (`f0f7ef4`) | + pacstrap | delta |
+|---|---:|---:|---:|
+| `cherry-x86_64.efi` | 32,188,416 | 40,810,496 | +8,622,080 (+8.2 MiB) |
+| `rootfs.cpio` (root in RAM) | 68,329,472 | 91,559,424 | +23,229,952 (+22.2 MiB) |
+
+The table below lists bytes of new files in the final target, from
+`build/packages-file-list.txt`, grouped by why each package is pulled in:
+
+| why | package | bytes |
+|---|---|---:|
+| the tools | pacman | 596,555 |
+| | arch-install-scripts | 17,481 |
+| | archlinux-keyring | 1,813,286 |
+| OpenPGP (gpgme runs gpg) | gnupg2 | 5,850,340 |
+| | libgcrypt | 1,831,486 |
+| | libgpgme | 595,680 |
+| | libksba | 283,379 |
+| | libgpg-error | 233,845 |
+| | libassuan | 84,092 |
+| | libnpth | 26,504 |
+| TLS for dirmngr (WKD) | libunistring | 2,054,162 |
+| | gnutls | 1,955,336 |
+| | nettle | 747,518 |
+| | gmp | 522,200 |
+| | libtasn1 | 88,026 |
+| packages (`.pkg.tar.zst`, xattrs) | zstd | 920,598 |
+| | libarchive | 821,136 |
+| | xz | 277,079 |
+| | attr | 41,455 |
+| downloads | libcurl | 711,909 |
+| pacman-key, pacstrap (bash) | bash | 997,584 |
+| | ncurses | 531,954 |
+| | readline | 436,150 |
+| `cp --no-preserve` | coreutils | 1,514,307 |
+| `unshare` | util-linux (delta) | 97,440 |
+| | **total** | **23,049,502** |
+
+Once debootstrap is merged, the gnupg2 stack, gnutls (its wget then uses
+gnutls), zstd and openssl are shared.
+
+If size ever matters: gnupg2's gpgsm, scdaemon, gpg-wks-*, gpgscm,
+gpgme-tool/json and kbxutil could be removed after install. That isn't done,
+per the standing guidance.
 
 ## What this branch adds (paths are final, contents are WIP)
 
@@ -60,9 +105,20 @@ Changes since `f83a8b2`, following base's answers:
 - **`package/archlinux-keyring/`:** 20260909. The GitLab release tarball
   already contains `archlinux.gpg`, `-trusted` and `-revoked`, so no
   `sq`/keyringctl is needed. It installs to `/usr/share/pacman/keyrings`.
-- Config and defconfig changes will come after the size measurement: three
-  sorted `source` lines, plus `BR2_PACKAGE_PACMAN=y` and
-  `BR2_PACKAGE_ARCH_INSTALL_SCRIPTS=y`.
+- **`Config.in`:** three sorted `source` lines.
+- **Defconfig:** `BR2_PACKAGE_PACMAN=y` and `BR2_PACKAGE_ARCH_INSTALL_SCRIPTS=y`,
+  from `savedefconfig`. Everything else comes in through `select`.
+- **`tests/smoke.py`:** `s4_pacstrap`, which:
+  1. requires `pacman-init` to be active with more than 20 keys. This part
+     runs offline.
+  2. probes the mirror with `pacman -Sy` into a temporary dbpath, which
+     honours `https_proxy`, and skips when the mirror is unreachable.
+  3. runs `pacstrap -K -c base` and checks `newuidmap`'s capability.
+  4. runs the container's own `pacman -Sy` under `systemd-nspawn`, which
+     exercises the Landlock download sandbox and nspawn's seccomp filter.
+  5. runs `machinectl start arch` and waits for running or degraded.
+  6. cleans up.
+- **README:** an "Arch Linux containers with pacstrap" subsection.
 
 ## Answers for base (re: `coordination/base.md` @ f0f7ef4)
 
