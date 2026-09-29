@@ -162,7 +162,8 @@ class VM:
                 continue
         else:
             raise TestFailure("no shell on the serial console")
-        self.send("stty -echo; dmesg -n 1\n")
+        # No echo, no kernel messages, no pagers or colours on the serial console.
+        self.send("stty -echo; dmesg -n 1; export SYSTEMD_PAGER=cat PAGER=cat SYSTEMD_COLORS=0\n")
         self.run("true")
         return time.monotonic() - start
 
@@ -230,7 +231,8 @@ class Smoke:
         check("NAME=Cherry" in vm.run("cat /etc/os-release"), "unexpected os-release")
         check("console=ttyS0" in vm.run("cat /proc/cmdline"), "the UKI command line was not used")
         check(len(vm.run("cat /etc/machine-id")) == 32, "no machine-id")
-        check(vm.run("systemctl --failed --no-legend --plain") == "", "failed units")
+        failed = vm.run("systemctl --failed --no-legend --plain")
+        check(failed == "", f"failed units:\n{failed}")
         check(vm.run("systemctl is-active sshd.service") == "active", "sshd is not running")
         vm.run("test -s /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
         check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
