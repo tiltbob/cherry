@@ -1,0 +1,17 @@
+[Unit]
+Description=Initialize the pacman keyring
+Documentation=man:pacman-key(8)
+# /etc/pacman.d/gnupg is a symlink to /var/lib/pacman/gnupg, a tmpfs for now:
+# the keyring and its local signing key are created at every boot. Both steps
+# are idempotent, so this also refreshes a persistent keyring after an update.
+After=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StateDirectory=pacman/gnupg
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate archlinux
+
+[Install]
+WantedBy=multi-user.target

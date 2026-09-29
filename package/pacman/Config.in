@@ -1,0 +1,26 @@
+config BR2_PACKAGE_PACMAN
+	bool "pacman"
+	depends on BR2_USE_MMU # bash, gnupg2
+	depends on BR2_USE_WCHAR # libarchive
+	depends on !BR2_STATIC_LIBS # gnupg2
+	depends on BR2_TOOLCHAIN_HAS_THREADS # gnupg2
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS # libgpgme
+	select BR2_PACKAGE_ARCHLINUX_KEYRING # pacman-init.service
+	select BR2_PACKAGE_ATTR # libarchive: file capabilities
+	select BR2_PACKAGE_BASH # runtime: pacman-key
+	select BR2_PACKAGE_LIBARCHIVE
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBGPGME # selects gnupg2, run by gpgme
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_ZSTD # libarchive: .pkg.tar.zst
+	select BR2_PACKAGE_XZ # libarchive: .pkg.tar.xz
+	help
+	  The Arch Linux package manager, set up to install packages
+	  from the Arch Linux repositories into another root (pacman
+	  -r, pacstrap), not to manage the host. makepkg and the
+	  repository tools are not installed.
+
+	  /etc/pacman.d/gnupg links to /var/lib/pacman/gnupg, where
+	  pacman-init.service creates the keyring at boot.
+
+	  https://pacman.archlinux.page/

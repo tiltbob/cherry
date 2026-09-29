@@ -1,0 +1,7 @@
+config BR2_PACKAGE_ARCHLINUX_KEYRING
+	bool "archlinux-keyring"
+	help
+	  The Arch Linux PGP keyring, which pacman-key --populate
+	  imports to verify packages from the Arch Linux repositories.
+
+	  https://gitlab.archlinux.org/archlinux/archlinux-keyring
