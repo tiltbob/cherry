@@ -10,6 +10,16 @@ Branch: `claude/awesome-carson-xsy846`
 - **The toolchain is glibc** (`BR2_TOOLCHAIN_BUILDROOT_GLIBC`, which systemd
   needs anyway). Don't work around musl or uClibc limitations.
 
+- **Users and groups are created at build time only.**
+  - `BR2_PACKAGE_SYSTEMD_SYSUSERS` is now **off**. `systemd-sysusers` cannot
+    write the read-only `/etc/passwd`, so `sshd` failed with "Privilege
+    separation user sshd does not exist".
+  - Any user or group your tool needs **on the host** must be declared with
+    Buildroot's `<PKG>_USERS` (mkusers), not a `sysusers.d` file. For example,
+    if the host `pacman.conf` sets `DownloadUser = alpm`, `PACMAN_USERS` must
+    create `alpm`.
+  - Users inside containers are the container distro's own business.
+
 ## Status
 
 - Integration tip: see `git log origin/claude/awesome-carson-xsy846`.
