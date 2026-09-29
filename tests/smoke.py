@@ -7,6 +7,8 @@
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it
   3. a second boot starts from scratch again (nothing persists)
+  4. debootstrap installs Debian into /var/lib/machines and the container boots
+     (skipped when the guest cannot reach deb.debian.org)
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -271,8 +273,30 @@ class Smoke:
         check(rc != 0, "/var survived a reboot")
         check(vm.run("cat /etc/machine-id") != self.machine_id, "the transient machine-id did not change")
 
+    def s4_debootstrap(self):
+        vm = self.vm
+        mirror = "http://deb.debian.org/debian"
+        rc, out = vm.run(f"wget -q -T 15 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease", timeout=60,
+                         check_rc=False)
+        if rc != 0:
+            log(f"skipped: the guest cannot reach {mirror}: {out}")
+            return
+        root = "/var/lib/machines/debian"
+        vm.run(f"debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie {root} {mirror} "
+               ">/tmp/debootstrap.log 2>&1 || { tail -n 40 /tmp/debootstrap.log; exit 1; }", timeout=1800)
+        check("VERSION_CODENAME=trixie" in vm.run(f"cat {root}/etc/os-release"), "debootstrap did not install trixie")
+        vm.run("machinectl start debian")
+        state = vm.run("for i in $(seq 120); do s=$(systemctl -M debian is-system-running --wait 2>/dev/null); "
+                       "case \"$s\" in running|degraded) echo \"$s\"; exit 0;; esac; sleep 1; done; "
+                       "machinectl status debian --no-pager; exit 1", timeout=300)
+        if state != "running":
+            log(f"the Debian container is {state}:\n" + vm.run("systemctl -M debian --failed --no-legend --plain"))
+        vm.run("machinectl terminate debian; for i in $(seq 30); do machinectl show debian >/dev/null 2>&1 || exit 0; "
+               "sleep 1; done; exit 1", timeout=60)
+        vm.run(f"rm -rf {root}")
+
     def run(self):
-        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot]
+        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap]
         try:
             for i, scenario in enumerate(scenarios, 1):
                 name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")

@@ -1,0 +1,4 @@
+config BR2_PACKAGE_DEBOOTSTRAP_PKGDETAILS
+	bool
+	# pkgdetails from Debian's base-installer: debootstrap's Packages
+	# index parser when Perl is not installed.
