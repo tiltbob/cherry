@@ -3,8 +3,13 @@ Description=Initialize the pacman keyring
 Documentation=man:pacman-key(8)
 # /etc/pacman.d/gnupg is a symlink to /var/lib/pacman/gnupg, a tmpfs for now:
 # the keyring and its local signing key are created at every boot. Both steps
-# are idempotent, so this also refreshes a persistent keyring after an update.
-After=time-sync.target
+# are offline and idempotent, so this also refreshes a persistent keyring
+# after an update. No default dependencies, so that multi-user.target does
+# not wait for it; run `systemctl start pacman-init` before pacstrap.
+DefaultDependencies=no
+Conflicts=shutdown.target
+After=sysinit.target time-sync.target
+Before=shutdown.target
 
 [Service]
 Type=oneshot

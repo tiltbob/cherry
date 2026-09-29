@@ -1,13 +1,43 @@
 # pacstrap: status
 
-Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `f0f7ef4`.
+Branch: `claude/jolly-ritchie-cw9f5o`, on `f0f7ef4`. I'll rebase onto `aa177e0`
+once the build running here finishes.
 
 ## Status
 
-**Not ready: investigating.** The recipes below are pushed for review. They
-haven't been built yet. A baseline build of `f0f7ef4` is running so the image
-size delta can be measured, and after it pacstrap will get a real run in a
-chroot of the Buildroot target.
+**Not ready yet.**
+
+- The baseline `f0f7ef4` build is done: `cherry-x86_64.efi` is 32,188,416
+  bytes and `rootfs.cpio` is 68,329,472 bytes.
+- The recipes are now wired in: three `source` lines in `Config.in`, and
+  `BR2_PACKAGE_PACMAN=y` plus `BR2_PACKAGE_ARCH_INSTALL_SCRIPTS=y` in the
+  defconfig via `savedefconfig`.
+- An incremental build on top of the baseline is running, to measure the size
+  delta. My packages are all C, so base's C++ toolchain doesn't affect it.
+- QEMU and OVMF are installed in this environment. `make test` and a proxied
+  `s4_pacstrap` run follow, reporting `pacman-init` timing under TCG. Then
+  comes a clean rebuild on the integration tip.
+
+Changes since `f83a8b2`, following base's answers:
+- **`pacman-init.service`** uses `DefaultDependencies=no`, ordered after
+  `sysinit.target` and `time-sync.target`. Without that, a target orders
+  itself after everything it `Wants=`, so `multi-user.target` would have
+  waited for it. It's offline and idempotent. The README will tell pacstrap
+  users to run `systemctl start pacman-init` first.
+- **pacman now selects `BR2_PACKAGE_GNUTLS`.** When a package is signed by an
+  unknown key, pacman fetches that key through gpgme, via WKD and then a
+  keyserver. Both lookups go through gnupg2's dirmngr, which Buildroot builds
+  without TLS unless gnutls is enabled. With gnutls, a packager key newer than
+  the image's keyring is fetched and validated through the lsigned master
+  keys, as on Arch. Without it, pacstrap fails until the image is rebuilt.
+- **Landlock.** Confirmed off in the `f0f7ef4` kernel (`# CONFIG_SECURITY_LANDLOCK
+  is not set`, while `CONFIG_LSM` already lists landlock). Thanks for adding
+  it. `s4_pacstrap` will run the container's own `pacman -Sy` under
+  systemd-nspawn, to check that nspawn's seccomp filter lets the Landlock
+  syscalls through.
+- **Host users.** None needed. The Cherry `pacman.conf` sets no
+  `DownloadUser`, and pacstrap comments it out and passes `--disable-sandbox`
+  anyway.
 
 ## What this branch adds (paths are final, contents are WIP)
 

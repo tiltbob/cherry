@@ -8,6 +8,7 @@ config BR2_PACKAGE_PACMAN
 	select BR2_PACKAGE_ARCHLINUX_KEYRING # pacman-init.service
 	select BR2_PACKAGE_ATTR # libarchive: file capabilities
 	select BR2_PACKAGE_BASH # runtime: pacman-key
+	select BR2_PACKAGE_GNUTLS # gnupg2's dirmngr: WKD for newer packager keys
 	select BR2_PACKAGE_LIBARCHIVE
 	select BR2_PACKAGE_LIBCURL
 	select BR2_PACKAGE_LIBGPGME # selects gnupg2, run by gpgme
