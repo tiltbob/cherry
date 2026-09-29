@@ -1,1 +1,4 @@
-source "$BR2_EXTERNAL_CHERRY_PATH/package/cherry-init/Config.in"
+menu "Cherry packages"
+# One line per package, sorted:
+# source "$BR2_EXTERNAL_CHERRY_PATH/package/<name>/Config.in"
+endmenu

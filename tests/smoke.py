@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for Cherry: UEFI HTTP boot in QEMU + OVMF (stdlib only).
 
-  1. the firmware HTTP boots the EFI binary; the system comes up with a
-     read-only squashfs root, a tmpfs /var, networking and sshd, and no failed
-     units
+  1. the firmware HTTP boots the EFI binary; systemd runs straight from the
+     initramfs, which is remounted read-only; /var is a tmpfs; networking and
+     sshd work, an SSH key passed as a credential is installed, no unit failed
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it
   3. a second boot starts from scratch again (nothing persists)
@@ -35,7 +35,6 @@ FATAL = [
     (re.compile(r"^Shell> ", re.M), "the firmware started the UEFI shell"),
     (re.compile(r"Found ordering cycle"), "systemd found an ordering cycle"),
     (PANIC, "kernel panic"),
-    (re.compile(r"cherry-init: .*: "), "the initramfs init failed"),
 ]
 
 
@@ -220,7 +219,7 @@ class Smoke:
         self.boot()
 
         root = vm.fstype("/")
-        check(" - squashfs " in root and re.search(r" ro[ ,]", root), f"/ is not a read-only squashfs: {root}")
+        check(re.match(r"\S+ \S+ \S+ / / ro[ ,]", root), f"/ is not mounted read-only: {root}")
         rc, _ = vm.run("touch /cherry-rw-test", check_rc=False)
         check(rc != 0, "the root filesystem is writable")
         var = vm.fstype("/var")

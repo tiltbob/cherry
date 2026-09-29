@@ -5,14 +5,15 @@
 # x86_64_defconfig turns this on; it would make toolchain upgrades fragile.
 # CONFIG_WERROR is not set
 
-# Direct UEFI (HTTP) boot of a UKI whose initramfs holds the root filesystem.
-# The kernel command line is embedded in the UKI.
+# Direct UEFI (HTTP) boot of a UKI whose initramfs (Buildroot's zstd-compressed
+# cpio) is the root filesystem. The kernel command line is embedded in the UKI.
 CONFIG_EFI=y
 CONFIG_EFI_STUB=y
 CONFIG_EFIVAR_FS=y
 CONFIG_EFI_PARTITION=y
 CONFIG_BLK_DEV_INITRD=y
-CONFIG_BLK_DEV_LOOP=y
+CONFIG_RD_ZSTD=y
+CONFIG_TMPFS=y
 CONFIG_PANIC_TIMEOUT=10
 CONFIG_DEVTMPFS=y
 CONFIG_IKCONFIG=y
@@ -34,7 +35,8 @@ CONFIG_E1000E=y
 CONFIG_IGB=y
 CONFIG_R8169=y
 
-# Filesystems: squashfs root, tmpfs /var, overlayfs for containers.
+# Filesystems for containers and their images, and for disks later.
+CONFIG_BLK_DEV_LOOP=y
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_EXT4_FS=y

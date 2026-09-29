@@ -1,8 +1,0 @@
-config BR2_PACKAGE_CHERRY_INIT
-	bool "cherry-init"
-	depends on BR2_TOOLCHAIN_USES_GLIBC
-	help
-	  Static /init for Cherry's initramfs: mounts the squashfs root
-	  filesystem shipped inside the initramfs read-only and starts
-	  systemd from it. Installed to the images directory, not to the
-	  target.

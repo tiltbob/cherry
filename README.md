@@ -9,10 +9,12 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
 (UKI) holding:
 - the kernel
 - its command line
-- an initramfs that carries the root filesystem as a squashfs image
+- the root filesystem, as Buildroot's zstd-compressed cpio used as the
+  initramfs
 
 Once booted:
-- **Root:** the read-only squashfs.
+- **Root:** systemd runs directly from the initramfs as PID 1 and remounts it
+  read-only.
 - **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
   come later.
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
@@ -56,7 +58,8 @@ HTTP boot at it. There are two common ways:
 - **Firmware setup:** configure the URL in the firmware's setup menu.
 
 The firmware downloads the binary into memory and starts it. A machine needs
-roughly 3× the binary's size in RAM to boot, plus whatever the containers use.
+RAM for the binary plus the unpacked root filesystem, plus whatever the containers
+use.
 
 `make qemu` does all of this locally:
 - serves `images/` on a free port
@@ -83,17 +86,19 @@ ssh -p 2222 root@localhost
 
 1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
    kernel with the embedded command line and initramfs.
-2. **initramfs:** holds `rootfs.squashfs` and a small static `/init`
-   ([package/cherry-init](package/cherry-init/src/init.c)). `/init` attaches the
-   image to a read-only loop device, mounts it, makes it the root filesystem and
-   executes systemd.
-3. **systemd:** mounts a tmpfs on `/var` and fills it from the image's factory
-   defaults (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`).
+2. **Kernel:** unpacks the initramfs (the whole root filesystem) into a tmpfs
+   and runs `/init`, which Buildroot links to systemd.
+3. **systemd:**
+   - remounts `/` read-only (Buildroot's `/etc/fstab`)
+   - mounts a tmpfs on `/var` and fills it from the image's factory defaults
+     (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
 
 Because `/etc` is read-only:
 - the machine ID is generated on every boot
 - SSH host keys are generated under `/var/lib/sshd`
 - `/root` is a symlink into `/var`
+
+The root filesystem takes its uncompressed size in RAM.
 
 ## Running containers
 
