@@ -153,7 +153,8 @@ class VM:
         if "automatic" not in m[0]:
             self.send("root\n")
         for _ in range(60):
-            self.send("echo @@READY@@\n")
+            # The quotes keep the terminal's echo of the input from matching.
+            self.send("echo @@REA\"\"DY@@\n")
             try:
                 self.console.expect(r"@@READY@@$", 5)
                 break
@@ -168,7 +169,7 @@ class VM:
     def run(self, cmd, timeout=120, check_rc=True):
         self.n += 1
         n = self.n
-        self.send(f"echo @@B{n}@@; ( {cmd} ) 2>&1; echo @@E{n}:$?@@\n")
+        self.send(f"echo @@B\"\"{n}@@; ( {cmd} ) 2>&1; echo @@E\"\"{n}:$?@@\n")
         self.console.expect(rf"@@B{n}@@$", timeout)
         m, output = self.console.expect(rf"@@E{n}:(\d+)@@$", timeout)
         rc = int(m[1])
@@ -238,6 +239,9 @@ class Smoke:
                "networkctl; exit 1", timeout=90)
         check(vm.run("cat /sys/class/watchdog/watchdog0/state") == "active", "hardware watchdog not armed")
         self.machine_id = vm.run("cat /etc/machine-id")
+        log("memory of the booted OS, before any container:\n" + vm.run(
+            "free -k; df -k / /var /run | sed 's/^/  /'; "
+            "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' /proc/meminfo"))
 
     def s2_nspawn(self):
         vm = self.vm
