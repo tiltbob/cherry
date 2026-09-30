@@ -362,9 +362,10 @@ class Smoke:
         caps = vm.run(f"chroot {root} getcap /usr/bin/newuidmap")
         check("cap_setuid" in caps, f"newuidmap lost its file capability: {caps!r}")
         vm.run(f"chroot {root} pacman-key --list-keys >/dev/null")
-        # The container's own pacman downloads as DownloadUser=alpm in a Landlock sandbox.
-        vm.run(f"systemd-nspawn -q -D {root} ${{https_proxy:+--setenv=https_proxy=$https_proxy}} "
-               "pacman -Sy --noconfirm", timeout=600)
+        # The container's own pacman downloads as DownloadUser=alpm in a Landlock sandbox. --pipe:
+        # no pty, so no OSC 3008 context sequences on the console.
+        vm.run(f"systemd-nspawn -q --pipe -D {root} ${{https_proxy:+--setenv=https_proxy=$https_proxy}} "
+               "pacman -Syy --noconfirm | cat", timeout=600)
         vm.run("machinectl start arch")
         rc, state = vm.run("systemctl -M arch is-system-running --wait", timeout=600, check_rc=False)
         state = state.splitlines()[-1] if state else ""

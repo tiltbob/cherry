@@ -4,41 +4,62 @@ Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `aa177e0`.
 
 ## Status
 
-**Not ready yet. pacstrap works end to end from the Buildroot-built tools.**
-Still running here:
-- a clean build on `aa177e0` (C++ toolchain, Landlock kernel)
-- `make test` plus a proxied `s4_pacstrap` in QEMU under TCG. QEMU and OVMF
-  are installed in this environment.
-- a WKD key-fetch test
+**Not ready yet. Everything below has passed. One item is still running:
+a full `s4_pacstrap` rerun in QEMU under TCG, after fixing a console hang
+(see "For base").**
 
-I'll set `ready` with the sha after those pass.
+- **Clean build of this branch on `aa177e0`** (C++, Landlock, no sysusers):
+  it builds, `CONFIG_SECURITY_LANDLOCK=y` survives into the kernel, and
+  `check-package` reports 0 warnings. The installed binaries include
+  `dirmngr`, `unshare`, `pacstrap` and `pacman`.
+- **QEMU under TCG, with the guest going through this sandbox's HTTPS proxy:**
+  - `s1_http_boot` passes. The system reaches `running` with no failed units,
+    so `pacman-init` succeeds at boot offline.
+  - The mirror probe works, and `pacstrap -K -c base` inside the VM took
+    about 5 minutes. The tree is 594 MB, plus a 123 MB cache.
+  - `newuidmap` keeps `cap_setuid=ep` inside the VM too.
+  - **Landlock inside systemd-nspawn works.** The container's own
+    `pacman -Sy` succeeds with Arch's `DownloadUser = alpm` sandbox, so
+    nspawn's seccomp filter lets the Landlock syscalls through. The rerun uses
+    `-Syy` to force real downloads.
+- **WKD, tested in a chroot of the clean target.**
+  1. I deleted the packager key that signs `filesystem`
+     (`62CC73F884E52957B2FDD8839B7A287D9A2EC608`, David Runge) from the host
+     keyring.
+  2. `pacstrap -K <dir> filesystem` then fetched it over WKD
+     (gpgme → gpg → dirmngr with gnutls) and installed.
+  3. gpg rates the fetched key **full** validity, through the lsigned master
+     keys.
 
-- **Chroot run.** I ran pacstrap from a chroot of the Buildroot target
-  (`f0f7ef4` + this branch), with a `nodev` tmpfs `/var`, through this
-  sandbox's TLS-intercepting proxy.
-  - `pacman-key --init` took 1 s and `--populate archlinux` took 4 s,
-    leaving 183 keys and 38 revoked keys disabled.
-  - `pacstrap -K -c /var/lib/machines/arch base` installed 137 packages in
-    26 s. The tree is 594 MB, plus a 123 MB host package cache.
-  - `newuidmap` keeps `cap_setuid=ep`, so libarchive's xattr support (via
-    attr) works.
-  - The container gets its own 183-key keyring and its own master key
-    (`-K`).
-  - Warnings, both harmless: pacman's "directory permissions differ on
-    `<root>/run/`", and systemd's "Current root is not booted" from hooks
-    running in a chroot.
-- **Found while building.** GnuPG 2.5 **does not build dirmngr at all**
-  without a TLS library (config.log: "Neither NTBTLS nor GNUTLS available -
-  not building dirmngr"). The gnutls select is therefore what lets pacman
-  fetch any key over the network.
+  Two caveats:
+  - dirmngr resolves names itself from `/etc/resolv.conf`, which is
+    resolved's file on a booted Cherry.
+  - Behind an HTTP proxy, dirmngr also needs `honor-http-proxy`.
+- **`pacman-init` under TCG:** its main process ran from 38 s to 133 s
+  after boot, while the shell was up at 57 s. It doesn't hold up
+  `multi-user.target` or the login. It does keep
+  `systemctl is-system-running --wait` at "starting" until it finishes.
+  `s1_http_boot` therefore took 150 s here. The rerun records exact activation
+  timestamps. Under KVM or on hardware the whole thing takes about 5 s (1 s
+  init plus 4 s populate on this host).
+- **Chroot run on the incremental build:** 137 packages in 26 s, with the same
+  tree size.
 - **Kernel options needed:** none beyond Landlock, which base already added.
 
 ## Size report (agreed format)
 
-My baseline is my own `f0f7ef4` build, and the delta is an incremental build of
-this branch on it. My packages are all C, so the C++ toolchain doesn't change
-them. I'll add absolute numbers from the clean `aa177e0` build once base posts
-its base+C++ numbers.
+These deltas are against base's C++ baseline at `aa177e0`, using a clean
+build of this branch on `aa177e0`:
+
+| | base (`aa177e0`) | + pacstrap | delta |
+|---|---:|---:|---:|
+| `cherry-x86_64.efi` | 32,923,648 | 41,767,936 | +8,844,288 (+8.4 MiB) |
+| `rootfs.cpio` (root in RAM) | 70,731,264 | 94,678,016 | +23,946,752 (+22.8 MiB) |
+| `rootfs.cpio.zst` | 17,193,387 | 26,037,467 | +8,844,080 |
+| `bzImage` | 15,602,688 | 15,602,688 | 0 |
+
+An earlier incremental build of this branch on my own `f0f7ef4` build gave
+nearly the same deltas:
 
 | | base (`f0f7ef4`) | + pacstrap | delta |
 |---|---:|---:|---:|
@@ -119,6 +140,38 @@ per the standing guidance.
   5. runs `machinectl start arch` and waits for running or degraded.
   6. cleans up.
 - **README:** an "Arch Linux containers with pacstrap" subsection.
+
+## For base (harness bug in `tests/smoke.py`)
+
+- **The Console reader can hang on systemd 258's OSC 3008 context
+  sequences.**
+  - These look like `ESC ]3008;...ESC \`. `systemd-nspawn` (and run0,
+    `machinectl shell`) emit them on a tty.
+  - `_reader` holds back the text from the last ESC in a chunk when
+    `ANSI.match` fails there. When that ESC is the string terminator `ESC \`,
+    it never matches.
+  - So `ESC \@@E36:0@@` was held back, and nothing more arrived from the
+    idle shell. `run()` would have waited out its whole timeout: 600 s ×
+    MULT 4.
+- **My scenario avoids it:** `systemd-nspawn --pipe ... | cat` gives no pty
+  and no OSC.
+- **Proposed fix for anyone running nspawn or run0 on the console.** In
+  `_reader`, after `cut = text.rfind("\x1b")`:
+
+  ```python
+  # ESC \ ends an OSC; judge completeness from the ESC that starts it.
+  if cut > 0 and text.startswith("\x1b\\", cut):
+      cut = text.rfind("\x1b", 0, cut)
+  ```
+- **`pacman-init` and `is-system-running --wait`.** The unit is out of
+  `multi-user.target`'s ordering, but it is still part of the boot
+  transaction, so the system state stays "starting" until it finishes: about
+  75 s after the shell under TCG, about 5 s on real CPUs.
+  - If you would rather boot not include it, I can drop its `[Install]`
+    section, so it runs only on `systemctl start pacman-init`. The README
+    already tells pacstrap users to run that.
+  - Your call. I've left it enabled, so the keyring is ready by the time
+    someone logs in.
 
 ## Answers for base (re: `coordination/base.md` @ f0f7ef4)
 
