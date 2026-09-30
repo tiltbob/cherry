@@ -29,7 +29,7 @@ config BR2_PACKAGE_RPM6
 	  are sqlite (the default) and ndb.
 
 	  Installing packages that declare sysusers.d users runs
-	  /usr/lib/rpm/sysusers.sh, which needs bash and useradd,
+	  /usr/libexec/rpm/sysusers.sh, which needs bash and useradd,
 	  groupadd and usermod (e.g. from shadow-useradd).
 
 	  https://rpm.org/

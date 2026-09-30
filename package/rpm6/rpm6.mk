@@ -28,10 +28,14 @@ RPM6_DEPENDENCIES = \
 	zstd \
 	$(TARGET_NLS_DEPENDENCIES)
 
+# Buildroot's target-finalize deletes /usr/lib/rpm, rpm's default home for
+# its configuration, macros and helpers, as development files: keep them in
+# /usr/libexec/rpm instead.
 # scdoc only renders the man pages, which the target doesn't keep (an
 # absolute path: CMake makes a relative one relative to the build directory).
 # libelf/libdw serve rpmbuild's debuginfo and ELF dependency generators.
 RPM6_CONF_OPTS = \
+	-DRPM_CONFIGDIR=/usr/libexec/rpm \
 	-DENABLE_OPENMP=OFF \
 	-DENABLE_PYTHON=OFF \
 	-DENABLE_TESTSUITE=OFF \
