@@ -73,9 +73,12 @@ define DNF5_DISABLE_WERROR
 endef
 DNF5_POST_PATCH_HOOKS += DNF5_DISABLE_WERROR
 
-define DNF5_INSTALL_DNF_SYMLINK
+# Fedora ships the aliases for the CLI plugins with them; without the
+# plugins, dnf5 warns about each alias on every run.
+define DNF5_INSTALL_TARGET_FIXUP
 	ln -sf dnf5 $(TARGET_DIR)/usr/bin/dnf
+	rm -f $(TARGET_DIR)/usr/share/dnf5/aliases.d/compatibility-plugins.conf
 endef
-DNF5_POST_INSTALL_TARGET_HOOKS += DNF5_INSTALL_DNF_SYMLINK
+DNF5_POST_INSTALL_TARGET_HOOKS += DNF5_INSTALL_TARGET_FIXUP
 
 $(eval $(cmake-package))
