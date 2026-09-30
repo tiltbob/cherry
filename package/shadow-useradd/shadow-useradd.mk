@@ -15,9 +15,12 @@ SHADOW_USERADD_CPE_ID_VENDOR = debian
 SHADOW_USERADD_CPE_ID_PRODUCT = shadow
 SHADOW_USERADD_DEPENDENCIES = $(TARGET_NLS_DEPENDENCIES)
 SHADOW_USERADD_CONF_ENV = LIBS=$(TARGET_NLS_LIBS)
+# logind only answers whether a user is logged in, which is meaningless
+# for accounts in another root.
 SHADOW_USERADD_CONF_OPTS = \
 	--disable-man \
 	--disable-account-tools-setuid \
+	--disable-logind \
 	--disable-subordinate-ids \
 	--without-acl \
 	--without-attr \
