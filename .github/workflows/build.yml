@@ -14,13 +14,23 @@ concurrency:
 
 jobs:
   build:
+    # A pull request from a branch of this repository is already built by its
+    # push.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 330
+    env:
+      CCACHE_MAXSIZE: 2G
+      # Per-run hit statistics; the counters in .ccache accumulate across runs.
+      CCACHE_STATSLOG: /tmp/ccache-stats.log
     steps:
+      # The runner starts with about 14 GB free. Deleting unused preinstalled
+      # SDKs and Docker images frees about 22 GB more but takes two minutes, so
+      # it runs in the background while the next steps and the build start.
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          large-packages: false
+        run: |
+          df -h /
+          sudo sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; docker image prune --all --force' >/dev/null 2>&1 </dev/null &
 
       - uses: actions/checkout@v4
         with:
@@ -36,36 +46,68 @@ jobs:
             build-essential file cpio unzip rsync bc wget git python3 libncurses-dev \
             qemu-system-x86 ovmf python3-virt-firmware
 
+      # ccache entries for target code only hit with the same toolchain, and a
+      # change to the kernel configuration misses every kernel object. So prefer
+      # a cache from the same toolchain and configuration, then one from the same
+      # toolchain, over simply the newest one.
+      - name: Compute cache keys
+        id: keys
+        run: |
+          br=$(git rev-parse HEAD:buildroot)
+          toolchain=$({ echo "$br"; grep -E '^BR2_(x86|TOOLCHAIN|KERNEL_HEADERS|GCC|BINUTILS|GLIBC)' configs/*_defconfig; } | sha256sum | cut -c1-16)
+          config=$(cat configs/*_defconfig board/*/linux.fragment | sha256sum | cut -c1-16)
+          downloads=$({ echo "$br"; cat configs/*_defconfig board/*/linux.fragment package/*/*.hash; } | sha256sum | cut -c1-16)
+          echo "ccache-toolchain=ccache-$toolchain" >> "$GITHUB_OUTPUT"
+          echo "ccache=ccache-$toolchain-$config" >> "$GITHUB_OUTPUT"
+          echo "dl=dl-$downloads" >> "$GITHUB_OUTPUT"
+
       - name: Restore download cache
+        id: dl
         uses: actions/cache/restore@v4
         with:
           path: dl
-          key: dl-${{ hashFiles('.gitmodules', 'configs/*', 'board/*/linux.fragment') }}-${{ github.sha }}
+          key: ${{ steps.keys.outputs.dl }}
           restore-keys: dl-
 
       - name: Restore ccache
+        id: ccache
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-${{ github.run_id }}
-          restore-keys: ccache-
+          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.keys.outputs.ccache }}-
+            ${{ steps.keys.outputs.ccache-toolchain }}-
+            ccache-
+
+      - name: Download sources
+        run: make br-source
+
+      # Only when the sources changed: the download cache is about 800 MB.
+      - name: Save download cache
+        if: github.event_name == 'push' && steps.dl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: ${{ steps.keys.outputs.dl }}
 
       - name: Build
         run: make
 
-      - name: Save download cache
-        if: always() && github.event_name == 'push'
-        uses: actions/cache/save@v4
-        with:
-          path: dl
-          key: dl-${{ hashFiles('.gitmodules', 'configs/*', 'board/*/linux.fragment') }}-${{ github.sha }}
-
+      # Also after a failed or cancelled build, so the next run resumes warm.
       - name: Save ccache
-        if: always() && github.event_name == 'push'
+        if: always() && github.event_name == 'push' && steps.ccache.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ccache-${{ github.run_id }}
+          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
+
+      - name: Build statistics
+        if: always() && steps.ccache.outcome == 'success'
+        run: |
+          output/cherry_x86_64/host/bin/ccache -v --show-log-stats || true
+          df -h /
+          du -sh dl .ccache || true
 
       - name: Enable KVM
         run: |
