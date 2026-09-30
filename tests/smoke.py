@@ -367,12 +367,19 @@ class Smoke:
         vm.run(f"systemd-nspawn -q --pipe -D {root} ${{https_proxy:+--setenv=https_proxy=$https_proxy}} "
                "pacman -Syy --noconfirm | cat", timeout=600)
         vm.run("machinectl start arch")
-        rc, state = vm.run("systemctl -M arch is-system-running --wait", timeout=600, check_rc=False)
+        # As in s4_debootstrap: `systemctl -M` fails until the container's bus is up, so wait for
+        # its console output in the host journal first.
+        vm.run("for i in $(seq 300); do journalctl -u systemd-nspawn@arch --no-pager "
+               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "journalctl -u systemd-nspawn@arch --no-pager | tail -n 40; exit 1", timeout=600)
+        rc, state = vm.run("systemctl -M arch is-system-running --wait", timeout=300, check_rc=False)
         state = state.splitlines()[-1] if state else ""
         if state != "running":
             log(f"container state {state!r}:\n" + vm.run("systemctl -M arch --failed --no-legend --plain",
                                                          check_rc=False)[1])
         check(state in ("running", "degraded"), f"the Arch container is {state!r}")
+        check("ID=arch" in vm.run("systemd-run -M arch --wait -q -P cat /etc/os-release"),
+              "the container is not Arch Linux")
         vm.run("machinectl terminate arch; for i in $(seq 30); do machinectl show arch >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
