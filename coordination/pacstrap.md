@@ -1,74 +1,66 @@
 # pacstrap: status
 
-Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `9754b28` (debootstrap and rpmstrap merged; my scenario is now `s6_pacstrap`).
+Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `3865d5a`. My scenario is `s6_pacstrap`.
 
 ## Status
 
-**Not ready yet: rerunning `s6_pacstrap` after fixing the scenario's
-container-boot wait.** The container does boot.
+**`ready`: merge the tip of `claude/jolly-ritchie-cw9f5o`.** It is rebased
+onto `3865d5a`. The last code change is `7fa4877`. The commit that sets this
+status only touches this file.
 
-- **The "stall" was mostly my test.** A diagnostic run in QEMU shows
-  `machinectl start arch` booting the pacstrapped tree to its login prompt
-  in about 12 s under TCG, with no warnings in the container's journal.
-  - Arch's systemd 262 prints targets by description only: "Reached target
-    Multi-User System.".
-  - Debian's 257 prints "Reached target multi-user.target - Multi-User
-    System.".
-  - The journal grep I copied from `s4_debootstrap` therefore never matched.
-    `s6_pacstrap` now matches either form.
-  - One earlier run's console output stopped after "Starting User Login
-    Management..." instead. The rerun will show whether that recurs.
-- **These pass under TCG, with this sandbox's proxy:**
-  - `pacstrap`
-  - the file-capability check
-  - the container's own `pacman -Syy`, which really downloads core and extra
-    inside Arch's Landlock sandbox, under nspawn
-
-- **Rebased onto `9754b28`.** My scenario is now `s6_pacstrap`, after
-  `s5_rpmstrap`, and the `Config.in` and defconfig lines are merged in sorted
-  order. `make cherry_x86_64_defconfig` gives no Kconfig warnings with all
-  three tools enabled.
-- **`pacman-init` under TCG,** measured twice: activation at 15–16 s,
-  finished at 135–151 s. `multi-user.target` is reached at 25 s either way,
-  so boot doesn't wait for it. It's kept enabled, as you asked.
-
-- **Clean build of this branch on `aa177e0`** (C++, Landlock, no sysusers):
-  it builds, `CONFIG_SECURITY_LANDLOCK=y` survives into the kernel, and
-  `check-package` reports 0 warnings. The installed binaries include
-  `dirmngr`, `unshare`, `pacstrap` and `pacman`.
-- **QEMU under TCG, with the guest going through this sandbox's HTTPS proxy:**
-  - `s1_http_boot` passes. The system reaches `running` with no failed units,
-    so `pacman-init` succeeds at boot offline.
-  - The mirror probe works, and `pacstrap -K -c base` inside the VM took
-    about 5 minutes. The tree is 594 MB, plus a 123 MB cache.
-  - `newuidmap` keeps `cap_setuid=ep` inside the VM too.
-  - **Landlock inside systemd-nspawn works.** The container's own
-    `pacman -Sy` succeeds with Arch's `DownloadUser = alpm` sandbox, so
-    nspawn's seccomp filter lets the Landlock syscalls through. The rerun uses
-    `-Syy` to force real downloads.
+- **`s6_pacstrap` passes in QEMU under TCG, in 319 s.**
+  - The image is a clean build of this branch on `aa177e0`: C++, Landlock,
+    no sysusers.
+  - The guest goes through this sandbox's HTTPS proxy. A local-only harness
+    sets `https_proxy` and adds the proxy CA to the guest.
+  - The steps, in order:
+    1. `pacman-init` is active with 183 keys, built offline at boot.
+    2. The mirror probe reaches the mirror.
+    3. `pacstrap -K -c base`: 594 MB tree, 123 MB cache (then cleared).
+    4. `newuidmap` has `cap_setuid=ep`.
+    5. The container's own `pacman -Syy` really downloads core and extra, as
+       `DownloadUser = alpm` inside Landlock under systemd-nspawn.
+    6. `machinectl start arch` boots, and `is-system-running` reports
+       `running`.
+    7. `systemd-run -M arch ... cat /etc/os-release` shows `ID=arch`.
+    8. The scenario terminates the container and removes the tree.
+- **Plain `make test`, without a proxy, as CI and your sandbox run it:**
+  `s6_pacstrap` still requires `pacman-init` (offline), then **skips in
+  17 s** with the reason logged. In this sandbox the reason is "Resolving
+  timed out" for the mirrors. `s1` passes, and the system is `running` with no
+  failed units.
+  - A full `make test` on my test image fails in `s4_debootstrap`. That
+    image predates the debootstrap and rpmstrap merges, so it has no
+    `debootstrap` binary, and its plain-HTTP probe of `deb.debian.org`
+    succeeds from this sandbox's guest.
+  - So the 6-scenario run needs your integration build.
+- **The earlier "boot stall" was my test.** Arch's systemd 262 prints
+  "Reached target Multi-User System." (description only). A diagnostic run
+  booted the tree both with `machinectl start` (private users) and with
+  plain `systemd-nspawn -b`: `running` in about 12 s, and no warnings in
+  the container's journal. The one console stop after "Starting User Login
+  Management..." didn't recur in the three runs since.
+- **`pacman-init` under TCG**, measured twice:
+  - activation at 15–16 s, finished at 135–151 s
+  - `multi-user.target` reached at 25 s either way
+  - on a real CPU it takes about 5 s
 - **WKD, tested in a chroot of the clean target.**
-  1. I deleted the packager key that signs `filesystem`
-     (`62CC73F884E52957B2FDD8839B7A287D9A2EC608`, David Runge) from the host
+  1. I deleted the packager key that signs `filesystem` from the host
      keyring.
-  2. `pacstrap -K <dir> filesystem` then fetched it over WKD
-     (gpgme → gpg → dirmngr with gnutls) and installed.
-  3. gpg rates the fetched key **full** validity, through the lsigned master
-     keys.
+  2. `pacstrap -K <dir> filesystem` fetched it over WKD (gpgme → gpg →
+     dirmngr with gnutls) and installed.
+  3. gpg rates the key **full** validity, through the lsigned master keys.
 
   Two caveats:
-  - dirmngr resolves names itself from `/etc/resolv.conf`, which is
-    resolved's file on a booted Cherry.
-  - Behind an HTTP proxy, dirmngr also needs `honor-http-proxy`.
-- **`pacman-init` under TCG:** its main process ran from 38 s to 133 s
-  after boot, while the shell was up at 57 s. It doesn't hold up
-  `multi-user.target` or the login. It does keep
-  `systemctl is-system-running --wait` at "starting" until it finishes.
-  `s1_http_boot` therefore took 150 s here. The rerun records exact activation
-  timestamps. Under KVM or on hardware the whole thing takes about 5 s (1 s
-  init plus 4 s populate on this host).
-- **Chroot run on the incremental build:** 137 packages in 26 s, with the same
-  tree size.
-- **Kernel options needed:** none beyond Landlock, which base already added.
+  - dirmngr resolves names itself, from resolved's `/etc/resolv.conf`.
+  - Behind an HTTP proxy, it also needs `honor-http-proxy` in
+    `/etc/pacman.d/gnupg/dirmngr.conf`.
+- **Build:** `check-package` reports 0 warnings.
+  `make cherry_x86_64_defconfig` with all three tools enabled gives no Kconfig
+  warnings.
+- **Not built here:** the full integration image with debootstrap and
+  rpmstrap. Your merge build covers that.
+- **Kernel options needed:** none beyond Landlock, which you already added.
 
 ## Size report (agreed format)
 
@@ -122,14 +114,20 @@ The table below lists bytes of new files in the final target, from
 | `unshare` | util-linux (delta) | 97,440 |
 | | **total** | **23,049,502** |
 
-Once debootstrap is merged, the gnupg2 stack, gnutls (its wget then uses
-gnutls), zstd and openssl are shared.
+Now that debootstrap and rpmstrap are merged, part of this is already on the
+integration branch, so the real delta at merge is smaller than the table:
+- debootstrap brings gnupg2 and its libraries, zstd, wget and openssl.
+- rpmstrap brings libarchive, libcurl, xz, bash and `unshare`.
+
+Your merge build will give the exact figure. My estimate is roughly
+gnutls + libgpgme + coreutils + attr + pacman and its keyring: about 10 MB
+of RAM.
 
 If size ever matters: gnupg2's gpgsm, scdaemon, gpg-wks-*, gpgscm,
 gpgme-tool/json and kbxutil could be removed after install. That isn't done,
 per the standing guidance.
 
-## What this branch adds (paths are final, contents are WIP)
+## What this branch adds
 
 - **`package/pacman/`:** pacman 7.1.0, a meson build.
   - Build options: `-Ddoc=disabled -Dcurl=enabled -Dgpgme=enabled -Dcrypto=openssl`.
@@ -153,7 +151,7 @@ per the standing guidance.
 - **`Config.in`:** three sorted `source` lines.
 - **Defconfig:** `BR2_PACKAGE_PACMAN=y` and `BR2_PACKAGE_ARCH_INSTALL_SCRIPTS=y`,
   from `savedefconfig`. Everything else comes in through `select`.
-- **`tests/smoke.py`:** `s4_pacstrap`, which:
+- **`tests/smoke.py`:** `s6_pacstrap`, which:
   1. requires `pacman-init` to be active with more than 20 keys. This part
      runs offline.
   2. probes the mirror with `pacman -Sy` into a temporary dbpath, which
@@ -165,7 +163,7 @@ per the standing guidance.
   6. cleans up.
 - **README:** an "Arch Linux containers with pacstrap" subsection.
 
-## For base (harness bug in `tests/smoke.py`)
+## For base (harness bug in `tests/smoke.py`): applied by you in `9754b28`, thanks
 
 - **The Console reader can hang on systemd 258's OSC 3008 context
   sequences.**
