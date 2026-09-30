@@ -45,6 +45,9 @@ FATAL = [
 ]
 
 
+SKIPPED = "skipped"
+
+
 class TestFailure(Exception):
     pass
 
@@ -290,7 +293,7 @@ class Smoke:
                          "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1", timeout=240, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {mirror}: {out}")
-            return
+            return SKIPPED
         root = "/var/lib/machines/debian"
         vm.run(f"debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie {root} {mirror} "
                ">/tmp/debootstrap.log 2>&1 || { tail -n 40 /tmp/debootstrap.log; exit 1; }", timeout=1800)
@@ -323,7 +326,7 @@ class Smoke:
                          f"wget -T 10 -t 1 -O /dev/null '{url}' 2>&1 | tail -n 3; exit 1", timeout=300, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {host}: {out}")
-            return
+            return SKIPPED
         root = "/var/lib/machines/fedora"
         vm.run(f"rpmstrap fedora 44 {root} >/tmp/rpmstrap.log 2>&1 || {{ tail -n 40 /tmp/rpmstrap.log; exit 1; }}",
                timeout=1800)
@@ -355,7 +358,7 @@ class Smoke:
                          timeout=120, check_rc=False)
         if rc != 0:
             log(f"skipped: the Arch Linux mirrors are unreachable:\n{out}")
-            return
+            return SKIPPED
         vm.run(f"mkdir -p {root} && pacstrap -K -c {root} base", timeout=3600)
         log("pacstrap: " + vm.run(f"du -sh {root} /var/cache/pacman/pkg | tr '\\n' ' '"))
         vm.run("rm -rf /var/cache/pacman/pkg/*")
@@ -388,17 +391,21 @@ class Smoke:
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
                      self.s5_rpmstrap, self.s6_pacstrap]
+        results = []
         try:
             for i, scenario in enumerate(scenarios, 1):
                 name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")
                 log(f"=== {i}. {name}")
                 start = time.monotonic()
-                scenario()
-                log(f"=== {i}. passed in {time.monotonic() - start:.0f}s")
+                outcome = "skipped" if scenario() == SKIPPED else "passed"
+                results.append(outcome)
+                log(f"=== {i}. {outcome} in {time.monotonic() - start:.0f}s")
         finally:
             self.vm.stop()
             self.server.shutdown()
-        log(f"all scenarios passed (serial log: {os.path.join(self.workdir, 'serial.log')})")
+        skipped = results.count("skipped")
+        log(f"{results.count('passed')} scenarios passed, {skipped} skipped "
+            f"(serial log: {os.path.join(self.workdir, 'serial.log')})")
 
 
 def main():

@@ -240,21 +240,36 @@ Some thoughts while you diagnose. None of this is verified:
   mark `ready`. If the console stop after "Starting User Login Management..."
   comes back, say so here, with the container's journal.
 
-## Integration: all three tools merged (`0e446e5`)
+## Integration: all three tools merged (`0e446e5`, fixes up to `8358bbe`)
 
-- **pacstrap** (`dff013c`), merged as `0e446e5`.
-- **Incremental integration build.** It reconfigures the packages that gain
-  optional features from pacstrap's new selects, then reinstalls every
-  package into a fresh target:
-  - gnupg2 (gnutls → dirmngr TLS)
-  - libarchive (attr → xattrs)
-  - busybox (coreutils)
-  - wget (gnutls)
-  - nftables (gmp)
-- **Still to come:** the size numbers and `make test` with 6 scenarios. In
-  this sandbox's guest, s5 (rpmstrap) and s6 (pacstrap) are expected to skip:
-  the mirrors don't resolve, or TLS is intercepted. s1–s4 must pass. CI
-  exercises s5 and s6.
+- **Merged:** debootstrap (`c1dcb10`), rpmstrap (`decf9f4`) and pacstrap
+  (`dff013c`).
+- **Integration fix, `8358bbe`: wget `--disable-ntlm`** (in `external.mk`).
+  - With wget and openssl (debootstrap) plus gnutls (pacstrap), wget uses
+    gnutls for TLS, but its configure still builds NTLM against OpenSSL's
+    DES/MD4 without linking libcrypto. Clean builds fail too.
+  - An incremental tree also needs `make wget-dirclean`: its build has no
+    dependency tracking, so a stale `http.o` survives a reconfigure.
+- **Build:** all 67 fragment options present.
+  - `cherry-x86_64.efi` 52,279,296 bytes
+  - `rootfs.cpio` 133,926,912 bytes (the root in RAM)
+  - `rootfs.cpio.zst` 36,548,781 bytes
+- **Checked in the target:**
+  - `debootstrap`, `pacstrap`, `pacman`, `rpmstrap`, `dnf5`, `wget`,
+    `dirmngr` and `unshare` are all present.
+  - wget and dirmngr link gnutls.
+  - libarchive has `ARCHIVE_XATTR_LINUX` (xattrs through glibc).
+- **`make test` under TCG in this sandbox:**
+  - s1 passed in 170 s. `pacman-init` builds the keyring at boot, which
+    takes about 2 min under TCG and about 5 s on real CPUs, and
+    `is-system-running --wait` waits for it.
+  - s2 and s3 pass, and **s4_debootstrap passes** (385 s, against the real
+    Debian mirror).
+  - **s5_rpmstrap and s6_pacstrap skip, correctly:** this sandbox intercepts
+    TLS with a self-signed CA, and the image's wget and pacman reject it
+    ("certificate ... doesn't have a known issuer"). They run for real in CI.
+  - The harness now reports skipped scenarios as `skipped` rather than
+    `passed`, and the summary counts both.
 - **All three package branches are merged.** Further work goes through new
   branches. Rebase them onto the integration tip and use this directory as
   before.
