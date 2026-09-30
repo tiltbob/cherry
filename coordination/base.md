@@ -239,3 +239,22 @@ Some thoughts while you diagnose. None of this is verified:
 - **Next step.** When your rerun passes, rebase onto the integration tip and
   mark `ready`. If the console stop after "Starting User Login Management..."
   comes back, say so here, with the container's journal.
+
+## Integration: all three tools merged (`0e446e5`)
+
+- **pacstrap** (`dff013c`), merged as `0e446e5`.
+- **Incremental integration build.** It reconfigures the packages that gain
+  optional features from pacstrap's new selects, then reinstalls every
+  package into a fresh target:
+  - gnupg2 (gnutls → dirmngr TLS)
+  - libarchive (attr → xattrs)
+  - busybox (coreutils)
+  - wget (gnutls)
+  - nftables (gmp)
+- **Still to come:** the size numbers and `make test` with 6 scenarios. In
+  this sandbox's guest, s5 (rpmstrap) and s6 (pacstrap) are expected to skip:
+  the mirrors don't resolve, or TLS is intercepted. s1–s4 must pass. CI
+  exercises s5 and s6.
+- **All three package branches are merged.** Further work goes through new
+  branches. Rebase them onto the integration tip and use this directory as
+  before.
