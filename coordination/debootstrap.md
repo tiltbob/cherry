@@ -1,29 +1,40 @@
 # debootstrap: status
 
-Branch: `claude/eager-ritchie-5q9d1f`, rebased onto `aa177e0`.
+Branch: `claude/eager-ritchie-5q9d1f`, rebased onto `2aa0d4a`.
 
 ## Status
 
-**Validated locally.** One step is still running: `s4_debootstrap` in QEMU
-under TCG. I'll set the status to `ready` with the sha once it passes.
+**`ready`: merge the tip of `claude/eager-ritchie-5q9d1f`.** The last code
+change is `a1450f9`, and the commit that sets this status adds nothing but
+this file.
 
 - **Full build:** `make` of `cherry_x86_64_defconfig` + `BR2_PACKAGE_DEBOOTSTRAP=y`
   builds cleanly. The config is the pre-C++ base (`0658801` + Landlock).
   `check-package` reports 0 warnings.
-- **Image test, default settings:** I unpacked `rootfs.cpio.zst` and chrooted
-  into it, with a `nodev` tmpfs on `/var`. Then I ran:
+- **Image test:** I unpacked `rootfs.cpio.zst` and chrooted into it, with a
+  `nodev` tmpfs on `/var`. Then I ran:
   `debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie /var/lib/machines/debian`
-  - There's no `--arch`, no mirror and no `--keyring`: `arch` comes from
-    `/usr/share/debootstrap/arch`, and `.pgp` from `/usr/share/keyrings`.
+  - There's no `--arch`, no mirror and no `--keyring`.
   - The tools were GNU wget, gnupg2's gpgv, the ar extractor and
     `pkgdetails`. There is no Perl or dpkg on the image.
-  - Result: Release signature valid, "Base system installed successfully"
-    after 22 s, a 237 MB tree, and no mount left behind.
+  - Result: Release signature valid, installed in 22 s, a 237 MB tree, no
+    mount left behind.
 - **HTTPS mirror:**
-  - Against the image's own CA store, the run fails: this sandbox intercepts
-    TLS with its own CA, so certificate checking is working.
-  - With `--ca-certificate=<sandbox CA>`, it succeeds, which exercises
-    GNU wget's TLS path end to end.
+  - Against the image's own CA store, the run fails, because this sandbox
+    intercepts TLS: certificate checking is working.
+  - With `--ca-certificate=<sandbox CA>`, it succeeds.
+- **`s4_debootstrap` in QEMU under TCG passes, in 349 s.** I ran it with
+  `tests/smoke.py`'s harness against my image, scenario 4 only, because that
+  image predates `c7f7b54`, so its sshd fails.
+  1. The mirror probe succeeds.
+  2. debootstrap runs inside Cherry, taking 314 s under TCG.
+  3. `machinectl start debian` boots the container to `multi-user.target`
+     in about 6 s.
+  4. `systemctl -M debian is-system-running` reports `running`, and
+     `systemd-run -M debian ... cat /etc/debian_version` prints `13.7`.
+  5. The scenario terminates the container and removes the tree.
+- **README path checked:** `machinectl shell debian /usr/bin/cat /etc/debian_version`
+  printed `13.7` with rc 0, outside the smoke test.
 - **Kernel options needed:** none.
 
 ## Size report (agreed format; base numbers from `coordination/base.md`, pre-C++)
@@ -90,6 +101,25 @@ pacman needs full gnupg2. zstd, too, is shared with pacstrap and rpmstrap.
   - `concurrency: {group: build-${{ github.ref }}, cancel-in-progress: true}`,
     so a force-pushed branch cancels its stale run
   The workflow is yours, so I haven't touched it.
+- **Smoke harness, three findings from the TCG runs.** They're your call:
+  1. `systemctl -M <machine> is-system-running --wait`, run right after
+     `machinectl start`, never returned. The container reached
+     `multi-user.target` in 6 s, and the same query without `--wait`
+     answers at once. `s4_debootstrap` now waits for
+     `Reached target multi-user.target` in `journalctl -u systemd-nspawn@debian`.
+     This may bite pacstrap and rpmstrap too.
+  2. `machinectl shell` works in the guest, but the harness never saw the
+     end marker of that command. machinectl wraps the session in OSC 3008
+     sequences, so the `Console` parser probably mishandles them. The
+     scenario uses `systemd-run -M` instead.
+  3. The image has no `timeout(1)`, because BusyBox `TIMEOUT` is off. GNU
+     coreutils from pacstrap will bring it.
+- **Guest DNS right after boot.** On QEMU user networking, `resolvectl query`
+  first fails with `DNSSEC validation failed: failed-auxiliary`, while
+  resolved falls back from DNS-over-TLS. It works a few seconds later. The
+  scenario's probe now retries for about a minute; rpmstrap copied that.
+  Consider `DNSSEC=no` or `DNSOverTLS=no` in the base's resolved config if
+  users hit it.
 - **Download fallback.** In my environment, GitHub archive URLs (systemd,
   gnu-efi, ninja) return 403, and Buildroot falls back to
   `sources.buildroot.net`, which works here.
