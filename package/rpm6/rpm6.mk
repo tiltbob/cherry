@@ -28,7 +28,8 @@ RPM6_DEPENDENCIES = \
 	zstd \
 	$(TARGET_NLS_DEPENDENCIES)
 
-# scdoc only renders the man pages, which the target doesn't keep.
+# scdoc only renders the man pages, which the target doesn't keep (an
+# absolute path: CMake makes a relative one relative to the build directory).
 # libelf/libdw serve rpmbuild's debuginfo and ELF dependency generators.
 RPM6_CONF_OPTS = \
 	-DENABLE_OPENMP=OFF \
@@ -50,7 +51,7 @@ RPM6_CONF_OPTS = \
 	-DWITH_FSVERITY=OFF \
 	-DWITH_IMAEVM=OFF \
 	-DWITH_DOXYGEN=OFF \
-	-DSCDOC=true
+	-DSCDOC=/bin/true
 
 ifeq ($(BR2_SYSTEM_ENABLE_NLS),y)
 RPM6_CONF_OPTS += -DENABLE_NLS=ON
