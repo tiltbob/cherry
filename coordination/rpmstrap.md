@@ -1,11 +1,20 @@
 # rpmstrap: status
 
-Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `c13bdb5` (after
-debootstrap's merge).
+Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `86969fa` (after all
+three tools' integration).
 
 ## Status
 
-**Ready.** Merge the branch tip.
+**Please merge `f045ada`: rpmstrap installs dbus by default.** It was
+`a053248` before this rebase, and it isn't on the integration branch yet.
+
+- Without it, a Fedora container has no system bus, so `s5_rpmstrap` will
+  fail at `systemctl -M fedora` / `systemd-run -M fedora` the first time it
+  runs for real in CI. `machinectl shell` also fails.
+- It's a one-word change per profile, plus a README line. The rebase onto
+  `86969fa` was clean.
+- Details: "For base (re: `coordination/base.md` @ 3865d5a, still current
+  at 86969fa)" below.
 
 rpmstrap was tested for real in a chroot of the finished Buildroot target,
 after `target-finalize`:
@@ -40,7 +49,10 @@ after `target-finalize`:
   - a wait for "Reached target multi-user.target" in the host journal
   - `systemd-run -M fedora -P rpm -q fedora-release systemd dnf5`
   - terminate the container and remove it
-- **Combined build (debootstrap + rpmstrap):** see "For base" below.
+- **Combined build (debootstrap + rpmstrap)** from the integration tip's
+  defconfig plus this branch builds cleanly, with `cherry-x86_64.efi` at
+  47,783,936 bytes. `rpmstrap fedora 44` on that target gives the same
+  result: 125 packages, and `rpm -Va` clean.
 
 ## Size report (against the C++ base `aa177e0`, as you asked)
 
@@ -157,6 +169,53 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
 - **Download hashes:** the git-method tarballs (`-git4`, `-cargo4`) come
   from Buildroot's reproducible archiver. If your environment computes a
   different hash for any of them, tell me here.
-- **Combined build:** the integration tip's defconfig (debootstrap plus
-  rpmstrap) round-trips through `savedefconfig` unchanged, and Kconfig
-  selects both stacks.
+- **Combined build:**
+  - The integration tip's defconfig with this branch (debootstrap plus
+    rpmstrap) round-trips through `savedefconfig` unchanged.
+  - It builds, with an `.efi` of 47,783,936 bytes.
+  - Both tools are installed side by side, with no file conflicts.
+
+## For base (re: `coordination/base.md` @ 3865d5a, still current at 86969fa)
+
+- **`timeout(1)` in the probe was my mistake.** I tested `/dev/tcp` in the
+  chroot without it. Thanks for the `wget` probe.
+- **The new probe, checked on the built image in a chroot:**
+  - With the image's own CA bundle, it returns 0. wget verifies Fedora's
+    real certificate (DigiCert), because this sandbox's proxy tunnels
+    `mirrors.fedoraproject.org` without intercepting it.
+  - With no trusted CAs, it returns 1 ("cannot verify ... certificate"), so
+    s5 skips.
+  - Cherry's wget links OpenSSL.
+- **Found by booting the container, and fixed in `f045ada` (was `a053248`): Fedora trees had
+  no D-Bus.**
+  - Fedora's systemd only *recommends* dbus, and rpmstrap turns weak
+    dependencies off. EL's systemd requires it, so only Fedora was hit.
+  - Booted with Cherry's `systemd-nspawn -b` (no machined here, so
+    `--register=no`), it reached multi-user.target, but `systemd-logind`
+    failed six times ("Failed to connect to system bus").
+  - Without a bus in the container, s5's `systemctl -M fedora` and
+    `systemd-run -M fedora` would fail in CI, and so would the README's
+    `machinectl shell`.
+  - All four profiles now list `dbus`. Fedora gains 4 packages (129), and
+    the tree stays about 194 MB.
+- **Verified after the fix**, in the same way for Fedora 44 and CentOS
+  Stream 9:
+  - A test-only unit, run after boot, records
+    `systemctl is-system-running --wait`. It reads `running`, with no failed
+    units.
+  - `org.freedesktop.login1` is on the bus.
+  - `systemd-run --wait -P rpm -q ...` inside the container prints the
+    release, systemd and dnf packages.
+  - The container then powers off cleanly.
+- **Fedora 44's console line** is `Reached target multi-user.target -
+  Multi-User System.`, which your regex matches. CentOS Stream 9's
+  systemd 252 prints the description only, which it matches too.
+- **Still not verified here:** the `-M` machine transport through machined,
+  since this sandbox has no systemd PID 1. That, and the rest of s5, needs
+  your CI run with `f045ada` (was `a053248`).
+- **wget now uses gnutls** (pacstrap). I checked the probe with the
+  OpenSSL build. Buildroot's gnutls defaults to the same
+  `/etc/ssl/certs/ca-certificates.crt`, or to p11-kit's trust if p11-kit is
+  on the image. Your run shows it rejecting an unknown issuer, so it does
+  verify. I didn't rebuild with gnutls to check the success path.
+

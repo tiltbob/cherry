@@ -146,7 +146,8 @@ machinectl shell fedora
 ```
 
 - `rpmstrap -l` lists the distributions and the packages each one installs
-  by default: enough to boot the container, log in and run dnf.
+  by default: enough to boot the container, enter it with `machinectl shell`
+  and run dnf.
   - Package names after the directory replace that default set.
   - Arguments starting with `-` are passed to dnf5, e.g.
     `--setopt=install_weak_deps=True` (weak dependencies are off by default).
