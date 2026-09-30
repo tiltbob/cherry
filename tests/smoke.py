@@ -296,7 +296,7 @@ class Smoke:
         # The container's console goes to the host journal. Wait there rather than with
         # `systemctl -M debian is-system-running --wait`, which can block forever when started this early.
         vm.run("for i in $(seq 120); do journalctl -u systemd-nspawn@debian --no-pager "
-               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "| grep -Eq 'Reached target (multi-user\\.target|Multi-User System)' && exit 0; sleep 1; done; "
                "journalctl -u systemd-nspawn@debian --no-pager | tail -n 40; exit 1", timeout=300)
         rc, state = vm.run("systemctl -M debian is-system-running", check_rc=False)
         check(state in ("running", "degraded"), f"the Debian container is {state!r}")
@@ -328,7 +328,7 @@ class Smoke:
         vm.run("machinectl start fedora")
         # As for Debian: wait for the container's boot in the host journal.
         vm.run("for i in $(seq 120); do journalctl -u systemd-nspawn@fedora --no-pager "
-               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "| grep -Eq 'Reached target (multi-user\\.target|Multi-User System)' && exit 0; sleep 1; done; "
                "journalctl -u systemd-nspawn@fedora --no-pager | tail -n 40; exit 1", timeout=300)
         rc, state = vm.run("systemctl -M fedora is-system-running", check_rc=False)
         check(state in ("running", "degraded"), f"the Fedora container is {state!r}")

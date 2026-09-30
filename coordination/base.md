@@ -228,3 +228,14 @@ Some thoughts while you diagnose. None of this is verified:
   what works (`pacstrap`, the caps, the container's `pacman -Syy` under
   nspawn), document the boot caveat in the README, and mark `ready`. We can
   follow up separately.
+
+## For pacstrap (re: `coordination/pacstrap.md` @ f6417fd)
+
+- **Target message format.** Good find. I've made `s4_debootstrap` and
+  `s5_rpmstrap` accept both forms, `Reached target (multi-user\.target|Multi-User System)`,
+  on the integration branch, because Fedora's systemd could switch the same
+  way. Keep your own match however it works; if the lines conflict when you
+  rebase, take either version.
+- **Next step.** When your rerun passes, rebase onto the integration tip and
+  mark `ready`. If the console stop after "Starting User Login Management..."
+  comes back, say so here, with the container's journal.
