@@ -57,8 +57,12 @@ list_profiles() {
 # chrooted in the new root. They live in this process's mount namespace, and
 # disappear with it.
 mount_api_vfs() {
-	local root=$1 node name major minor
-	mkdir -p "$root/proc" "$root/sys" "$root/dev" "$root/run" "$root/tmp"
+	local root=$1 dir node name major minor
+	# The distribution's modes: rpm sets modes on the mounted filesystems,
+	# not on these directories underneath.
+	for dir in proc:0555 sys:0555 dev:0755 run:0755 tmp:1777; do
+		[[ -d $root/${dir%:*} ]] || mkdir -m "${dir#*:}" "$root/${dir%:*}"
+	done
 	mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
 	mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$root/sys"
 	mount -t tmpfs -o nosuid,noexec,mode=0755 dev "$root/dev"
