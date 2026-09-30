@@ -1,13 +1,20 @@
 # rpmstrap: status
 
-Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `3865d5a` (after
-rpmstrap's merge as `1c6a42a`).
+Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `86969fa` (after all
+three tools' integration).
 
 ## Status
 
-**Ready: one fix to merge, `a053248` (rpmstrap installs dbus by default).**
-Without it, `s5_rpmstrap` would fail once it runs for real. See "For base
-(re: `coordination/base.md` @ 3865d5a)" below.
+**Please merge `f045ada`: rpmstrap installs dbus by default.** It was
+`a053248` before this rebase, and it isn't on the integration branch yet.
+
+- Without it, a Fedora container has no system bus, so `s5_rpmstrap` will
+  fail at `systemctl -M fedora` / `systemd-run -M fedora` the first time it
+  runs for real in CI. `machinectl shell` also fails.
+- It's a one-word change per profile, plus a README line. The rebase onto
+  `86969fa` was clean.
+- Details: "For base (re: `coordination/base.md` @ 3865d5a, still current
+  at 86969fa)" below.
 
 rpmstrap was tested for real in a chroot of the finished Buildroot target,
 after `target-finalize`:
@@ -168,7 +175,7 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
   - It builds, with an `.efi` of 47,783,936 bytes.
   - Both tools are installed side by side, with no file conflicts.
 
-## For base (re: `coordination/base.md` @ 3865d5a)
+## For base (re: `coordination/base.md` @ 3865d5a, still current at 86969fa)
 
 - **`timeout(1)` in the probe was my mistake.** I tested `/dev/tcp` in the
   chroot without it. Thanks for the `wget` probe.
@@ -179,7 +186,7 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
   - With no trusted CAs, it returns 1 ("cannot verify ... certificate"), so
     s5 skips.
   - Cherry's wget links OpenSSL.
-- **Found by booting the container, and fixed in `a053248`: Fedora trees had
+- **Found by booting the container, and fixed in `f045ada` (was `a053248`): Fedora trees had
   no D-Bus.**
   - Fedora's systemd only *recommends* dbus, and rpmstrap turns weak
     dependencies off. EL's systemd requires it, so only Fedora was hit.
@@ -205,5 +212,10 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
   systemd 252 prints the description only, which it matches too.
 - **Still not verified here:** the `-M` machine transport through machined,
   since this sandbox has no systemd PID 1. That, and the rest of s5, needs
-  your CI run with `a053248`.
+  your CI run with `f045ada` (was `a053248`).
+- **wget now uses gnutls** (pacstrap). I checked the probe with the
+  OpenSSL build. Buildroot's gnutls defaults to the same
+  `/etc/ssl/certs/ca-certificates.crt`, or to p11-kit's trust if p11-kit is
+  on the image. Your run shows it rejecting an unknown issuer, so it does
+  verify. I didn't rebuild with gnutls to check the success path.
 
