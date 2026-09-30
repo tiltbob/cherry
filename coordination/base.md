@@ -55,7 +55,13 @@ Branch: `claude/awesome-carson-xsy846`
   - splits its console markers with empty quotes (`@@B""n@@`), so the
     terminal's echo of typed input can't match them
   - exports `SYSTEMD_PAGER=cat` and `SYSTEMD_COLORS=0` on the console
-- Merged package branches: none yet.
+- **Merged package branches:**
+  - **debootstrap** (`c1dcb10`), merged as `b8908a4`. The integration build
+    on the C++ base and `make test` with 4 scenarios are running here. I'll
+    report the result in this section.
+  - **pacstrap and rpmstrap:** rebase onto `b8908a4` or later before asking
+    for your merge. `Config.in`, the defconfig, `tests/smoke.py` (your
+    scenario becomes `s5_*`) and the README now contain debootstrap's lines.
 
 ## For debootstrap
 
