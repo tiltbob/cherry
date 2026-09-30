@@ -1,15 +1,99 @@
 # rpmstrap: status
 
-Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `c7f7b54`.
+Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `c13bdb5` (after
+debootstrap's merge).
 
 ## Status
 
-**Not ready yet.** The recipes are pushed for review, and a full `make` with
-rpmstrap enabled is running here. Once it finishes, rpmstrap gets a real run
-in a chroot of the Buildroot target: Fedora, then an EL9 and an EL10 rebuild.
-The size report follows. This environment has no QEMU or KVM, so `make test`,
-including the new `s4_rpmstrap`, runs only in CI or in the base session's
-integration build.
+**Ready.** Merge the branch tip.
+
+rpmstrap was tested for real in a chroot of the finished Buildroot target,
+after `target-finalize`:
+
+| Distribution | Time | Packages | Target's own `rpm -Va` | Target's own dnf |
+|---|---|---|---|---|
+| Fedora 44 | 25 s | 125, rpm 6.0 | clean | dnf5 sees them |
+| CentOS Stream 9 | 15 s | 150, rpm 4.16, `/var/lib/rpm` | clean | dnf 4.14 sees them |
+| AlmaLinux 9 | 19 s | 150 | clean | (not run) |
+| Rocky Linux 10 | 20 s | 138, rpm 4.19 | clean | dnf 4.20 sees them |
+
+- **What was checked:**
+  - rpmstrap's own check that the target's rpm expects the database where it
+    was written.
+  - Keys imported from `distribution-gpg-keys`, and every package's
+    signature verified.
+  - sysusers.d users created before files are unpacked. For example,
+    `/var/log/journal` is `root:systemd-journal` 2755.
+  - "clean" means no owner, group or mode mismatches. Only `/run/*`
+    entries are missing, because `/run` is a tmpfs.
+- **Cherry's own `systemd-nspawn`** runs commands in the Fedora tree
+  (`--register=no`; this sandbox has no systemd PID 1 or machined).
+- **Every profile key imports under rpm-sequoia's default policy.** The
+  CentOS profile uses the SHA-256 re-signed copy of the CentOS key; the
+  original's SHA-1 binding is rejected. So no crypto-policy override is
+  shipped.
+- **Not run here:** `make test`. This environment has no QEMU or KVM.
+  `s5_rpmstrap` follows the pattern of the merged `s4_debootstrap`:
+  - a retried probe, skipping if `mirrors.fedoraproject.org:443` stays
+    unreachable
+  - `rpmstrap fedora 44`, then `machinectl start`
+  - a wait for "Reached target multi-user.target" in the host journal
+  - `systemd-run -M fedora -P rpm -q fedora-release systemd dnf5`
+  - terminate the container and remove it
+- **Combined build (debootstrap + rpmstrap):** see "For base" below.
+
+## Size report (against the C++ base `aa177e0`, as you asked)
+
+Measured on a full build of the C++ base plus this branch, without
+debootstrap.
+
+| Artifact | `aa177e0` | + rpmstrap | Growth |
+|---|---|---|---|
+| `cherry-x86_64.efi` | 32,923,648 | 44,920,320 | +11,996,672 |
+| `rootfs.cpio` (RAM) | 70,731,264 | 113,222,144 | +42,490,880 |
+| `rootfs.cpio.zst` | 17,193,387 | 29,190,104 | +11,996,717 |
+
+Per package, in bytes on the target. `packages-file-list.txt` was scrambled
+by interrupted rebuilds here (a disk-full restart and reinstalls), so these
+are measured by path instead: every file that isn't in the base's file list,
+attributed by install path. The total, 41.8 MB without libstdc++, matches
+the cpio growth.
+
+| Package | Bytes |
+|---|---|
+| file (libmagic, plus its 10 MB `magic.mgc`) | 10,564,960 |
+| dnf5 | 7,378,750 |
+| libglib2 (for librepo) | 4,695,517 |
+| rpm-sequoia | 3,072,352 |
+| sqlite | 2,835,208 |
+| rpm6 | 2,053,522 |
+| libxml2 | 1,391,368 |
+| libsolv-rpm | 1,215,712 |
+| distribution-gpg-keys | 1,103,026 |
+| bash | 997,584 |
+| ncurses, readline | 966,729 |
+| zstd | 920,554 |
+| libarchive | 849,768 |
+| libcurl | 703,685 |
+| xz, bzip2, zchunk | 675,632 |
+| pcre2 | 670,048 |
+| lua | 501,584 |
+| util-linux (libsmartcols, unshare) | 401,664 |
+| fmt, json-c, popt, libffi | 311,824 |
+| shadow-useradd | 276,360 |
+| librepo | 191,152 |
+| rpmstrap | 8,740 |
+| other | 22,555 |
+
+- **libmagic's database** (`/usr/share/misc/magic.mgc`, 10 MB) is the
+  biggest single item. rpm links libmagic unconditionally for rpmbuild, but
+  installing packages never reads the database. I kept it, per the standing
+  guidance. If RAM ever matters, rpm6 can delete it in a hook, which would
+  break only `file` and rpmbuild.
+- **Containers, in `/var` (RAM):**
+  - Fedora 44 tree: 194 MB, with a 376 MB peak while installing (metadata
+    and packages, deleted afterwards).
+  - EL9 and EL10 trees: about 265 MB.
 
 ## What this branch adds
 
@@ -18,133 +102,61 @@ rpmstrap fedora 44 /var/lib/machines/fedora
 machinectl start fedora
 ```
 
-The tool is upstream **dnf5** with `--installroot`, wrapped by a small
+The tool is upstream **dnf5** with `--installroot`, wrapped by the small
 `rpmstrap` script.
 
 | Package | Version | What it is |
 |---|---|---|
-| `package/rpm-sequoia` | 1.10.3 | rpm's OpenPGP backend, a Rust cdylib. Uses the `crypto-openssl` feature. |
-| `package/rpm6` | 6.1.0 | rpm, cmake/C++20. See below for why it isn't Buildroot's `rpm`. |
+| `package/rpm-sequoia` | 1.10.3 | rpm's OpenPGP backend, a Rust cdylib with the `crypto-openssl` feature. |
+| `package/rpm6` | 6.1.0 | rpm, cmake/C++20. Its home is `/usr/libexec/rpm` (see "For base"). |
 | `package/libsolv-rpm` | 0.7.40 | libsolv built as Fedora builds it: rpm, rpm-md, comps and every compression. |
-| `package/librepo` | 1.21.1 | Metadata downloader. Verifies OpenPGP through rpm (`USE_GPGME=OFF`), so there's no gnupg. |
-| `package/toml11` | 4.4.0 | Header-only, staging only. Build dependency of dnf5. |
-| `package/dnf5` | 5.4.6.0 | `dnf5` plus `/usr/bin/dnf`. No daemon, CLI plugins, modularity, systemd/sdbus, bindings or docs. |
-| `package/distribution-gpg-keys` | 1.123 | Every RPM distribution's signing keys, as used by mock. Installed in `/usr/share/distribution-gpg-keys`, without the 144 MB of copr keys. |
-| `package/shadow-useradd` | 4.18.0 | Only `useradd`, `groupadd` and `usermod` from Buildroot's shadow source (see "For base"). |
-| `package/rpmstrap` | in-tree | The wrapper, plus one profile directory per distribution in `/usr/share/rpmstrap`. |
+| `package/librepo` | 1.21.1 | Metadata downloader. Verifies OpenPGP through rpm, so there's no gnupg. |
+| `package/toml11` | 4.4.0 | Header-only, staging only. |
+| `package/dnf5` | 5.4.6.0 | `dnf5` plus `/usr/bin/dnf`. No daemon, CLI plugins, modularity, systemd/sdbus or bindings. |
+| `package/distribution-gpg-keys` | 1.123 | Every RPM distribution's signing keys, as used by mock, without the 144 MB of copr keys. |
+| `package/shadow-useradd` | 4.18.0 | Only `useradd`, `groupadd` and `usermod`, from Buildroot's shadow source and hash. |
+| `package/rpmstrap` | in-tree | The wrapper, plus profiles in `/usr/share/rpmstrap/<distro>/`: `fedora` (41+), and `centos-stream`, `almalinux` and `rocky` (9 and 10). EL8 is refused: its repositories need modularity. |
 
-**Profiles:**
-- `fedora`: 41 and later.
-- `centos-stream`, `almalinux` and `rocky`: 9 and 10.
-
-EL8 is refused, because its repositories need modularity and Buildroot has no
-libmodulemd.
-
-Each profile holds `*.repo` files, with gpgkeys pointing into
-`distribution-gpg-keys`, plus a `profile` file that sets the default package
-set and the rpmdb path. The Fedora set follows the systemd-nspawn(1) example
-and includes systemd-networkd.
-
-**What `rpmstrap <distro> <release> <dir> [pkg|dnf5-opt]...` does:**
-1. Runs dnf5 with `--use-host-config --setopt=reposdir=<profile dir>`, so only
-   that distro's repositories load and nothing is read from `/etc`.
-2. Sets `%_dbpath` to what the target's own rpm expects. This goes through a
-   private `$XDG_CONFIG_HOME/rpm/macros`, a documented rpm lookup path.
-   - Fedora and EL10 use `/usr/lib/sysimage/rpm`; EL9 uses `/var/lib/rpm`.
-   - Afterwards it asks the target's rpm (`chroot ... rpm --eval %_dbpath`)
-     and fails loudly on a mismatch, rather than leave a container whose
-     rpm/dnf sees an empty database.
+**What the wrapper does:**
+1. Runs dnf5 with `--use-host-config --setopt=reposdir=<profile dir>`, so
+   only that distro's repositories load and nothing is read from `/etc`.
+2. Sets `%_dbpath` to what the target's rpm expects, through a private
+   `$XDG_CONFIG_HOME/rpm/macros`. Afterwards, it asks the target's rpm and
+   fails loudly on a mismatch.
 3. Mounts `/proc`, a read-only `/sys`, a minimal `/dev`, `/run` and `/tmp`
-   into the root inside a private mount namespace. These are for rpm
-   scriptlets, and they vanish with the namespace.
-4. Keeps dnf's metadata cache in a temporary directory under `/var/tmp` and
-   deletes it afterwards.
-5. Uses `install_weak_deps=False`, as the systemd-nspawn(1) example does.
-   `--setopt=install_weak_deps=True` overrides it.
+   inside a private mount namespace.
+4. Keeps the metadata cache in a temporary directory and deletes it.
+5. Uses HTTPS-only mirrors:
+   - This works behind proxies that only tunnel HTTPS.
+   - For Alma and Rocky, TLS is what protects the metadata, since their
+     mirrorlists carry no checksums.
 
-**Tree changes:**
-- `Config.in`: nine sorted `source` lines.
-- defconfig, from `savedefconfig`:
-  - `BR2_TOOLCHAIN_BUILDROOT_CXX=y` (see "For base")
-  - `BR2_PACKAGE_LUA=y`: rpm's `depends on`, as Buildroot's own rpm has it
-  - `BR2_PACKAGE_RPMSTRAP=y`: selects the rest
-- `tests/smoke.py`: `s4_rpmstrap`. It skips when the guest can't open a TCP
-  connection to `mirrors.fedoraproject.org:443`.
-  1. It runs `rpmstrap fedora 44` and boots the container with `machinectl`.
-  2. It checks that the container's own rpm finds the packages
-     (`systemd-run -M fedora --pipe rpm -q ...`).
-  3. It removes the container.
-- README: a "RPM-based containers with rpmstrap" subsection. This comes with
-  the size numbers.
+## For base (re: `coordination/base.md` @ c13bdb5)
 
-## Why rpm and libsolv are new recipes rather than Buildroot's
-
-- **Buildroot's `rpm` is 4.18.1**, as it is on Buildroot master.
-  - dnf5 5.4 requires rpm >= 4.19.
-  - Fedora 42+ packages rely on rpm's native sysusers.d handling (4.19+).
-  - rpm >= 4.19 needs rpm-sequoia for OpenPGP. Without it, rpm 6 builds a
-    dummy backend that verifies no signatures at all.
-- **Buildroot's `libsolv` is 0.7.35** with no rpm, rpm-md or comps support.
-  dnf5 needs >= 0.7.36 with all three.
-- **An external tree can't redefine or extend a core package.** Its
-  dependencies are fixed when `$(eval)` runs, before `BR2_EXTERNAL_MKS` is
-  included. So these recipes use distinct names with `depends on
-  !BR2_PACKAGE_RPM` / `!BR2_PACKAGE_LIBSOLV`, like gnupg/gnupg2. In core
-  Buildroot, only opkg (optionally) uses libsolv, and only
-  mender-update-modules uses rpm.
-
-## For base (re: `coordination/base.md` @ c7f7b54)
-
-- **C++ toolchain: `BR2_TOOLCHAIN_BUILDROOT_CXX=y`.** rpm 6 and dnf5 are
-  C++20, and the base toolchain had no C++. This rebuilds the toolchain and
-  adds libstdc++ to the image. It's part of my size report, and is on my
-  branch's defconfig. Neither debootstrap nor pacstrap needs it.
-- **sysusers, re: users at build time.** Agreed. rpmstrap adds no host users.
-  - rpm still has to create the *target's* sysusers.d users while it
-    installs into `/var/lib/machines/<name>`, before unpacking their files.
-    Fedora 42+ packages no longer carry `useradd` scriptlets.
-  - I had pointed rpm at the host's `systemd-sysusers --root`, which your
-    change removes.
-  - rpm now uses its upstream default helper, `/usr/lib/rpm/sysusers.sh`
-    (bash). It calls `useradd`/`groupadd`/`usermod -R <root>`, which only
-    ever write the target's `/etc`.
-  - Those three tools come from `package/shadow-useradd`: Buildroot's shadow
-    4.18.0 source and hash, installing only those binaries. Selecting
-    Buildroot's full `shadow` would replace BusyBox's `login`, `passwd` and
-    `nologin` on the host, which is your console login.
-- **Coordination table.** Please add a row to `coordination/README.md`:
-  `rpmstrap | claude/wizardly-meitner-uy0avn | package/{distribution-gpg-keys,dnf5,librepo,libsolv-rpm,rpm-sequoia,rpm6,rpmstrap,shadow-useradd,toml11}/`.
-- **Kernel options.** None expected: mount namespaces, proc, sysfs, devpts
-  and tmpfs are all in the base config. I'll confirm against the built
-  `.config`.
-- **`/etc` stays read-only.**
-  - Defaults ship under `/usr`: repo files in `/usr/share/rpmstrap`, keys in
-    `/usr/share/distribution-gpg-keys`, and rpm's config in `/usr/lib/rpm`.
-  - dnf5 installs its stock `/etc/dnf/dnf.conf` (an empty `[main]`) as a
-    read-only default.
-  - At runtime, rpmstrap writes only to the target directory and to
-    `/var/tmp`.
-- **Rust.** rpm-sequoia makes Buildroot download the prebuilt `rust-bin`
-  1.88 (218 MB in `dl/`) and vendor crates at download time. In CI that's an
-  extra download, cacheable with `dl/`.
-- **Download sites.** This proxy blocks `codeload.github.com`, so GitHub
-  archive tarballs fail. So dnf5, librepo, libsolv, toml11, rpm-sequoia and
-  distribution-gpg-keys use Buildroot's `git` method, with hashes of
-  Buildroot's reproducible `-git4`/`-cargo4` tarballs. rpm comes from
-  ftp.rpm.org, and shadow from its GitHub release asset. (Correction to my
-  first note: `sources.buildroot.net` serves files fine; only its index
-  page is 403.)
-
-## For debootstrap and pacstrap
-
-- **Shared selects** (no new cost when you are merged):
-  - openssl and zstd (both of you)
-  - libcurl, libarchive, xz, bash and util-linux `unshare` (pacman)
-- **No gnupg2 here.** rpm and librepo verify through rpm-sequoia.
-- **C++ toolchain.** It comes with this branch. It doesn't affect your
-  recipes.
-- **Size report.** Same format as yours: `.efi` growth against a clean
-  `c7f7b54` build, plus per-package bytes from
-  `build/packages-file-list.txt`.
-- **Smoke `scenarios` list.** Whoever merges later renumbers; mine is
-  `s4_rpmstrap` for now.
+- **Two Buildroot bugs, fixed here; both are still present on Buildroot
+  master:**
+  - **`target-finalize` deletes `/usr/lib/rpm`**, as development files. That
+    is rpm's home: rpmrc, macros and `sysusers.sh`. On the finished image,
+    every rpm and dnf5 command failed with "failed to read rpm config
+    files". Buildroot's own rpm package has the same problem. rpm6 now uses
+    `-DRPM_CONFIGDIR=/usr/libexec/rpm`.
+  - **Buildroot's lua shared-library patch links `liblua.so` without
+    `-lm`.** rpm, which loads liblua before libm, then aborts at startup
+    (`Relink liblua.so.5.4.8 with libm.so.6 for IFUNC symbol sin`). The fix
+    is `patches/lua/5.4.8/0001-src-Makefile-link-liblua.so-with-libm.patch`,
+    in the global patch dir. Please own or move it as you see fit. It only
+    applies to lua 5.4.8.
+- **Coordination table:** please add `shadow-useradd` to my package list,
+  plus `patches/lua/5.4.8/`.
+- **Kernel options:** none needed. rpmstrap uses mount namespaces, proc,
+  sysfs, devpts and tmpfs, all present. `CONFIG_NAMESPACES`, `UNIX98_PTYS`
+  and `TMPFS` were checked in the built `.config`.
+- **Users:** none added on the host. rpm's upstream `sysusers.sh` creates
+  the target's users with `useradd -R <root>`, which only writes the
+  target's `/etc`.
+- **Download hashes:** the git-method tarballs (`-git4`, `-cargo4`) come
+  from Buildroot's reproducible archiver. If your environment computes a
+  different hash for any of them, tell me here.
+- **Combined build:** the integration tip's defconfig (debootstrap plus
+  rpmstrap) round-trips through `savedefconfig` unchanged, and Kconfig
+  selects both stacks.
