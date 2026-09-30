@@ -1,0 +1,17 @@
+config BR2_PACKAGE_LIBSOLV_RPM
+	bool "libsolv-rpm"
+	depends on !BR2_PACKAGE_LIBSOLV # same files
+	depends on BR2_PACKAGE_RPM6
+	select BR2_PACKAGE_BZIP2
+	select BR2_PACKAGE_LIBXML2
+	select BR2_PACKAGE_XZ
+	select BR2_PACKAGE_ZCHUNK
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_ZSTD
+	help
+	  libsolv built as Fedora builds it, for dnf5: with the rpm
+	  database, rpm-md repository and comps backends, and every
+	  metadata compression. Buildroot's libsolv package has none of
+	  them.
+
+	  https://github.com/openSUSE/libsolv

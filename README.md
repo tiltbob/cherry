@@ -133,6 +133,34 @@ machinectl shell trixie
 - Ubuntu and other derivatives need their own keyring: pass
   `--keyring=<file>`.
 
+### RPM-based containers with rpmstrap
+
+`rpmstrap` installs Fedora, CentOS Stream, AlmaLinux or Rocky Linux into a
+directory with dnf5. Every package is checked against the distribution's
+signing key from `/usr/share/distribution-gpg-keys`:
+
+```sh
+rpmstrap fedora 44 /var/lib/machines/fedora
+machinectl start fedora
+machinectl shell fedora
+```
+
+- `rpmstrap -l` lists the distributions and the packages each one installs
+  by default: enough to boot the container, log in and run dnf.
+  - Package names after the directory replace that default set.
+  - Arguments starting with `-` are passed to dnf5, e.g.
+    `--setopt=install_weak_deps=True` (weak dependencies are off by default).
+- The Fedora set includes systemd-networkd. To bring up the container's veth
+  link, run `systemctl enable --now systemd-networkd` inside it.
+- The repositories are in `/usr/share/rpmstrap/<distro>/*.repo`. To use
+  another mirror or distribution, copy that directory, edit it, and pass its
+  path instead of the name.
+- EL8 isn't supported: its repositories need modularity, which Cherry's dnf5
+  is built without.
+- The Fedora tree above uses about 195 MB of RAM, and EL 9 or 10 trees about
+  270 MB. While installing, rpmstrap needs about 180 MB more for repository
+  metadata and packages, and deletes them afterwards.
+
 ## Security notes
 
 This is a development image:

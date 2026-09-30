@@ -1,0 +1,10 @@
+config BR2_PACKAGE_RPM_SEQUOIA
+	bool "rpm-sequoia"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_PACKAGE_OPENSSL
+	help
+	  The OpenPGP backend of rpm >= 4.19, built on Sequoia PGP
+	  with its OpenSSL cryptography backend.
+
+	  https://github.com/rpm-software-management/rpm-sequoia

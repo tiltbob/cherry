@@ -1,0 +1,14 @@
+# HTTPS mirrors only: a mirrorlist, unlike a metalink, has no checksums,
+# so TLS is what protects the repository metadata.
+
+[baseos]
+name=AlmaLinux $releasever - BaseOS
+mirrorlist=https://mirrors.almalinux.org/mirrorlist/$releasever/baseos?protocol=https
+gpgcheck=1
+gpgkey=file:///usr/share/distribution-gpg-keys/alma/RPM-GPG-KEY-AlmaLinux-$releasever_major
+
+[appstream]
+name=AlmaLinux $releasever - AppStream
+mirrorlist=https://mirrors.almalinux.org/mirrorlist/$releasever/appstream?protocol=https
+gpgcheck=1
+gpgkey=file:///usr/share/distribution-gpg-keys/alma/RPM-GPG-KEY-AlmaLinux-$releasever_major

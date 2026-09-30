@@ -1,0 +1,8 @@
+config BR2_PACKAGE_TOML11
+	bool "toml11"
+	depends on BR2_INSTALL_LIBSTDCPP
+	help
+	  A header-only C++ TOML parser. Only headers and CMake files
+	  are installed, to staging.
+
+	  https://github.com/ToruNiina/toml11

@@ -1,0 +1,170 @@
+#!/bin/bash
+#
+# rpmstrap: install an RPM-based distribution into a directory with dnf5,
+# for systemd-nspawn, e.g.
+#
+#   rpmstrap fedora 44 /var/lib/machines/fedora
+#
+# Each distribution is a profile directory in /usr/share/rpmstrap: its
+# *.repo files, and a "profile" file sourced by this script, which sets:
+#   packages  array, installed when no packages are given
+#   dbpath    where the distribution's rpm keeps its database
+# It can use $release, and call die.
+
+set -euo pipefail
+
+profiles=/usr/share/rpmstrap
+
+die() {
+	echo "rpmstrap: $*" >&2
+	exit 1
+}
+
+usage() {
+	cat <<EOF
+Usage: rpmstrap [-h|-l] <distro> <release> <directory> [package|dnf5-option]...
+
+Installs <release> of <distro> into <directory> with dnf5, e.g.
+  rpmstrap fedora 44 /var/lib/machines/fedora
+
+  <distro>       a profile in $profiles (see -l), or a path to a
+                 profile directory of your own
+  <release>      the release, as dnf's \$releasever
+  <directory>    the new root; created if needed
+  package        replaces the profile's default package set
+  dnf5-option    passed to dnf5, e.g. --setopt=install_weak_deps=True
+
+  -l, --list     list the profiles and their default packages
+  -h, --help     show this help
+EOF
+}
+
+list_profiles() {
+	local dir
+	for dir in "$profiles"/*/; do
+		dir=${dir%/}
+		(
+			release='<release>'
+			# shellcheck source=/dev/null
+			. "$dir/profile"
+			printf '%s: %s\n    %s\n' "${dir##*/}" \
+				"$(sed -n '1s/^# *//p' "$dir/profile")" "${packages[*]}"
+		)
+	done
+}
+
+# /proc, /sys, a minimal /dev, /run and /tmp for rpm's scriptlets, which run
+# chrooted in the new root. They live in this process's mount namespace, and
+# disappear with it.
+mount_api_vfs() {
+	local root=$1 dir node name major minor
+	# The distribution's modes: rpm sets modes on the mounted filesystems,
+	# not on these directories underneath.
+	for dir in proc:0555 sys:0555 dev:0755 run:0755 tmp:1777; do
+		[[ -d $root/${dir%:*} ]] || mkdir -m "${dir#*:}" "$root/${dir%:*}"
+	done
+	mount -t proc -o nosuid,nodev,noexec proc "$root/proc"
+	mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$root/sys"
+	mount -t tmpfs -o nosuid,noexec,mode=0755 dev "$root/dev"
+	for node in null:1:3 zero:1:5 full:1:7 random:1:8 urandom:1:9 tty:5:0; do
+		IFS=: read -r name major minor <<<"$node"
+		mknod -m 0666 "$root/dev/$name" c "$major" "$minor"
+	done
+	mkdir -m 0755 "$root/dev/pts"
+	mkdir -m 1777 "$root/dev/shm"
+	mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5,nosuid,noexec \
+		devpts "$root/dev/pts"
+	ln -s pts/ptmx "$root/dev/ptmx"
+	ln -s /proc/self/fd "$root/dev/fd"
+	ln -s /proc/self/fd/0 "$root/dev/stdin"
+	ln -s /proc/self/fd/1 "$root/dev/stdout"
+	ln -s /proc/self/fd/2 "$root/dev/stderr"
+	mount -t tmpfs -o nosuid,nodev,mode=0755 run "$root/run"
+	mount -t tmpfs -o nosuid,nodev,mode=1777 tmp "$root/tmp"
+}
+
+case ${1:-} in
+-h|--help)
+	usage
+	exit 0
+	;;
+-l|--list)
+	list_profiles
+	exit 0
+	;;
+esac
+
+[[ $# -ge 3 ]] || { usage >&2; exit 2; }
+[[ $EUID -eq 0 ]] || die "must be run as root"
+
+# Continue in a private mount namespace.
+if [[ ${RPMSTRAP_NAMESPACE:-} != 1 ]]; then
+	RPMSTRAP_NAMESPACE=1 exec unshare --mount --propagation private -- \
+		"$(readlink -f "$0")" "$@"
+fi
+
+distro=$1 release=$2 root=$3
+shift 3
+
+case $distro in
+*/*) profile_dir=$(readlink -f "$distro") ;;
+*) profile_dir=$profiles/$distro ;;
+esac
+[[ -f $profile_dir/profile ]] ||
+	die "no profile $profile_dir/profile; see rpmstrap -l"
+
+packages=()
+dbpath=/usr/lib/sysimage/rpm
+# shellcheck source=/dev/null
+. "$profile_dir/profile"
+
+dnf_opts=() install=()
+for arg; do
+	case $arg in
+	-*) dnf_opts+=("$arg") ;;
+	*) install+=("$arg") ;;
+	esac
+done
+[[ ${#install[@]} -gt 0 ]] || install=("${packages[@]}")
+[[ ${#install[@]} -gt 0 ]] || die "no packages to install"
+
+mkdir -p "$root"
+root=$(readlink -f "$root")
+[[ $root != / ]] || die "refusing to install into /"
+
+tmp=$(mktemp -d /var/tmp/rpmstrap.XXXXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+
+# The host's rpm writes the new root's database, so it must use the path the
+# distribution's own rpm expects. rpm reads $XDG_CONFIG_HOME/rpm/macros last.
+mkdir -p "$tmp/config/rpm"
+printf '%%_dbpath %s\n' "$dbpath" >"$tmp/config/rpm/macros"
+
+mount_api_vfs "$root"
+
+# --use-host-config: read repositories from the profile, not from the (still
+# empty) new root. The metadata cache is thrown away afterwards.
+XDG_CONFIG_HOME=$tmp/config dnf5 -y \
+	--installroot="$root" \
+	--use-host-config \
+	--releasever="$release" \
+	--setopt=reposdir="$profile_dir" \
+	--setopt=cachedir="$tmp/cache" \
+	--setopt=system_cachedir="$tmp/cache" \
+	--setopt=install_weak_deps=False \
+	"${dnf_opts[@]}" \
+	install "${install[@]}"
+
+# Catch a profile whose dbpath doesn't match the distribution: its rpm and
+# dnf would see an empty database.
+if [[ -x $root/usr/bin/rpm ]]; then
+	target_dbpath=$(chroot "$root" /usr/bin/rpm --eval '%{_dbpath}')
+	[[ $target_dbpath == "$dbpath" ]] ||
+		die "$distro $release keeps its rpm database in $target_dbpath, but" \
+			"it was written to $dbpath: set dbpath in $profile_dir/profile"
+fi
+
+echo "rpmstrap: installed $distro $release in $root"
+if [[ ${root%/*} == /var/lib/machines ]]; then
+	echo "rpmstrap: start it with: machinectl start ${root##*/}"
+fi

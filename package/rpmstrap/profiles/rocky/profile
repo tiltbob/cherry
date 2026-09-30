@@ -1,0 +1,7 @@
+# Rocky Linux, 9 and 10
+packages=(rocky-release systemd passwd dnf util-linux vim-minimal)
+case $release in
+8|8.*) die "EL8 repositories need modularity, which Cherry's dnf5 is built without" ;;
+9|9.*) dbpath=/var/lib/rpm ;;
+*) dbpath=/usr/lib/sysimage/rpm ;;
+esac

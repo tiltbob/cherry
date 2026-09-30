@@ -1,0 +1,4 @@
+# Fedora Linux, 41 and later
+# As in systemd-nspawn(1): enough to boot, log in and run dnf.
+packages=(fedora-release systemd systemd-networkd passwd dnf5 util-linux vim-minimal)
+dbpath=/usr/lib/sysimage/rpm
