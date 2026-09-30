@@ -1,6 +1,6 @@
 # pacstrap: status
 
-Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `aa177e0`.
+Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `9754b28` (debootstrap and rpmstrap merged; my scenario is now `s6_pacstrap`).
 
 ## Status
 
