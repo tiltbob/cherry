@@ -161,6 +161,37 @@ machinectl shell fedora
   270 MB. While installing, rpmstrap needs about 180 MB more for repository
   metadata and packages, and deletes them afterwards.
 
+### Arch Linux containers with pacstrap
+
+`pacstrap` installs Arch Linux into a directory with pacman, which verifies
+every package against the Arch Linux keyring:
+
+```sh
+systemctl start pacman-init    # waits until the keyring is ready
+pacstrap -K -c /var/lib/machines/arch base
+rm -rf /var/cache/pacman/pkg/*
+machinectl start arch
+machinectl shell arch
+```
+
+- `pacman-init.service` builds the host's keyring in `/var/lib/pacman/gnupg`
+  at every boot, from the Arch Linux keyring in the image. Boot doesn't wait
+  for it, so start it before the first `pacstrap`.
+- `-K` gives the container a keyring of its own. Without it, pacstrap copies
+  the host's, including the host's local signing key.
+- `-c` downloads the packages to the host's `/var/cache/pacman/pkg` instead of
+  the container's. They are only needed during the install, so clear them.
+- Repositories and mirrors come from `/etc/pacman.conf` and
+  `/etc/pacman.d/mirrorlist`, which are read-only. To use others, pass
+  `-C <pacman.conf>`, plus `-M` to keep the container's own mirrorlist rather
+  than the host's.
+- To bring up the container's veth link, run
+  `systemctl enable --now systemd-networkd systemd-resolved` inside it.
+- `base` uses about 600 MB of RAM, plus about 125 MB for the package cache
+  until you clear it.
+- Packages signed by a key newer than the image's keyring still install: pacman
+  fetches the key over WKD and checks it against the Arch Linux master keys.
+
 ## Security notes
 
 This is a development image:

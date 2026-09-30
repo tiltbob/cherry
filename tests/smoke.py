@@ -11,6 +11,9 @@
      (skipped when the guest cannot reach deb.debian.org)
   5. rpmstrap installs Fedora into /var/lib/machines and the container boots
      (skipped when the guest cannot reach mirrors.fedoraproject.org)
+  6. pacstrap installs Arch Linux into /var/lib/machines, the container's own
+     pacman downloads in its Landlock sandbox, and the container boots
+     (skipped when the guest cannot reach the Arch Linux mirrors)
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -340,9 +343,51 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
+    def s6_pacstrap(self):
+        vm = self.vm
+        root = "/var/lib/machines/arch"
+        # The keyring is built offline at every boot, without holding up boot.
+        vm.run("systemctl start pacman-init.service", timeout=300)
+        keys = vm.run("pacman-key --list-keys | grep -c '^pub'")
+        check(int(keys) > 20, f"the pacman keyring holds only {keys} keys")
+        # pacman itself probes the mirror, so a proxy set for pacstrap applies here too.
+        rc, out = vm.run("d=$(mktemp -d) && timeout 60 pacman --dbpath $d -Sy; rc=$?; rm -rf $d; exit $rc",
+                         timeout=120, check_rc=False)
+        if rc != 0:
+            log(f"skipped: the Arch Linux mirrors are unreachable:\n{out}")
+            return
+        vm.run(f"mkdir -p {root} && pacstrap -K -c {root} base", timeout=3600)
+        log("pacstrap: " + vm.run(f"du -sh {root} /var/cache/pacman/pkg | tr '\\n' ' '"))
+        vm.run("rm -rf /var/cache/pacman/pkg/*")
+        caps = vm.run(f"chroot {root} getcap /usr/bin/newuidmap")
+        check("cap_setuid" in caps, f"newuidmap lost its file capability: {caps!r}")
+        vm.run(f"chroot {root} pacman-key --list-keys >/dev/null")
+        # The container's own pacman downloads as DownloadUser=alpm in a Landlock sandbox. --pipe:
+        # no pty, so no OSC 3008 context sequences on the console.
+        vm.run(f"systemd-nspawn -q --pipe -D {root} ${{https_proxy:+--setenv=https_proxy=$https_proxy}} "
+               "pacman -Syy --noconfirm | cat", timeout=600)
+        vm.run("machinectl start arch")
+        # As in s4_debootstrap: `systemctl -M` fails until the container's bus is up, so wait for
+        # its console output in the host journal first. Arch's systemd names targets by their
+        # description only ("Reached target Multi-User System.").
+        vm.run("for i in $(seq 300); do journalctl -u systemd-nspawn@arch --no-pager "
+               "| grep -q -E 'Reached target (multi-user\\.target|Multi-User System)' && exit 0; sleep 1; done; "
+               "journalctl -u systemd-nspawn@arch --no-pager | tail -n 40; exit 1", timeout=600)
+        rc, state = vm.run("systemctl -M arch is-system-running --wait", timeout=300, check_rc=False)
+        state = state.splitlines()[-1] if state else ""
+        if state != "running":
+            log(f"container state {state!r}:\n" + vm.run("systemctl -M arch --failed --no-legend --plain",
+                                                         check_rc=False)[1])
+        check(state in ("running", "degraded"), f"the Arch container is {state!r}")
+        check("ID=arch" in vm.run("systemd-run -M arch --wait -q -P cat /etc/os-release"),
+              "the container is not Arch Linux")
+        vm.run("machinectl terminate arch; for i in $(seq 30); do machinectl show arch >/dev/null 2>&1 || exit 0; "
+               "sleep 1; done; exit 1", timeout=60)
+        vm.run(f"rm -rf {root}")
+
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap]
+                     self.s5_rpmstrap, self.s6_pacstrap]
         try:
             for i, scenario in enumerate(scenarios, 1):
                 name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")

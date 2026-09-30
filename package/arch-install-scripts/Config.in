@@ -1,0 +1,14 @@
+config BR2_PACKAGE_ARCH_INSTALL_SCRIPTS
+	bool "arch-install-scripts"
+	depends on BR2_PACKAGE_PACMAN
+	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # coreutils
+	select BR2_PACKAGE_BASH
+	select BR2_PACKAGE_COREUTILS # cp --no-preserve=ownership
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_MOUNT # umount --lazy
+	select BR2_PACKAGE_UTIL_LINUX_UNSHARE # unshare --fork --pid
+	help
+	  pacstrap and arch-chroot, to bootstrap and enter an Arch
+	  Linux root. genfstab is not installed.
+
+	  https://gitlab.archlinux.org/archlinux/arch-install-scripts
