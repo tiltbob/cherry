@@ -2,9 +2,9 @@ name: build
 
 on:
   push:
-    paths-ignore: ['coordination/**', '**.md']
+    paths-ignore: ['**.md']
   pull_request:
-    paths-ignore: ['coordination/**', '**.md']
+    paths-ignore: ['**.md']
 
 # A build takes one to two hours; a newer push to the same branch replaces the
 # running build instead of queueing behind it.
