@@ -157,6 +157,9 @@ machinectl shell fedora
   path instead of the name.
 - EL8 isn't supported: its repositories need modularity, which Cherry's dnf5
   is built without.
+- The Fedora tree above uses about 195 MB of RAM, and EL 9 or 10 trees about
+  270 MB. While installing, rpmstrap needs about 180 MB more for repository
+  metadata and packages, and deletes them afterwards.
 
 ## Security notes
 
