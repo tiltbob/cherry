@@ -368,9 +368,10 @@ class Smoke:
                "pacman -Syy --noconfirm | cat", timeout=600)
         vm.run("machinectl start arch")
         # As in s4_debootstrap: `systemctl -M` fails until the container's bus is up, so wait for
-        # its console output in the host journal first.
+        # its console output in the host journal first. Arch's systemd names targets by their
+        # description only ("Reached target Multi-User System.").
         vm.run("for i in $(seq 300); do journalctl -u systemd-nspawn@arch --no-pager "
-               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "| grep -q -E 'Reached target (multi-user\\.target|Multi-User System)' && exit 0; sleep 1; done; "
                "journalctl -u systemd-nspawn@arch --no-pager | tail -n 40; exit 1", timeout=600)
         rc, state = vm.run("systemctl -M arch is-system-running --wait", timeout=300, check_rc=False)
         state = state.splitlines()[-1] if state else ""

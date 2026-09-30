@@ -4,21 +4,26 @@ Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `9754b28` (debootstrap and r
 
 ## Status
 
-**Not ready: the Arch container stalls at boot under `machinectl start`.**
-Everything up to the container boot passes. The diagnostics are running now.
+**Not ready yet: rerunning `s6_pacstrap` after fixing the scenario's
+container-boot wait.** The container does boot.
 
-- **What fails in `s6_pacstrap`, under TCG with this sandbox's proxy:**
-  - These pass: `pacstrap`, the file-capability check, and the container's
-    own `pacman -Syy`. The last one really downloads core and extra inside
-    Arch's Landlock sandbox, under nspawn.
-  - `machinectl start arch` then stops at "Starting D-Bus System Message
-    Bus..." and "Starting User Login Management...". Nothing more reaches the
-    console for more than 5 minutes, and `multi-user.target` is never
-    reached.
-  - Arch's `base` has systemd 262 and uses dbus-broker. Debian (systemd 257,
-    dbus-daemon) and Fedora boot fine for you.
-  - Next I'll compare against `systemd-nspawn -b` without `-U`, and read the
-    container's own journal.
+- **The "stall" was mostly my test.** A diagnostic run in QEMU shows
+  `machinectl start arch` booting the pacstrapped tree to its login prompt
+  in about 12 s under TCG, with no warnings in the container's journal.
+  - Arch's systemd 262 prints targets by description only: "Reached target
+    Multi-User System.".
+  - Debian's 257 prints "Reached target multi-user.target - Multi-User
+    System.".
+  - The journal grep I copied from `s4_debootstrap` therefore never matched.
+    `s6_pacstrap` now matches either form.
+  - One earlier run's console output stopped after "Starting User Login
+    Management..." instead. The rerun will show whether that recurs.
+- **These pass under TCG, with this sandbox's proxy:**
+  - `pacstrap`
+  - the file-capability check
+  - the container's own `pacman -Syy`, which really downloads core and extra
+    inside Arch's Landlock sandbox, under nspawn
+
 - **Rebased onto `9754b28`.** My scenario is now `s6_pacstrap`, after
   `s5_rpmstrap`, and the `Config.in` and defconfig lines are merged in sorted
   order. `make cherry_x86_64_defconfig` gives no Kconfig warnings with all
@@ -191,6 +196,17 @@ per the standing guidance.
     already tells pacstrap users to run that.
   - Your call. I've left it enabled, so the keyring is ready by the time
     someone logs in.
+
+## For base (seen while testing, not pacstrap-specific)
+
+- **Host networkd can't write its state files.** With any veth container,
+  the host journal fills with:
+  - `systemd-networkd: Failed to update state file /run/systemd/netif/state, ignoring: Permission denied`
+  - `ve-<name>: Failed to update link state file /run/systemd/netif/links/N, ignoring: Permission denied`
+
+  Maybe `/run/systemd/netif` isn't owned by `systemd-network` now that users
+  are created at build time. It's harmless for NAT and DHCP so far, but
+  `networkctl` status may be stale.
 
 ## Answers for base (re: `coordination/base.md` @ f0f7ef4)
 
