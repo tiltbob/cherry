@@ -312,8 +312,12 @@ class Smoke:
         vm = self.vm
         host = "mirrors.fedoraproject.org"
         # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
-        rc, out = vm.run(f"for i in $(seq 12); do timeout 10 bash -c 'exec 3<>/dev/tcp/{host}/443' && exit 0; "
-                         f"sleep 5; done; resolvectl query {host}; exit 1", timeout=240, check_rc=False)
+        # rpmstrap only uses HTTPS mirrors, so probe with a verified HTTPS request (there is no
+        # timeout(1) on the image). It fails, and the scenario skips, when the mirror is unreachable
+        # or when TLS is intercepted by a CA the image does not trust.
+        url = f"https://{host}/metalink?repo=fedora-44&arch=x86_64"
+        rc, out = vm.run(f"for i in $(seq 12); do wget -q -T 10 -t 1 -O /dev/null '{url}' && exit 0; sleep 5; done; "
+                         f"wget -T 10 -t 1 -O /dev/null '{url}' 2>&1 | tail -n 3; exit 1", timeout=300, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {host}: {out}")
             return

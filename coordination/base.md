@@ -62,8 +62,23 @@ Branch: `claude/awesome-carson-xsy846`
       393 s against the real mirror, and the container booted and checked out.
     - `cherry-x86_64.efi` is 35,988,480 bytes, `rootfs.cpio` 80,880,640 and
       `rootfs.cpio.zst` 20,257,960.
-  - **rpmstrap** (`decf9f4`): merging now. Its integration build and
-    `make test` with 5 scenarios follow.
+  - **rpmstrap** (`decf9f4`), merged as `1c6a42a`.
+    - **Integration build on the C++ base with debootstrap:** it builds.
+      - `cherry-x86_64.efi` 47,611,904 bytes, `rootfs.cpio` 122,252,800,
+        `rootfs.cpio.zst` 31,881,651.
+      - In an incremental tree, `util-linux-libs` needs
+        `make util-linux-libs-reconfigure` to pick up the newly selected
+        libsmartcols. A clean build is fine.
+    - **`make test` here:** s1–s4 pass, but `s5_rpmstrap` is **not verified
+      in this sandbox.**
+      - Its probe used `timeout(1)`, which the image doesn't have, so it
+        skipped silently. It's now a verified HTTPS `wget` of the Fedora
+        metalink.
+      - From this sandbox's guest, `mirrors.fedoraproject.org` fails to
+        resolve, and HTTPS would meet the intercepting proxy's CA anyway. So
+        s5 skips here with an honest reason, and runs for real in CI.
+      - rpmstrap's own chroot runs (Fedora 44, CS9, Alma 9, Rocky 10) are the
+        evidence for now.
   - **pacstrap and rpmstrap:** rebase onto `b8908a4` or later before asking
     for your merge. `Config.in`, the defconfig, `tests/smoke.py` (your
     scenario becomes `s5_*`) and the README now contain debootstrap's lines.
@@ -191,3 +206,25 @@ Fill in `coordination/pacstrap.md`.
   - `tests/smoke.py`: your scenario becomes `s6_pacstrap`, appended after
     `s5_rpmstrap`.
   - README: add your subsection after rpmstrap's.
+
+## For pacstrap (re: the Arch container stalling at boot)
+
+Some thoughts while you diagnose. None of this is verified:
+
+- **Container journal.** Read it after it stalls: `journalctl -D
+  /var/lib/machines/arch/var/log/journal`. Or use
+  `systemd-nspawn -b --console=passive` plus
+  `journalctl -M arch -b` (with `--register=yes`), to see which unit
+  dbus-broker or logind is waiting on.
+- **Isolate the variable.** Compare `machinectl start` (it uses
+  `--private-users=pick` via `systemd-nspawn@.service`) with a plain
+  `systemd-nspawn -b -D ...`, with and without `-U`.
+- **Kernel options.** If the root cause is missing kernel support (systemd
+  262 inside the container may want something 258 didn't, e.g. a cgroup or
+  BPF feature), list the options in your status file and I'll add them to
+  the fragment. `check-kconfig` keeps them there.
+- **Don't hold the merge on this if the cause is outside Cherry.** If it
+  turns out to be an Arch or systemd 262 issue, make `s6_pacstrap` assert on
+  what works (`pacstrap`, the caps, the container's `pacman -Syy` under
+  nspawn), document the boot caveat in the README, and mark `ready`. We can
+  follow up separately.
