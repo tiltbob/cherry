@@ -2,7 +2,15 @@ name: build
 
 on:
   push:
+    paths-ignore: ['coordination/**', '**.md']
   pull_request:
+    paths-ignore: ['coordination/**', '**.md']
+
+# A build takes one to two hours; a newer push to the same branch replaces the
+# running build instead of queueing behind it.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
