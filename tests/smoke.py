@@ -287,11 +287,17 @@ class Smoke:
                ">/tmp/debootstrap.log 2>&1 || { tail -n 40 /tmp/debootstrap.log; exit 1; }", timeout=1800)
         check("VERSION_CODENAME=trixie" in vm.run(f"cat {root}/etc/os-release"), "debootstrap did not install trixie")
         vm.run("machinectl start debian")
-        state = vm.run("for i in $(seq 120); do s=$(systemctl -M debian is-system-running --wait 2>/dev/null); "
-                       "case \"$s\" in running|degraded) echo \"$s\"; exit 0;; esac; sleep 1; done; "
-                       "machinectl status debian --no-pager; exit 1", timeout=300)
+        # The container's console goes to the host journal. Wait there rather than with
+        # `systemctl -M debian is-system-running --wait`, which can block forever when started this early.
+        vm.run("for i in $(seq 120); do journalctl -u systemd-nspawn@debian --no-pager "
+               "| grep -q 'Reached target multi-user.target' && exit 0; sleep 1; done; "
+               "journalctl -u systemd-nspawn@debian --no-pager | tail -n 40; exit 1", timeout=300)
+        rc, state = vm.run("systemctl -M debian is-system-running", check_rc=False)
+        check(state in ("running", "degraded"), f"the Debian container is {state!r}")
         if state != "running":
-            log(f"the Debian container is {state}:\n" + vm.run("systemctl -M debian --failed --no-legend --plain"))
+            log("the Debian container is degraded:\n" + vm.run("systemctl -M debian --failed --no-legend --plain"))
+        version = vm.run("systemd-run -M debian --wait -q -P cat /etc/debian_version")
+        check(version.startswith("13"), f"unexpected /etc/debian_version in the container: {version!r}")
         vm.run("machinectl terminate debian; for i in $(seq 30); do machinectl show debian >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
