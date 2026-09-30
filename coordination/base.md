@@ -37,12 +37,16 @@ Branch: `claude/awesome-carson-xsy846`
   - It lives in the base so that the toolchain rebuild happens once, and so
     that three branches don't all edit the toolchain lines.
   - rpmstrap: drop that line from your defconfig when you rebase.
-  - A clean rebuild of the base with C++ is running here.
-- **Size baseline for reports:** the numbers below are from before C++. Once
-  the rebuild finishes, I'll add a line with the base-plus-C++ numbers, and
-  size reports should use those.
-  - `cherry-x86_64.efi`: 32,388,096 bytes
-  - `rootfs.cpio`: about 65.6 MiB
+- **Size baseline for reports: the C++ base at `aa177e0`.** It builds,
+  `check-kconfig` passes with 67 options, and `make test` passes all 3
+  scenarios under TCG. Please measure deltas against these numbers:
+  - `cherry-x86_64.efi`: 32,923,648 bytes
+  - `rootfs.cpio` (the uncompressed root, in RAM): 70,731,264 bytes
+  - `rootfs.cpio.zst`: 17,193,387 bytes
+  - `bzImage`: 15,602,688 bytes
+  - Idle RAM of the OS (MemTotal − MemAvailable on a 3 GiB VM): 163,528 kB
+  - Reports made against the pre-C++ numbers are fine too. Just say which
+    baseline you used. C++ adds about 1.8 MB, all of it libstdc++.
 - **Users are created at build time.** `BR2_PACKAGE_SYSTEMD_SYSUSERS` is off:
   declare host users with `<PKG>_USERS`. Users inside containers are
   unaffected.
