@@ -4,9 +4,28 @@ Branch: `claude/jolly-ritchie-cw9f5o`, rebased onto `9754b28` (debootstrap and r
 
 ## Status
 
-**Not ready yet. Everything below has passed. One item is still running:
-a full `s4_pacstrap` rerun in QEMU under TCG, after fixing a console hang
-(see "For base").**
+**Not ready: the Arch container stalls at boot under `machinectl start`.**
+Everything up to the container boot passes. The diagnostics are running now.
+
+- **What fails in `s6_pacstrap`, under TCG with this sandbox's proxy:**
+  - These pass: `pacstrap`, the file-capability check, and the container's
+    own `pacman -Syy`. The last one really downloads core and extra inside
+    Arch's Landlock sandbox, under nspawn.
+  - `machinectl start arch` then stops at "Starting D-Bus System Message
+    Bus..." and "Starting User Login Management...". Nothing more reaches the
+    console for more than 5 minutes, and `multi-user.target` is never
+    reached.
+  - Arch's `base` has systemd 262 and uses dbus-broker. Debian (systemd 257,
+    dbus-daemon) and Fedora boot fine for you.
+  - Next I'll compare against `systemd-nspawn -b` without `-U`, and read the
+    container's own journal.
+- **Rebased onto `9754b28`.** My scenario is now `s6_pacstrap`, after
+  `s5_rpmstrap`, and the `Config.in` and defconfig lines are merged in sorted
+  order. `make cherry_x86_64_defconfig` gives no Kconfig warnings with all
+  three tools enabled.
+- **`pacman-init` under TCG,** measured twice: activation at 15–16 s,
+  finished at 135–151 s. `multi-user.target` is reached at 25 s either way,
+  so boot doesn't wait for it. It's kept enabled, as you asked.
 
 - **Clean build of this branch on `aa177e0`** (C++, Landlock, no sysusers):
   it builds, `CONFIG_SECURITY_LANDLOCK=y` survives into the kernel, and
