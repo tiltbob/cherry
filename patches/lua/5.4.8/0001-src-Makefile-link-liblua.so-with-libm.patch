@@ -1,0 +1,29 @@
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 00:00:00 +0000
+Subject: [PATCH] src/Makefile: link liblua.so with libm
+
+Buildroot's 0002-shared-libs-for-lua.patch links liblua.so without
+$(LIBS), so the library calls libm (sin, floor, ...) without a
+DT_NEEDED entry for it. A program that loads liblua before libm, such
+as rpm, then fails at startup:
+
+  Relink `/lib64/liblua.so.5.4.8' with `/lib64/libm.so.6' for IFUNC symbol `sin'
+
+Upstream: N/A, fixes Buildroot's own patch
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+ src/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/Makefile b/src/Makefile
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -69,7 +69,7 @@
+ 	$(RANLIB) $@
+ 
+ $(LUA_SO): $(CORE_O) $(LIB_O)
+-	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $?
++	$(CC) -o $@.$(PKG_VERSION) -shared -Wl,-soname="$@.$(PKG_VERSION)" $? -lm
+ 	ln -fs $@.$(PKG_VERSION) $@
+ 
+ ifneq (dynamic,$(BUILDMODE))
