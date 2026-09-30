@@ -1,0 +1,32 @@
+config BR2_PACKAGE_DEBOOTSTRAP
+	bool "debootstrap"
+	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # wget
+	depends on BR2_USE_WCHAR # wget
+	depends on BR2_PACKAGE_GNUPG2_DEPENDS # gnupg2
+	depends on !BR2_PACKAGE_GNUPG # gnupg2
+	select BR2_PACKAGE_DEBIAN_ARCHIVE_KEYRING
+	select BR2_PACKAGE_DEBOOTSTRAP_PKGDETAILS
+	select BR2_PACKAGE_GNUPG2
+	select BR2_PACKAGE_GNUPG2_GPGV # Release signatures
+	select BR2_PACKAGE_OPENSSL # wget: https
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_MOUNT # umount --lazy
+	select BR2_PACKAGE_WGET # BusyBox wget has no TLS
+	select BR2_PACKAGE_ZSTD # zstdcat: zstd-compressed .debs (Ubuntu)
+	help
+	  Bootstrap a Debian (or Ubuntu) root filesystem into a
+	  directory, e.g. /var/lib/machines/<name> for systemd-nspawn,
+	  without dpkg or apt on the host.
+
+	  Release files are verified with gpgv against
+	  debian-archive-keyring. .debs are unpacked with ar, tar and
+	  xzcat/zcat from BusyBox's default configuration.
+
+	  https://wiki.debian.org/Debootstrap
+
+comment "debootstrap needs a toolchain w/ wchar, threads, dynamic library"
+	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS
+	depends on BR2_USE_MMU
+	depends on BR2_PACKAGE_LIBGPG_ERROR_ARCH_SUPPORTS
+	depends on !BR2_USE_WCHAR || !BR2_TOOLCHAIN_HAS_THREADS || \
+		BR2_STATIC_LIBS

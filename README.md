@@ -111,6 +111,28 @@ to the container and masquerades its traffic.
 Everything lives in memory for now. Containers and their configuration are
 gone after a reboot.
 
+### Debian containers with debootstrap
+
+`debootstrap` installs Debian into a directory and verifies the archive's
+signatures against the Debian keyring in `/usr/share/keyrings`:
+
+```sh
+debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie /var/lib/machines/trixie
+machinectl start trixie
+machinectl shell trixie
+```
+
+- The `--include` packages let `machinectl start` boot the container and
+  `machinectl shell` enter it. Without them, `systemd-nspawn -D <dir>` still
+  gives you a shell.
+- To bring up the container's veth link, run
+  `systemctl enable --now systemd-networkd` inside it.
+- The default mirror is `http://deb.debian.org/debian`. To use another one,
+  HTTP or HTTPS, pass it as the third argument.
+- The tree above uses about 240 MB of RAM.
+- Ubuntu and other derivatives need their own keyring: pass
+  `--keyring=<file>`.
+
 ## Security notes
 
 This is a development image:

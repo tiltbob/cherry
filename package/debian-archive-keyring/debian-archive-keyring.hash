@@ -1,0 +1,4 @@
+# Locally computed, after checking the sha1 that snapshot.debian.org records
+# for it (d9ece07d6610a9ef3b3048c302d70daffbf8c4cc)
+sha256  9ea7778e443144ca490668737a8ab22dd3e748bb99e805e22ec055abeb3c7fac  debian-archive-keyring_2025.1_all.deb
+sha256  8f918c0bebd1454a084698a95c09d9a03cec8453dad1fc6eab9e6427da9d33a9  usr/share/doc/debian-archive-keyring/copyright

@@ -1,0 +1,4 @@
+# From https://snapshot.debian.org/archive/debian/20260918T023724Z/pool/main/b/base-installer/base-installer_1.230.dsc
+sha256  2f7e61caf575ac6a72fc1fbadfdd6efeeab0c221477ebffaa39773b84b6fb66b  base-installer_1.230.tar.xz
+# Locally computed
+sha256  16e2fcb92d621d3694afa0a2dcf4206a3c65d272a6839e3fdedfcb13ebdc0805  debian/copyright

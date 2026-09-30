@@ -1,0 +1,7 @@
+config BR2_PACKAGE_DEBIAN_ARCHIVE_KEYRING
+	bool "debian-archive-keyring"
+	help
+	  The OpenPGP keys that sign the Debian archive, installed in
+	  /usr/share/keyrings for debootstrap.
+
+	  https://salsa.debian.org/release-team/debian-archive-keyring

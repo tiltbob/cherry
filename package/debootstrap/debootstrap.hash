@@ -1,0 +1,4 @@
+# From https://snapshot.debian.org/archive/debian/20260831T204404Z/pool/main/d/debootstrap/debootstrap_1.0.145.dsc
+sha256  7cc8f9e386ed8dfd4b062a3b9527f0f45176dfa1b065e7db270f837956516b20  debootstrap_1.0.145.tar.gz
+# Locally computed
+sha256  c571036fd20c881f599a94b9b429ac45047d9d6fb3d6088e1a03fa46b4b2f76f  debian/copyright

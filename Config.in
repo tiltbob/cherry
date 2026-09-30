@@ -1,4 +1,7 @@
 menu "Cherry packages"
 # One line per package, sorted:
 # source "$BR2_EXTERNAL_CHERRY_PATH/package/<name>/Config.in"
+source "$BR2_EXTERNAL_CHERRY_PATH/package/debian-archive-keyring/Config.in"
+source "$BR2_EXTERNAL_CHERRY_PATH/package/debootstrap/Config.in"
+source "$BR2_EXTERNAL_CHERRY_PATH/package/debootstrap-pkgdetails/Config.in"
 endmenu
