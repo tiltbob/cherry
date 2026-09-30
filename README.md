@@ -33,7 +33,7 @@ cd cherry
 make        # output/cherry_x86_64/images/cherry-x86_64.efi
 ```
 
-Buildroot 2026.02.3 LTS is a git submodule. This repository is a
+Buildroot 2026.08 is a git submodule. This repository is a
 `BR2_EXTERNAL` tree, and the top-level `Makefile` wraps Buildroot:
 
 | Command | Purpose |
