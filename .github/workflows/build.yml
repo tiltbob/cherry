@@ -1,22 +1,58 @@
 name: build
 
+# Every pull request is built, merged with its base branch, as the "build"
+# check before it merges (merge_group does the same for a merge queue). Pushes
+# to main build again so that pull requests restore warm caches from main.
+# Other branches build only through a pull request, or by hand.
 on:
   push:
+    branches: [main]
     paths-ignore: ['coordination/**', '**.md']
   pull_request:
-    paths-ignore: ['coordination/**', '**.md']
+  merge_group:
+  workflow_dispatch:
 
-# A build takes one to two hours; a newer push to the same branch replaces the
-# running build instead of queueing behind it.
+# A build takes one to two hours; a newer push to the same branch or pull
+# request replaces the running build instead of queueing behind it.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # A required check must report on every pull request, which paths-ignore
+  # would prevent. So pull requests and merge groups that change only
+  # coordination/ or Markdown files skip the build job instead, and a skipped
+  # job counts as passed.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.diff.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          case $GITHUB_EVENT_NAME in
+          pull_request) base=HEAD^1 ;; # the merge commit's base branch parent
+          merge_group) base=$MERGE_GROUP_BASE ;;
+          *) base= ;;
+          esac
+          build=true
+          if [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
+            printf '%s\n' "$files"
+            grep -qvE '^coordination/|\.md$' <<<"$files" || build=false
+          fi
+          echo "build=$build" | tee -a "$GITHUB_OUTPUT"
+
   build:
-    # A pull request from a branch of this repository is already built by its
-    # push.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: changes
+    # Also when the changes job failed, leaving its output empty: a required
+    # check must not pass without a build.
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     env:
@@ -85,7 +121,7 @@ jobs:
 
       # Only when the sources changed: the download cache is about 800 MB.
       - name: Save download cache
-        if: github.event_name == 'push' && steps.dl.outputs.cache-hit != 'true'
+        if: github.event_name != 'merge_group' && steps.dl.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: dl
@@ -94,9 +130,10 @@ jobs:
       - name: Build
         run: make
 
-      # Also after a failed or cancelled build, so the next run resumes warm.
+      # Also after a failed or cancelled build, so the next run resumes warm. Not
+      # from a merge queue: nothing restores from its temporary branches.
       - name: Save ccache
-        if: always() && github.event_name == 'push' && steps.ccache.outcome == 'success'
+        if: always() && github.event_name != 'merge_group' && steps.ccache.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: .ccache
