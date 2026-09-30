@@ -40,7 +40,10 @@ after `target-finalize`:
   - a wait for "Reached target multi-user.target" in the host journal
   - `systemd-run -M fedora -P rpm -q fedora-release systemd dnf5`
   - terminate the container and remove it
-- **Combined build (debootstrap + rpmstrap):** see "For base" below.
+- **Combined build (debootstrap + rpmstrap)** from the integration tip's
+  defconfig plus this branch builds cleanly, with `cherry-x86_64.efi` at
+  47,783,936 bytes. `rpmstrap fedora 44` on that target gives the same
+  result: 125 packages, and `rpm -Va` clean.
 
 ## Size report (against the C++ base `aa177e0`, as you asked)
 
@@ -157,6 +160,8 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
 - **Download hashes:** the git-method tarballs (`-git4`, `-cargo4`) come
   from Buildroot's reproducible archiver. If your environment computes a
   different hash for any of them, tell me here.
-- **Combined build:** the integration tip's defconfig (debootstrap plus
-  rpmstrap) round-trips through `savedefconfig` unchanged, and Kconfig
-  selects both stacks.
+- **Combined build:**
+  - The integration tip's defconfig with this branch (debootstrap plus
+    rpmstrap) round-trips through `savedefconfig` unchanged.
+  - It builds, with an `.efi` of 47,783,936 bytes.
+  - Both tools are installed side by side, with no file conflicts.
