@@ -5,7 +5,9 @@
      initramfs, which is remounted read-only; /var is a tmpfs; networking and
      sshd work, an SSH key passed as a credential is installed, no unit failed
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
-     sets up masquerading for it
+     sets up masquerading for it and can write its state files, even after
+     systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
+     differently (as pacstrap's pacman hooks do)
   3. a second boot starts from scratch again (nothing persists)
   4. debootstrap installs Debian into /var/lib/machines and the container boots
      (skipped when the guest cannot reach deb.debian.org)
@@ -230,6 +232,16 @@ class Smoke:
         state = vm.settle()
         check(state == "running", f"system is {state!r}, not running")
 
+    def check_networkd_state(self):
+        """systemd-networkd still owns /run/systemd/netif and never failed to write its state files there."""
+        vm = self.vm
+        owners = vm.run("stat -c '%n %U:%G' /run/systemd/netif /run/systemd/netif/links /run/systemd/netif/leases")
+        check(all(line.endswith(" systemd-network:systemd-network") for line in owners.splitlines()),
+              f"systemd-network no longer owns its runtime directories:\n{owners}")
+        rc, errors = vm.run("journalctl -b -u systemd-networkd --no-pager | grep -E 'Failed to update .*state file'",
+                            check_rc=False)
+        check(rc == 1, "systemd-networkd could not write its state files:\n" + "\n".join(errors.splitlines()[-5:]))
+
     def s1_http_boot(self):
         vm = self.vm
         self.boot()
@@ -265,8 +277,17 @@ class Smoke:
         vm = self.vm
         root = "/var/lib/machines/smoke"
         vm.run(f"rm -rf {root} && mkdir -p {root}/usr {root}/etc && "
+               f"for d in proc sys dev run tmp; do mkdir {root}/$d; done && "
                f"cp /usr/lib/os-release {root}/etc/os-release && "
                f"for l in bin sbin lib lib64; do [ -L /$l ] && ln -s $(readlink /$l) {root}/$l; done; ls -l {root}")
+        # pacstrap's pacman hooks run `systemd-tmpfiles --create` chrooted in the new root, which
+        # looks up systemd-network in the new root's passwd. arch-chroot sets up the same chroot.
+        vm.run(f"sed -E 's/^(systemd-network:x:)[0-9]+:[0-9]+:/\\1192:192:/' /etc/passwd >{root}/etc/passwd && "
+               f"sed -E 's/^(systemd-network:x:)[0-9]+:/\\1192:/' /etc/group >{root}/etc/group && "
+               f"mount --bind /usr {root}/usr && "
+               f"{{ arch-chroot {root} systemd-tmpfiles --create /usr/lib/tmpfiles.d/systemd-network.conf; rc=$?; "
+               f"umount {root}/usr; exit $rc; }}")
+        self.check_networkd_state()
         vm.run(f"systemd-run --unit=smoke-nspawn systemd-nspawn -M smoke -D {root} --bind-ro=/usr "
                "--network-veth /bin/sh -c 'ip link set host0 up && exec sleep 100000'")
         vm.run("for i in $(seq 60); do machinectl show smoke -p State --value 2>/dev/null | grep -qx running "
@@ -274,6 +295,7 @@ class Smoke:
         vm.run("for i in $(seq 60); do networkctl status ve-smoke | grep -Eq 'State: .*\\(configured' "
                "&& exit 0; sleep 1; done; networkctl status ve-smoke; exit 1", timeout=120)
         vm.run("nft list table ip io.systemd.nat")
+        self.check_networkd_state()
         vm.run("machinectl terminate smoke; for i in $(seq 30); do machinectl show smoke >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
 
@@ -384,6 +406,7 @@ class Smoke:
         check(state in ("running", "degraded"), f"the Arch container is {state!r}")
         check("ID=arch" in vm.run("systemd-run -M arch --wait -q -P cat /etc/os-release"),
               "the container is not Arch Linux")
+        self.check_networkd_state()
         vm.run("machinectl terminate arch; for i in $(seq 30); do machinectl show arch >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")

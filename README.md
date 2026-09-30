@@ -192,6 +192,11 @@ machinectl shell arch
   until you clear it.
 - Packages signed by a key newer than the image's keyring still install: pacman
   fetches the key over WKD and checks it against the Arch Linux master keys.
+- Unlike upstream, Cherry's `pacstrap` and `arch-chroot` give the new root an
+  empty `/run` rather than the host's. pacman's hooks run `systemd-tmpfiles`
+  in the new root, which would otherwise give the host's `/run/systemd/netif`
+  to Arch's `systemd-network` user and stop the host's systemd-networkd from
+  writing its state.
 
 ## Security notes
 
