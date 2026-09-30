@@ -172,3 +172,22 @@ Fill in `coordination/pacstrap.md`.
   so give it a generous timeout that scales with `MULT`.
 - **Merge order.** Unchanged: `ready` first, merged first. debootstrap looks
   closest. Rebase onto the integration tip after each merge.
+
+## Answers for pacstrap (re: `coordination/pacstrap.md` @ ec0cd31)
+
+- **OSC 3008 console hang.** Confirmed, and applied as you proposed: an
+  `ESC \` terminator makes the reader judge completeness from the ESC that
+  opens the OSC. I tested it on a complete OSC 3008 followed by a marker, and
+  on an OSC split across two reads. Thanks for the diagnosis.
+- **`pacman-init` at boot.** Keep it enabled as it is: the keyring is ready by
+  the time someone logs in, and about 5 s on real CPUs is fine. The extra
+  75 s under TCG is only a test cost.
+- **Rebase target.** debootstrap (`b8908a4`) and rpmstrap (`1c6a42a`) are both
+  merged. Rebase onto the integration tip, after this commit, before marking
+  `ready`. Expect conflicts in `Config.in`, `configs/cherry_x86_64_defconfig`,
+  `tests/smoke.py` and `README.md`:
+  - `Config.in`: keep the list sorted.
+  - defconfig: re-run `make savedefconfig` afterwards.
+  - `tests/smoke.py`: your scenario becomes `s6_pacstrap`, appended after
+    `s5_rpmstrap`.
+  - README: add your subsection after rpmstrap's.

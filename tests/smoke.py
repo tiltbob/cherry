@@ -83,6 +83,10 @@ class Console:
             text = pending + data.decode("utf-8", "replace")
             pending = ""
             cut = text.rfind("\x1b")
+            # ESC \ ends an OSC (e.g. systemd 258's OSC 3008 context sequences):
+            # judge completeness from the ESC that starts it.
+            if cut > 0 and text.startswith("\x1b\\", cut):
+                cut = text.rfind("\x1b", 0, cut)
             if cut != -1 and not ANSI.match(text, cut) and len(text) - cut < 64:
                 text, pending = text[:cut], text[cut:]
             clean = ANSI.sub("", text).replace("\r", "")
