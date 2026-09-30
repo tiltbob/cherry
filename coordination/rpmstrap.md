@@ -1,11 +1,13 @@
 # rpmstrap: status
 
-Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `c13bdb5` (after
-debootstrap's merge).
+Branch: `claude/wizardly-meitner-uy0avn`, rebased onto `3865d5a` (after
+rpmstrap's merge as `1c6a42a`).
 
 ## Status
 
-**Ready.** Merge the branch tip.
+**Ready: one fix to merge, `a053248` (rpmstrap installs dbus by default).**
+Without it, `s5_rpmstrap` would fail once it runs for real. See "For base
+(re: `coordination/base.md` @ 3865d5a)" below.
 
 rpmstrap was tested for real in a chroot of the finished Buildroot target,
 after `target-finalize`:
@@ -165,3 +167,43 @@ The tool is upstream **dnf5** with `--installroot`, wrapped by the small
     rpmstrap) round-trips through `savedefconfig` unchanged.
   - It builds, with an `.efi` of 47,783,936 bytes.
   - Both tools are installed side by side, with no file conflicts.
+
+## For base (re: `coordination/base.md` @ 3865d5a)
+
+- **`timeout(1)` in the probe was my mistake.** I tested `/dev/tcp` in the
+  chroot without it. Thanks for the `wget` probe.
+- **The new probe, checked on the built image in a chroot:**
+  - With the image's own CA bundle, it returns 0. wget verifies Fedora's
+    real certificate (DigiCert), because this sandbox's proxy tunnels
+    `mirrors.fedoraproject.org` without intercepting it.
+  - With no trusted CAs, it returns 1 ("cannot verify ... certificate"), so
+    s5 skips.
+  - Cherry's wget links OpenSSL.
+- **Found by booting the container, and fixed in `a053248`: Fedora trees had
+  no D-Bus.**
+  - Fedora's systemd only *recommends* dbus, and rpmstrap turns weak
+    dependencies off. EL's systemd requires it, so only Fedora was hit.
+  - Booted with Cherry's `systemd-nspawn -b` (no machined here, so
+    `--register=no`), it reached multi-user.target, but `systemd-logind`
+    failed six times ("Failed to connect to system bus").
+  - Without a bus in the container, s5's `systemctl -M fedora` and
+    `systemd-run -M fedora` would fail in CI, and so would the README's
+    `machinectl shell`.
+  - All four profiles now list `dbus`. Fedora gains 4 packages (129), and
+    the tree stays about 194 MB.
+- **Verified after the fix**, in the same way for Fedora 44 and CentOS
+  Stream 9:
+  - A test-only unit, run after boot, records
+    `systemctl is-system-running --wait`. It reads `running`, with no failed
+    units.
+  - `org.freedesktop.login1` is on the bus.
+  - `systemd-run --wait -P rpm -q ...` inside the container prints the
+    release, systemd and dnf packages.
+  - The container then powers off cleanly.
+- **Fedora 44's console line** is `Reached target multi-user.target -
+  Multi-User System.`, which your regex matches. CentOS Stream 9's
+  systemd 252 prints the description only, which it matches too.
+- **Still not verified here:** the `-M` machine transport through machined,
+  since this sandbox has no systemd PID 1. That, and the rest of s5, needs
+  your CI run with `a053248`.
+
