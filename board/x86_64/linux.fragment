@@ -90,3 +90,10 @@ CONFIG_WATCHDOG=y
 CONFIG_I6300ESB_WDT=y
 CONFIG_HW_RANDOM=y
 CONFIG_HW_RANDOM_VIRTIO=y
+
+# TPM 2.0, mandatory: the machine's identity comes from its endorsement key.
+# TIS for discrete TPMs and QEMU's tpm-tis, CRB for firmware TPMs (Intel PTT,
+# AMD fTPM) and QEMU's tpm-crb.
+CONFIG_TCG_TPM=y
+CONFIG_TCG_TIS=y
+CONFIG_TCG_CRB=y

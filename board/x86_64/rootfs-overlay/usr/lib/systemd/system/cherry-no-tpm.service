@@ -1,0 +1,11 @@
+[Unit]
+Description=Show Missing TPM 2.0 on the Console
+After=sysinit.target
+# Before the login prompts, so they don't print over it.
+Wants=getty-pre.target
+Before=getty-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/cherry/no-tpm

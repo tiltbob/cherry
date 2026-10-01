@@ -3,3 +3,7 @@
 disable systemd-networkd-wait-online.service
 # systemd-boot is only built for its UKI stub.
 disable systemd-boot-update.service
+# systemd-pcrlock rebuilds a local PCR policy from the firmware's event log at
+# every boot and stores it in TPM NV memory. Cherry's secrets will be bound to a
+# PCR policy signed at build time instead.
+disable systemd-pcrlock-*

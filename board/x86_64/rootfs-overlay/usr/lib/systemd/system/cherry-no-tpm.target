@@ -1,0 +1,9 @@
+# Started instead of the default target when /init finds no usable TPM 2.0
+# (see /init): only the basic system, the error on the console, and gettys.
+# No network, config, secrets or containers.
+[Unit]
+Description=Stopped: No Usable TPM 2.0
+Requires=sysinit.target
+Wants=cherry-no-tpm.service getty.target
+After=sysinit.target cherry-no-tpm.service
+AllowIsolate=yes

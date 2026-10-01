@@ -1,0 +1,91 @@
+#!/bin/sh
+# Cherry's /init. The kernel runs it from the initramfs, which is also the root
+# filesystem, and it hands over to systemd. Like an initrd, it does what has to
+# happen before systemd starts: systemd sets the machine ID first thing, and
+# Cherry's machine ID comes from the TPM.
+#
+# The machine's identity is its TPM's endorsement key (EK): the TCG default
+# ECC NIST P-256 EK, which the TPM derives from a seed that survives TPM clears.
+#
+#   EK hash      SHA-256 of the EK's public key (DER SubjectPublicKeyInfo),
+#                in lowercase hex. It names the machine.
+#   machine ID   the first 32 hex digits of the EK hash.
+#
+# /run/cherry/identity/ keeps ek.der and ek-hash for later units. Without a
+# usable TPM 2.0 it keeps the reason in `error` instead, and systemd starts
+# cherry-no-tpm.target, which shows the error on the console and nothing else.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# devtmpfs is not mounted automatically with an initramfs (as in Buildroot's
+# fs/cpio/init). Prefer devtmpfs's /dev/console, so glibc's ttyname_r() works.
+mount -t devtmpfs devtmpfs /dev
+if (exec 0</dev/console) 2>/dev/null; then
+	exec 0</dev/console 1>/dev/console 2>/dev/console
+fi
+
+# systemd keeps API file systems that are already mounted. /run gets the
+# options systemd would give it.
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev,strictatime,size=20%,nr_inodes=800k tmpfs /run
+
+id_dir=/run/cherry/identity
+mkdir -p "$id_dir"
+
+log() {
+	echo "<$1>cherry-init: $2" >/dev/kmsg
+}
+
+fail() {
+	echo "$1" >"$id_dir/error"
+	log 3 "$1"
+	return 1
+}
+
+tpm_identity() {
+	# Built-in TPM drivers have usually probed by now. Give a TPM that the
+	# firmware announces (ACPI TPM2 table) a few seconds more.
+	i=0
+	while [ ! -c /dev/tpmrm0 ]; do
+		major=$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)
+		if [ -n "$major" ] && [ "$major" != 2 ]; then
+			fail "found a TPM $major.x, not a TPM 2.0"
+			return
+		fi
+		if [ ! -e /sys/firmware/acpi/tables/TPM2 ] || [ "$i" -ge 10 ]; then
+			fail "no TPM 2.0 found"
+			return
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+
+	# Through the kernel's resource manager, which flushes the transient EK
+	# when the tool exits. When the TPM has a template in the TCG EK template
+	# NV index, that template replaces the default one.
+	tcti=device:/dev/tpmrm0
+	template=
+	if tpm2_getcap -T "$tcti" handles-nv-index 2>/dev/null | grep -qix -- '- 0x1c0000c'; then
+		template=-t
+	fi
+	if ! out=$(tpm2_createek -T "$tcti" -G ecc $template -c /run/cherry/ek.ctx -f der -u "$id_dir/ek.der" 2>&1); then
+		rm -f /run/cherry/ek.ctx "$id_dir/ek.der"
+		reason=$(echo "$out" | sed -n 's/^ERROR: //p' | head -n 1)
+		fail "the TPM cannot create its endorsement key: ${reason:-$(echo "$out" | tail -n 1)}"
+		return
+	fi
+	rm -f /run/cherry/ek.ctx
+
+	ek_hash=$(sha256sum <"$id_dir/ek.der")
+	ek_hash=${ek_hash%% *}
+	echo "$ek_hash" >"$id_dir/ek-hash"
+	log 6 "machine identity from the TPM: EK hash $ek_hash"
+}
+
+if tpm_identity; then
+	# Our options come first: systemd stops parsing at an unknown one.
+	exec /sbin/init --machine-id="$(printf %.32s "$ek_hash")" "$@"
+fi
+exec /sbin/init --unit=cherry-no-tpm.target "$@"

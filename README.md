@@ -13,6 +13,9 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
   initramfs
 
 Once booted:
+- **Identity:** a TPM 2.0 is mandatory. The machine ID comes from the TPM's
+  endorsement key, so it stays the same across reboots (see
+  [Machine identity](#machine-identity)).
 - **Root:** systemd runs directly from the initramfs as PID 1 and remounts it
   read-only.
 - **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
@@ -20,7 +23,7 @@ Once booted:
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH.
 
-Cherry targets x86_64 UEFI machines and VMs.
+Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
 ## Building
 
@@ -41,7 +44,7 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make` | configure (first time) and build |
 | `make menuconfig`, `make savedefconfig`, `make linux-menuconfig` | Buildroot configuration |
 | `make br-<target>` | any Buildroot target, e.g. `make br-systemd-rebuild` |
-| `make qemu` | UEFI HTTP boot in QEMU + OVMF |
+| `make qemu` | UEFI HTTP boot in QEMU + OVMF, with a software TPM |
 | `make test` | end-to-end smoke test in QEMU ([tests/smoke.py](tests/smoke.py)) |
 | `make clean` | remove `output/cherry_x86_64` |
 
@@ -61,17 +64,27 @@ The firmware downloads the binary into memory and starts it. A machine needs
 RAM for the binary plus the unpacked root filesystem, plus whatever the containers
 use.
 
+The machine needs a TPM 2.0, turned on in the firmware setup: a discrete TPM,
+or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
+
 `make qemu` does all of this locally:
 - serves `images/` on a free port
 - writes an OVMF variable store with an HTTP boot entry for
   `http://10.0.2.2:<port>/cherry-x86_64.efi`
+- starts a software TPM, swtpm, whose state in
+  `output/cherry_x86_64/qemu/tpm` makes the VM the same machine on every run.
+  Delete it for a new machine.
 - boots QEMU with the serial console on your terminal
 
 It needs:
 - `qemu-system-x86_64`
-- OVMF (`apt install qemu-system-x86 ovmf`)
+- OVMF and swtpm (`apt install qemu-system-x86 ovmf swtpm`)
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
   `pip install virt-firmware` (set `VIRT_FW_VARS` to use a specific copy)
+
+The TPM is attached through CRB, as firmware TPMs are. Pass `--tpm tis` to
+`scripts/run_qemu.py` for the TIS interface of discrete TPMs, or `--tpm none`
+to see Cherry stop without a TPM.
 
 SSH is forwarded from host port 2222. `root` logs in without a password on the
 console. To log in over SSH, pass a key as a
@@ -87,18 +100,49 @@ ssh -p 2222 root@localhost
 1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
    kernel with the embedded command line and initramfs.
 2. **Kernel:** unpacks the initramfs (the whole root filesystem) into a tmpfs
-   and runs `/init`, which Buildroot links to systemd.
-3. **systemd:**
+   and runs [`/init`](board/x86_64/rootfs-overlay/init), a shell script.
+3. **`/init`:** does what an initrd would before systemd starts:
+   - mounts `/dev`, `/proc`, `/sys` and `/run`
+   - derives the machine's identity from the TPM (see
+     [Machine identity](#machine-identity))
+   - starts systemd with that machine ID, or, without a usable TPM, with
+     `cherry-no-tpm.target` instead of the default target
+4. **systemd:**
    - remounts `/` read-only (Buildroot's `/etc/fstab`)
    - mounts a tmpfs on `/var` and fills it from the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
 
 Because `/etc` is read-only:
-- the machine ID is generated on every boot
-- SSH host keys are generated under `/var/lib/sshd`
+- SSH host keys are generated under `/var/lib/sshd`, so they change on every
+  boot for now
 - `/root` is a symlink into `/var`
 
 The root filesystem takes its uncompressed size in RAM.
+
+## Machine identity
+
+Every Cherry machine boots the same image. What tells one machine from another
+is its TPM's endorsement key (EK), which the TPM derives from a seed that
+survives TPM clears. `/init` creates the TCG default EK, an ECC NIST P-256 key,
+with `tpm2_createek`. If the TPM holds an EK template in the TCG template NV
+index, `/init` uses that template instead, as the TCG EK profile requires. Then:
+
+- **EK hash:** the SHA-256 of the EK's public key (its DER
+  SubjectPublicKeyInfo), in lowercase hex. It names the machine.
+- **Machine ID:** the first 32 hex digits of the EK hash. `/init` passes it to
+  systemd as `--machine-id=`, so it is in place before systemd starts anything.
+  It is stable across reboots, so DHCP leases and journal IDs are too.
+
+`/init` leaves the EK and its hash in `/run/cherry/identity/` (`ek.der`,
+`ek-hash`) for later boot steps. Both identify the machine but are not secret:
+anyone with access to the TPM can read the EK.
+
+**Without a usable TPM 2.0,** boot stops: no TPM, a TPM 1.2, or a TPM that
+cannot create its EK. `/init` writes the reason to
+`/run/cherry/identity/error` and starts systemd with `cherry-no-tpm.target`
+instead of the default target. That target brings up only the basic system and
+a login prompt on the console, and shows the error on every console.
+Networking, sshd, config, secrets and containers never start.
 
 ## Running containers
 
