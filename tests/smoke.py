@@ -241,10 +241,12 @@ class Smoke:
     def boot(self, tpm_interface="crb", banner=None):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
+        start = time.monotonic()
         vm.start(tpm_interface)
         if banner:
             vm.console.expect(re.escape(banner), 600, allow_boot=True)
-        took = vm.wait_shell()
+        vm.wait_shell()
+        took = time.monotonic() - start
         check(f"/{run_qemu.EFI_NAME}" in run_qemu.ImageHandler.requests,
               f"the firmware did not download the EFI binary over HTTP: {run_qemu.ImageHandler.requests}")
         log(f"HTTP booted to a shell in {took:.0f}s")
