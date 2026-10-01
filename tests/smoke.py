@@ -277,8 +277,8 @@ class Smoke:
         # The TPM's own EK: creating it again gives the same key.
         vm.run("tpm2_createek -T device:/dev/tpmrm0 -G ecc -c /tmp/ek.ctx -f der -u /tmp/ek.der >/dev/null && "
                "cmp /tmp/ek.der /run/cherry/identity/ek.der; rc=$?; rm -f /tmp/ek.ctx /tmp/ek.der; exit $rc")
-        rc, _ = vm.run("test -e /run/cherry/identity/error", check_rc=False)
-        check(rc != 0, "an identity error was recorded: " + vm.run("cat /run/cherry/identity/error"))
+        rc, error = vm.run("cat /run/cherry/identity/error", check_rc=False)
+        check(rc != 0, f"an identity error was recorded: {error}")
         log(f"machine identity: EK hash {ek_hash} via {driver}")
         return machine_id
 
@@ -454,8 +454,8 @@ class Smoke:
     def s7_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
-        check(vm.run("cat /run/cherry/identity/error") == "no TPM 2.0 found",
-              "unexpected error: " + vm.run("cat /run/cherry/identity/error"))
+        error = vm.run("cat /run/cherry/identity/error")
+        check(error == "no TPM 2.0 found", f"unexpected identity error: {error}")
         rc, _ = vm.run("test -e /run/cherry/identity/ek-hash", check_rc=False)
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
