@@ -265,7 +265,8 @@ class Smoke:
         """The machine ID comes from the endorsement key of the TPM on the given interface; return it."""
         vm = self.vm
         driver = vm.run("basename $(readlink /sys/class/tpm/tpm0/device/driver)")
-        check(driver == f"tpm_{interface}", f"the TPM is driven by {driver}, not tpm_{interface}")
+        # e.g. tpm_crb_acpi for CRB
+        check(driver.startswith(f"tpm_{interface}"), f"the TPM is driven by {driver}, not tpm_{interface}")
         ek_hash = vm.run("cat /run/cherry/identity/ek-hash")
         ek = base64.b64decode(vm.run("base64 /run/cherry/identity/ek.der"))
         check(ek.startswith(P256_SPKI_PREFIX) and len(ek) == len(P256_SPKI_PREFIX) + 64,
