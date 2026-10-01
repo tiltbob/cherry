@@ -1,0 +1,27 @@
+#!/bin/sh
+# cherry-no-tpm.service: show why /init found no usable TPM 2.0, on every
+# console (firmware screens and serial-over-LAN alike) and in the journal.
+
+reason=$(cat /run/cherry/identity/error 2>/dev/null || echo "unknown error")
+
+message=$(cat <<EOF
+
+==============================================================================
+  Cherry stopped: no usable TPM 2.0.
+
+$(echo "$reason" | fold -s -w 76 | sed 's/^/  /')
+
+  Cherry needs a TPM 2.0: its endorsement key is the machine's identity.
+  Turn the TPM on in the firmware setup (a discrete TPM, Intel PTT or AMD
+  fTPM), or give a VM a virtual TPM (swtpm under QEMU).
+
+  Nothing else starts: no network, config, secrets or containers.
+==============================================================================
+
+EOF
+)
+
+echo "Stopped: no usable TPM 2.0: $reason"
+for tty in $(cat /sys/class/tty/console/active); do
+	printf '%s\n' "$message" >"/dev/$tty"
+done

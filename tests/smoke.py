@@ -2,13 +2,15 @@
 """End-to-end smoke test for Cherry: UEFI HTTP boot in QEMU + OVMF (stdlib only).
 
   1. the firmware HTTP boots the EFI binary; systemd runs straight from the
-     initramfs, which is remounted read-only; /var is a tmpfs; networking and
+     initramfs, which is remounted read-only; /var is a tmpfs; the machine ID
+     comes from the TPM's endorsement key (a swtpm on CRB); networking and
      sshd work, an SSH key passed as a credential is installed, no unit failed
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
      differently (as pacstrap's pacman hooks do)
-  3. a second boot starts from scratch again (nothing persists)
+  3. a second boot starts from scratch again (nothing persists), except the
+     machine's identity: the same TPM, now on TIS, gives the same machine ID
   4. debootstrap installs Debian into /var/lib/machines and the container boots
      (skipped when the guest cannot reach deb.debian.org)
   5. rpmstrap installs Fedora into /var/lib/machines and the container boots
@@ -16,11 +18,15 @@
   6. pacstrap installs Arch Linux into /var/lib/machines, the container's own
      pacman downloads in its Landlock sandbox, and the container boots
      (skipped when the guest cannot reach the Arch Linux mirrors)
+  7. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+     console: no network, no sshd, no containers
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
 
 import argparse
+import base64
+import hashlib
 import os
 import re
 import shutil
@@ -37,6 +43,9 @@ MULT = float(os.environ.get("CHERRY_TEST_TIMEOUT_MULT", "1" if run_qemu.kvm_usab
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Za-z0-9]|[=>78cDEHM])")
 BOOT = re.compile(r'BdsDxe: starting Boot([0-9A-F]{4}) "([^"]*)"')
 PANIC = re.compile(r"Kernel panic - not syncing")
+# DER SubjectPublicKeyInfo of an uncompressed NIST P-256 public key, up to the point.
+P256_SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
+NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 FATAL = [
     (re.compile(r"No bootable option"), "the firmware found nothing to boot"),
@@ -136,15 +145,20 @@ class VM:
         self.workdir = workdir
         self.server = server
         self.proc = None
+        self.tpm = None
         self.console = None
         self.n = 0
 
-    def start(self):
+    def start(self, tpm_interface="crb"):
+        """Boot with the VM's TPM (one swtpm state for the whole test) on tpm_interface, or None for no TPM."""
         self.stop()
         vars_path = os.path.join(self.workdir, "OVMF_VARS.fd")
         run_qemu.write_vars(vars_path, run_qemu.boot_url(self.server))
+        if tpm_interface:
+            self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, "tpm"))
         cmd = run_qemu.qemu_command(vars_path, serial="stdio", credentials=["agetty.autologin=root",
-                                                                             f"ssh.authorized_keys.root={TEST_KEY}"])
+                                                                             f"ssh.authorized_keys.root={TEST_KEY}"],
+                                    tpm=self.tpm, tpm_interface=tpm_interface)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.console = Console(self.proc, os.path.join(self.workdir, "serial.log"))
@@ -158,6 +172,9 @@ class VM:
                 self.proc.kill()
                 self.proc.wait()
         self.proc = None
+        if self.tpm:
+            self.tpm.stop()
+        self.tpm = None
 
     def send(self, text):
         self.proc.stdin.write(text.encode())
@@ -221,10 +238,12 @@ class Smoke:
         self.server = run_qemu.serve(self.images)
         self.vm = VM(self.workdir, self.server)
 
-    def boot(self):
+    def boot(self, tpm_interface="crb", banner=None):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
-        vm.start()
+        vm.start(tpm_interface)
+        if banner:
+            vm.console.expect(re.escape(banner), 600, allow_boot=True)
         took = vm.wait_shell()
         check(f"/{run_qemu.EFI_NAME}" in run_qemu.ImageHandler.requests,
               f"the firmware did not download the EFI binary over HTTP: {run_qemu.ImageHandler.requests}")
@@ -242,6 +261,26 @@ class Smoke:
                             check_rc=False)
         check(rc == 1, "systemd-networkd could not write its state files:\n" + "\n".join(errors.splitlines()[-5:]))
 
+    def check_identity(self, interface):
+        """The machine ID comes from the endorsement key of the TPM on the given interface; return it."""
+        vm = self.vm
+        driver = vm.run("basename $(readlink /sys/class/tpm/tpm0/device/driver)")
+        check(driver == f"tpm_{interface}", f"the TPM is driven by {driver}, not tpm_{interface}")
+        ek_hash = vm.run("cat /run/cherry/identity/ek-hash")
+        ek = base64.b64decode(vm.run("base64 /run/cherry/identity/ek.der"))
+        check(ek.startswith(P256_SPKI_PREFIX) and len(ek) == len(P256_SPKI_PREFIX) + 64,
+              f"the EK is not an uncompressed P-256 public key: {ek.hex()}")
+        check(hashlib.sha256(ek).hexdigest() == ek_hash, f"ek-hash {ek_hash!r} is not the SHA-256 of ek.der")
+        machine_id = vm.run("cat /etc/machine-id")
+        check(machine_id == ek_hash[:32], f"the machine ID {machine_id} is not derived from the EK hash {ek_hash}")
+        # The TPM's own EK: creating it again gives the same key.
+        vm.run("tpm2_createek -T device:/dev/tpmrm0 -G ecc -c /tmp/ek.ctx -f der -u /tmp/ek.der >/dev/null && "
+               "cmp /tmp/ek.der /run/cherry/identity/ek.der; rc=$?; rm -f /tmp/ek.ctx /tmp/ek.der; exit $rc")
+        rc, _ = vm.run("test -e /run/cherry/identity/error", check_rc=False)
+        check(rc != 0, "an identity error was recorded: " + vm.run("cat /run/cherry/identity/error"))
+        log(f"machine identity: EK hash {ek_hash} via {driver}")
+        return machine_id
+
     def s1_http_boot(self):
         vm = self.vm
         self.boot()
@@ -256,7 +295,7 @@ class Smoke:
         check(vm.run("readlink -f /root") == "/var/roothome", "/root is not on /var")
         check("NAME=Cherry" in vm.run("cat /etc/os-release"), "unexpected os-release")
         check("console=ttyS0" in vm.run("cat /proc/cmdline"), "the UKI command line was not used")
-        check(len(vm.run("cat /etc/machine-id")) == 32, "no machine-id")
+        self.machine_id = self.check_identity("crb")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
         check(vm.run("systemctl is-active sshd.service") == "active", "sshd is not running")
@@ -268,7 +307,6 @@ class Smoke:
         # systemd arms it before journald runs, so its message is only in the kernel log.
         vm.run("test -c /dev/watchdog0 && dmesg | grep -q 'Using hardware watchdog'")
         check(vm.run("systemctl show -p RuntimeWatchdogUSec --value") == "30s", "RuntimeWatchdogSec not applied")
-        self.machine_id = vm.run("cat /etc/machine-id")
         log("memory of the booted OS, before any container:\n" + vm.run(
             "free -k; df -k /var /run | sed 's/^/  /'; "
             "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' /proc/meminfo"))
@@ -302,10 +340,11 @@ class Smoke:
     def s3_stateless_reboot(self):
         vm = self.vm
         vm.run("touch /var/cherry-smoke")
-        self.boot()
+        # The same TPM state, attached through the other interface.
+        self.boot(tpm_interface="tis")
         rc, _ = vm.run("test -e /var/cherry-smoke", check_rc=False)
         check(rc != 0, "/var survived a reboot")
-        check(vm.run("cat /etc/machine-id") != self.machine_id, "the transient machine-id did not change")
+        check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
 
     def s4_debootstrap(self):
         vm = self.vm
@@ -411,9 +450,24 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
+    def s7_no_tpm(self):
+        vm = self.vm
+        self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
+        check(vm.run("cat /run/cherry/identity/error") == "no TPM 2.0 found",
+              "unexpected error: " + vm.run("cat /run/cherry/identity/error"))
+        rc, _ = vm.run("test -e /run/cherry/identity/ek-hash", check_rc=False)
+        check(rc != 0, "an EK hash without a TPM")
+        check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
+        rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
+                            "machines.target", check_rc=False)
+        check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
+        failed = vm.run("systemctl --failed --no-legend --plain")
+        check(failed == "", f"failed units:\n{failed}")
+        vm.run("journalctl -b -u cherry-no-tpm.service --no-pager | grep -q 'Stopped: no usable TPM 2.0'")
+
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap]
+                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_no_tpm]
         results = []
         try:
             for i, scenario in enumerate(scenarios, 1):
