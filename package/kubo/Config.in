@@ -1,0 +1,13 @@
+config BR2_PACKAGE_KUBO
+	bool "kubo"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_GO
+	help
+	  Kubo, the reference IPFS implementation: the ipfs command
+	  and daemon. ipfs.service runs the daemon as the ipfs user,
+	  with its repository in /var/lib/ipfs, and login shells set
+	  IPFS_PATH to it so that ipfs commands reach the daemon.
+
+	  Built without FUSE (ipfs mount).
+
+	  https://github.com/ipfs/kubo

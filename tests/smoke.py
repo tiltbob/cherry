@@ -18,8 +18,11 @@
   6. pacstrap installs Arch Linux into /var/lib/machines, the container's own
      pacman downloads in its Landlock sandbox, and the container boots
      (skipped when the guest cannot reach the Arch Linux mirrors)
-  7. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no containers
+  7. the IPFS daemon runs as its own user, a login shell's ipfs commands reach
+     it, and content added through its API comes back through its gateway,
+     which listens on loopback only
+  8. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+     console: no network, no sshd, no IPFS, no containers
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -453,7 +456,33 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
-    def s7_no_tpm(self):
+    def s7_ipfs(self):
+        vm = self.vm
+        check(vm.run("systemctl is-active ipfs.service") == "active", "ipfs.service is not running")
+        pid = vm.run("systemctl show -p MainPID --value ipfs.service")
+        check(vm.run(f"stat -c %U /proc/{pid}") == "ipfs", "the IPFS daemon does not run as the ipfs user")
+        check(vm.run("echo $IPFS_PATH") == "/var/lib/ipfs", "login shells don't set IPFS_PATH to the daemon's repository")
+        check(vm.run("stat -c %U $IPFS_PATH/config") == "ipfs", "the IPFS repository does not belong to the ipfs user")
+        # Through the daemon's RPC API: the CLI finds its address in $IPFS_PATH/api.
+        peer_id = vm.run("ipfs id -f '<id>'")
+        check(re.fullmatch(r"12D3KooW[1-9A-HJ-NP-Za-km-z]+", peer_id), f"unexpected peer ID {peer_id!r}")
+        cid = vm.run("echo cherry-smoke | ipfs add -Q")
+        check(vm.run(f"ipfs cat {cid}") == "cherry-smoke", "ipfs cat does not return what ipfs add stored")
+        check(vm.run(f"wget -q -O - http://127.0.0.1:8080/ipfs/{cid}") == "cherry-smoke",
+              "the gateway does not serve what ipfs add stored")
+        address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
+        rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:8080/ipfs/{cid}", check_rc=False)
+        check(rc != 0, f"the gateway answers on {address}, not only on loopback")
+        # QUIC gets the socket buffers it asks for.
+        check(vm.run("cat /proc/sys/net/core/rmem_max") == "7500000", "net.core.rmem_max is not raised for QUIC")
+        rc, _ = vm.run("journalctl -b -u ipfs --no-pager | grep -q 'failed to sufficiently increase'", check_rc=False)
+        check(rc == 1, "QUIC could not get the socket buffers it asked for")
+        # Peers need outbound network, so only report them.
+        peers = vm.run("for i in $(seq 30); do n=$(ipfs swarm peers | wc -l); [ $n -gt 0 ] && break; sleep 1; done; "
+                       "echo $n", timeout=90)
+        log(f"IPFS peer ID {peer_id}, {peers} swarm peers")
+
+    def s8_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -462,7 +491,7 @@ class Smoke:
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
         rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "machines.target", check_rc=False)
+                            "ipfs.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
@@ -470,7 +499,7 @@ class Smoke:
 
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_no_tpm]
+                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_no_tpm]
         results = []
         try:
             for i, scenario in enumerate(scenarios, 1):

@@ -1,0 +1,48 @@
+[Unit]
+Description=IPFS Daemon (Kubo)
+Documentation=https://docs.ipfs.tech/
+After=network.target
+
+[Service]
+Type=notify
+User=ipfs
+Group=ipfs
+# /var is a tmpfs for now: --init creates a new repository, and with it a new
+# peer ID, at every boot. Once /var persists, --migrate upgrades a repository
+# left by an older Kubo, which can take a long time; hence no start timeout.
+StateDirectory=ipfs
+Environment=IPFS_PATH=/var/lib/ipfs
+ExecStart=/usr/bin/ipfs daemon --init --migrate
+TimeoutStartSec=infinity
+Restart=on-failure
+KillSignal=SIGINT
+
+# Hardening, as in Kubo's ipfs-hardened.service, which only rules out FUSE
+# mounts (Cherry's Kubo is built without FUSE). The daemon's ports are all
+# above 1024, so it needs no capabilities.
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+
+[Install]
+WantedBy=multi-user.target
