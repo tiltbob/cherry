@@ -1,0 +1,73 @@
+#!/bin/sh
+# ipfs-identity.service: give the IPFS node a key derived from the TPM, so that
+# its peer ID stays the same across reboots, like the machine ID.
+#
+# The TPM derives an HMAC key from its endorsement seed, which survives TPM
+# clears, and HMACs a fixed label with it. The 32 bytes are the seed of the
+# node's Ed25519 key. Nothing is stored, and the same TPM always gives the same
+# key; anything with access to the TPM (root) can derive it too.
+#
+# Before the daemon first starts, this creates the repository in $repo with
+# that key. Kubo computes the rest, the peer ID and its own encoding of the
+# key, in a scratch repository: `ipfs key import` takes a PKCS #8 key.
+set -eu
+umask 077
+
+repo=/var/lib/ipfs
+tcti=device:/dev/tpmrm0
+label='cherry ipfs identity v1'
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# The seed. Through the kernel's resource manager, which flushes the transient
+# HMAC key when each tool exits.
+tpm2_createprimary -Q -T "$tcti" -C e -g sha256 -G hmac:sha256 \
+	-a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign' \
+	-c "$tmp/hmac.ctx"
+printf '%s' "$label" >"$tmp/label"
+tpm2_hmac -T "$tcti" -c "$tmp/hmac.ctx" -o "$tmp/seed" "$tmp/label"
+
+# The Ed25519 private key in PKCS #8 (RFC 8410): a fixed DER header, then the
+# seed.
+{
+	echo '-----BEGIN PRIVATE KEY-----'
+	{
+		printf '\060\056\002\001\000\060\005\006\003\053\145\160\004\042\004\040'
+		cat "$tmp/seed"
+	} | base64
+	echo '-----END PRIVATE KEY-----'
+} >"$tmp/key.pem"
+
+# The scratch repository also provides Kubo's default configuration.
+scratch=$tmp/repo
+IPFS_PATH=$scratch ipfs init >/dev/null
+peer_id=$(IPFS_PATH=$scratch ipfs key import --ipns-base=b58mh \
+	-f pem-pkcs8-cleartext identity "$tmp/key.pem")
+IPFS_PATH=$scratch ipfs key export -o "$tmp/key" identity
+priv=$(base64 <"$tmp/key" | tr -d '\n')
+
+if [ -e "$repo/config" ]; then
+	# Left by an earlier run: keep it if it is this machine's.
+	current=$(sed -n 's/^    "PeerID": "\([^"]*\)".*/\1/p' "$repo/config")
+	if [ "$current" != "$peer_id" ]; then
+		echo "$repo belongs to peer ID ${current:-unknown}, not to this machine's $peer_id" >&2
+		exit 1
+	fi
+	echo "IPFS peer ID $peer_id (existing repository)"
+	exit 0
+fi
+
+# The default configuration, with this machine's identity. ipfs init starts a
+# node, which checks that Identity.PeerID matches Identity.PrivKey.
+sed -e '/^  "Identity": {$/,/^  }/{' \
+	-e "s|^\(    \"PeerID\": \"\)[^\"]*|\1$peer_id|" \
+	-e "s|^\(    \"PrivKey\": \"\)[^\"]*|\1$priv|" \
+	-e '}' "$scratch/config" >"$tmp/config"
+grep -qF "\"PrivKey\": \"$priv\"" "$tmp/config" || {
+	echo "cannot set the identity in Kubo's default configuration" >&2
+	exit 1
+}
+IPFS_PATH=$repo ipfs init "$tmp/config" >/dev/null
+chown -R ipfs:ipfs "$repo"
+echo "IPFS peer ID $peer_id"

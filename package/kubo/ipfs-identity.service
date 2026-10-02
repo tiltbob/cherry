@@ -1,0 +1,17 @@
+[Unit]
+Description=IPFS Identity from the TPM
+Documentation=https://github.com/tiltbob/cherry#ipfs
+# Pulled in by ipfs.service, which starts after it: this creates the daemon's
+# repository, with the node's key derived from the TPM.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/ipfs-identity
+# Root, for the TPM. It needs nothing else: no network, and a /tmp of its own
+# while it handles the key.
+PrivateNetwork=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
