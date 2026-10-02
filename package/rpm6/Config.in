@@ -32,6 +32,9 @@ config BR2_PACKAGE_RPM6
 	  /usr/libexec/rpm/sysusers.sh, which needs bash and useradd,
 	  groupadd and usermod (e.g. from shadow-useradd).
 
+	  rpmbuild, rpmspec and librpmbuild are left out of the
+	  target, and with them libmagic and its database.
+
 	  https://rpm.org/
 
 comment "rpm6 needs a toolchain w/ C++, wchar, threads, dynamic library, gcc >= 11, and lua >= 5.3"

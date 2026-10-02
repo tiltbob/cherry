@@ -98,4 +98,17 @@ else
 RPM6_CONF_OPTS += -DWITH_READLINE=OFF
 endif
 
+# Cherry's rpm installs packages into other roots; it doesn't build them, and
+# containers bring their own rpm-build. rpm can't be built without
+# librpmbuild, which links libmagic, so leave the build tools out of the
+# target, and with them libmagic and its 10 MB database (from file).
+define RPM6_REMOVE_BUILD_TOOLS
+	rm -f $(TARGET_DIR)/usr/bin/rpmbuild $(TARGET_DIR)/usr/bin/rpmspec \
+		$(TARGET_DIR)/usr/lib/librpmbuild.so* \
+		$(TARGET_DIR)/usr/libexec/rpm/rpmdeps \
+		$(TARGET_DIR)/usr/bin/file $(TARGET_DIR)/usr/lib/libmagic.so* \
+		$(TARGET_DIR)/usr/share/misc/magic.mgc
+endef
+RPM6_TARGET_FINALIZE_HOOKS += RPM6_REMOVE_BUILD_TOOLS
+
 $(eval $(cmake-package))

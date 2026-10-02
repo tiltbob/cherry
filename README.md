@@ -151,6 +151,19 @@ a swap device in RAM, instead of running out:
 `/proc/swaps` and `/sys/block/zram0/mm_stat` show how much it holds, and in
 how much space.
 
+The image also leaves out what a container host doesn't need:
+
+- **systemd's hardware database (hwdb):** 13.5 MB, which udevd kept mapped.
+  - udev adds no vendor, model or keymap properties from it.
+  - Two kinds of network device get different names: Dell iDRAC's USB NIC
+    isn't called `idrac`, and the names of Microsoft MANA NICs include their
+    PCI domain.
+  - Cherry's network configuration matches any Ethernet link, whatever its
+    name.
+- **rpm's build tools,** `rpmbuild` and `rpmspec`, and with them `file` and
+  libmagic's 10 MB database. rpm can't be built without them, but Cherry only
+  installs packages with it; containers bring their own `rpm-build`.
+
 ## Machine identity
 
 Every Cherry machine boots the same image. What tells one machine from another
@@ -234,6 +247,8 @@ machinectl shell fedora
   path instead of the name.
 - EL8 isn't supported: its repositories need modularity, which Cherry's dnf5
   is built without.
+- The host's rpm only installs packages: `rpmbuild` and `rpmspec` aren't on the
+  image (see [Memory](#memory)).
 - The Fedora tree above uses about 195 MB of RAM, and EL 9 or 10 trees about
   270 MB. While installing, rpmstrap needs about 180 MB more for repository
   metadata and packages, and deletes them afterwards.
