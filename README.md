@@ -21,7 +21,8 @@ Once booted:
 - **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
   come later.
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
-  journald, machined/machinectl and systemd-nspawn, plus OpenSSH.
+  journald, machined/machinectl and systemd-nspawn, plus OpenSSH and an IPFS
+  node (see [IPFS](#ipfs)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -242,11 +243,55 @@ machinectl shell arch
   to Arch's `systemd-network` user and stop the host's systemd-networkd from
   writing its state.
 
+## IPFS
+
+Every Cherry machine runs an [IPFS](https://ipfs.tech) node:
+[Kubo](https://github.com/ipfs/kubo), as `ipfs.service`. Like sshd, it starts
+only on a machine with a TPM.
+
+- **User and repository:** the daemon runs as the `ipfs` user, with its
+  repository in `/var/lib/ipfs`.
+- **Nothing persists yet:** `/var` is a tmpfs, so the daemon creates a new
+  repository at every boot. The node gets a new peer ID, and whatever it
+  added, pinned or cached is gone.
+- **Ports:**
+  - The swarm listens on port 4001 (TCP, and UDP for QUIC, WebTransport and
+    WebRTC) on every address.
+  - The RPC API (`127.0.0.1:5001`) and the HTTP gateway (`127.0.0.1:8080`)
+    listen on loopback only.
+- **Configuration:** Kubo's defaults, created by `ipfs daemon --init`.
+  - `ipfs config` changes them in the repository, so only until the next
+    boot. Most changes take effect after `systemctl restart ipfs`.
+  - Telemetry is off: Kubo has no endpoint to send it to.
+- **QUIC:** `/usr/lib/sysctl.d/50-ipfs.conf` raises the socket buffer limits
+  to the 7.5 MB that QUIC asks for.
+
+Login shells set `IPFS_PATH=/var/lib/ipfs`, so `ipfs` commands reach the
+daemon through its RPC API:
+
+```sh
+ipfs id
+echo hello | ipfs add -Q                        # prints the CID
+ipfs cat <cid>
+wget -q -O - http://127.0.0.1:8080/ipfs/<cid>   # the same, through the gateway
+```
+
+- Elsewhere, for example in `ssh <host> ipfs ...`, set `IPFS_PATH` yourself
+  or pass `--api /ip4/127.0.0.1/tcp/5001`.
+- Run `ipfs` commands only while the daemon runs. Without it, they open the
+  repository directly and leave files owned by root, so the daemon's later
+  writes and garbage collection fail with "permission denied".
+  `chown -R ipfs:ipfs /var/lib/ipfs` repairs that.
+- The repository is in RAM, and Kubo doesn't collect garbage by default.
+  `ipfs repo gc` frees blocks that aren't pinned.
+
 ## Security notes
 
 This is a development image:
 - `root` has no password on the console (Buildroot's default).
 - SSH accepts keys only.
+- Any local user can control the IPFS node through its RPC API, and its swarm
+  port is open to the network: there's no host firewall yet.
 - The image is not signed.
 
 Secure Boot would mean signing the UKI (`ukify --secureboot-*`). With Secure
