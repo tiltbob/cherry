@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for Cherry: UEFI HTTP boot in QEMU + OVMF (stdlib only).
 
-  1. the firmware HTTP boots the EFI binary; systemd runs straight from the
-     initramfs, which is remounted read-only; /var is a tmpfs; the machine ID
+  1. the firmware HTTP boots the EFI binary; the root filesystem is the EROFS
+     image from the initramfs, read-only; /var is a tmpfs; the machine ID
      comes from the TPM's endorsement key (a swtpm on CRB); networking and
      sshd work, an SSH key passed as a credential is installed, no unit failed
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
@@ -295,6 +295,7 @@ class Smoke:
 
         root = vm.fstype("/")
         check(re.match(r"\S+ \S+ \S+ / / ro[ ,]", root), f"/ is not mounted read-only: {root}")
+        check(" - erofs /rootfs.erofs " in root, f"/ is not the EROFS image from the initramfs: {root}")
         rc, _ = vm.run("touch /cherry-rw-test", check_rc=False)
         check(rc != 0, "the root filesystem is writable")
         var = vm.fstype("/var")

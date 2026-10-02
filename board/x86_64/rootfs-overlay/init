@@ -1,8 +1,8 @@
 #!/bin/sh
-# Cherry's /init. The kernel runs it from the initramfs, which is also the root
-# filesystem, and it hands over to systemd. Like an initrd, it does what has to
-# happen before systemd starts: systemd sets the machine ID first thing, and
-# Cherry's machine ID comes from the TPM.
+# Cherry's /init. Stage 1, the initramfs's /init (package/cherry-stage1), runs
+# it once it has mounted the root filesystem, and it hands over to systemd.
+# Like an initrd, it does what has to happen before systemd starts: systemd sets
+# the machine ID first thing, and Cherry's machine ID comes from the TPM.
 #
 # The machine's identity is its TPM's endorsement key (EK): the TCG default
 # ECC NIST P-256 EK, which the TPM derives from a seed that survives TPM clears.
@@ -19,7 +19,8 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 # devtmpfs is not mounted automatically with an initramfs (as in Buildroot's
-# fs/cpio/init). Prefer devtmpfs's /dev/console, so glibc's ttyname_r() works.
+# fs/cpio/init). Prefer devtmpfs's /dev/console to the initramfs's, so glibc's
+# ttyname_r() works.
 mount -t devtmpfs devtmpfs /dev
 if (exec 0</dev/console) 2>/dev/null; then
 	exec 0</dev/console 1>/dev/console 2>/dev/console

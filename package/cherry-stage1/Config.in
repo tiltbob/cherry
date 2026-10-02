@@ -1,0 +1,9 @@
+config BR2_PACKAGE_CHERRY_STAGE1
+	bool "cherry-stage1"
+	help
+	  The /init of Cherry's initramfs: it mounts the root
+	  filesystem, a compressed EROFS image in the initramfs,
+	  straight from the file, and runs the /init of that root.
+
+	  A static binary, installed to the images directory, where
+	  post-image.sh packs it into the initramfs.
