@@ -18,8 +18,8 @@ Once booted:
   [Machine identity](#machine-identity)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
-- **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
-  come later.
+- **`/var`:** a tmpfs of up to half the RAM, so nothing persists yet. Disks
+  for `/var` and containers come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH and an IPFS
@@ -78,7 +78,7 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
   Delete it for a new machine.
 - boots QEMU with the serial console on your terminal
 
-It needs:
+`make qemu` and `make test` need:
 - `qemu-system-x86_64`
 - OVMF and swtpm (`apt install qemu-system-x86 ovmf swtpm`)
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
@@ -174,7 +174,7 @@ cannot create its EK. `/init` writes the reason to
 `/run/cherry/identity/error` and starts systemd with `cherry-no-tpm.target`
 instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
-Networking, sshd, config, secrets and containers never start.
+Networking, sshd, IPFS and containers never start.
 
 ## Running containers
 
@@ -231,7 +231,8 @@ machinectl shell fedora
   link, run `systemctl enable --now systemd-networkd` inside it.
 - The repositories are in `/usr/share/rpmstrap/<distro>/*.repo`. To use
   another mirror or distribution, copy that directory, edit it, and pass its
-  path instead of the name.
+  path instead of the name. The path needs a `/` (e.g. `./fedora`): a bare
+  name is looked up in `/usr/share/rpmstrap`.
 - EL8 isn't supported: its repositories need modularity, which Cherry's dnf5
   is built without.
 - The Fedora tree above uses about 195 MB of RAM, and EL 9 or 10 trees about
@@ -295,7 +296,7 @@ only on a machine with a TPM.
     boot. Most changes take effect after `systemctl restart ipfs`.
   - Telemetry is off: Kubo has no endpoint to send it to.
 - **QUIC:** `/usr/lib/sysctl.d/50-ipfs.conf` raises the socket buffer limits
-  to the 7.5 MB that QUIC asks for.
+  to 7.5 MB, above the 7 MiB that QUIC asks for.
 
 Login shells set `IPFS_PATH=/var/lib/ipfs`, so `ipfs` commands reach the
 daemon through its RPC API:
