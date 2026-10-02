@@ -1,0 +1,21 @@
+# Compressed swap in RAM. Under memory pressure, the kernel moves the coldest
+# pages to /dev/zram0, compressed with zstd: process memory, and tmpfs pages
+# too, i.e. cold files of the root filesystem and of /var, where containers
+# live. It can hold as much as the RAM, uncompressed; its page table takes
+# 0.4% of that up front.
+[Unit]
+Description=Compressed Swap in RAM (zram)
+Documentation=https://docs.kernel.org/admin-guide/blockdev/zram.html
+DefaultDependencies=no
+Before=swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# MemTotal is the first line of /proc/meminfo.
+ExecStart=/bin/sh -c 'read -r _ kb _ </proc/meminfo && echo "$${kb}K" >/sys/block/zram0/disksize'
+ExecStart=/sbin/mkswap /dev/zram0
+ExecStart=/sbin/swapon /dev/zram0
+
+[Install]
+WantedBy=swap.target

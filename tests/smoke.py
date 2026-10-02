@@ -21,7 +21,9 @@
   7. the IPFS daemon runs as its own user, a login shell's ipfs commands reach
      it, and content added through its API comes back through its gateway,
      which listens on loopback only
-  8. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+  8. zram is the swap device, and under memory pressure tmpfs pages go to it,
+     compressed, and come back intact
+  9. without a TPM, boot stops at cherry-no-tpm.target with the error on the
      console: no network, no sshd, no IPFS, no containers
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
@@ -482,7 +484,30 @@ class Smoke:
                        "echo $n", timeout=90)
         log(f"IPFS peer ID {peer_id}, {peers} swarm peers")
 
-    def s8_no_tpm(self):
+    def s8_zram(self):
+        vm = self.vm
+        mem_kb = int(vm.run("awk '/^MemTotal:/ { print $2 }' /proc/meminfo"))
+        swaps = vm.run("tail -n +2 /proc/swaps")
+        fields = swaps.split()
+        # Size in kB: all of zram0 but the page that holds the swap header.
+        check(len(fields) == 5 and fields[0] == "/dev/zram0" and abs(int(fields[2]) - mem_kb) <= 8,
+              f"zram0 is not the only swap device, as large as the RAM ({mem_kb} kB):\n{swaps}")
+        check("[zstd]" in vm.run("cat /sys/block/zram0/comp_algorithm"), "zram does not compress with zstd")
+        check(vm.run("cat /proc/sys/vm/page-cluster") == "0", "vm.page-cluster is not 0")
+        # Write 400 MiB of text to a tmpfs from a cgroup limited to 128 MiB: its own shmem pages
+        # have to go to zram, compressed.
+        size = 400 << 20
+        data = f"yes cherry-zram | head -c {size}"
+        vm.run(f"systemd-run --wait -q -p MemoryMax=128M sh -c '{data} >/var/tmp/zram-test'", timeout=300)
+        stats = vm.run("cat /sys/block/zram0/mm_stat").split()
+        stored, compressed = int(stats[0]), int(stats[1])
+        check(stored >= 200 << 20, f"only {stored} bytes went to zram under memory pressure: {stats}")
+        log(f"zram holds {stored >> 20} MiB in {compressed >> 20} MiB")
+        check(vm.run("md5sum </var/tmp/zram-test") == vm.run(f"{data} | md5sum"),
+              "data that went through zram came back changed")
+        vm.run("rm /var/tmp/zram-test")
+
+    def s9_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -499,7 +524,7 @@ class Smoke:
 
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_no_tpm]
+                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_zram, self.s9_no_tpm]
         results = []
         try:
             for i, scenario in enumerate(scenarios, 1):
