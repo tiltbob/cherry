@@ -279,7 +279,9 @@ wget -q -O - http://127.0.0.1:8080/ipfs/<cid>   # the same, through the gateway
 - Elsewhere, for example in `ssh <host> ipfs ...`, set `IPFS_PATH` yourself
   or pass `--api /ip4/127.0.0.1/tcp/5001`.
 - Run `ipfs` commands only while the daemon runs. Without it, they open the
-  repository directly, and files they create as root lock the daemon out.
+  repository directly and leave files owned by root, so the daemon's later
+  writes and garbage collection fail with "permission denied".
+  `chown -R ipfs:ipfs /var/lib/ipfs` repairs that.
 - The repository is in RAM, and Kubo doesn't collect garbage by default.
   `ipfs repo gc` frees blocks that aren't pinned.
 
