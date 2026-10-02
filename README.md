@@ -9,15 +9,15 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
 (UKI) holding:
 - the kernel
 - its command line
-- the root filesystem, as Buildroot's zstd-compressed cpio used as the
-  initramfs
+- the initramfs, holding the root filesystem as a zstd-compressed
+  [EROFS](https://erofs.docs.kernel.org) image
 
 Once booted:
 - **Identity:** a TPM 2.0 is mandatory. The machine ID comes from the TPM's
   endorsement key, so it stays the same across reboots (see
   [Machine identity](#machine-identity)).
-- **Root:** systemd runs directly from the initramfs as PID 1 and remounts it
-  read-only.
+- **Root:** the EROFS image, read-only, mounted straight from the initramfs.
+  It stays compressed in RAM (see [Memory](#memory)).
 - **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
   come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
@@ -63,8 +63,8 @@ HTTP boot at it. There are two common ways:
 - **Firmware setup:** configure the URL in the firmware's setup menu.
 
 The firmware downloads the binary into memory and starts it. A machine needs
-RAM for the binary plus the unpacked root filesystem, plus whatever the containers
-use.
+RAM for the binary while it boots; then for the root filesystem image, the
+files in use, and whatever the containers use (see [Memory](#memory)).
 
 The machine needs a TPM 2.0, turned on in the firmware setup: a discrete TPM,
 or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
@@ -101,16 +101,20 @@ ssh -p 2222 root@localhost
 
 1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
    kernel with the embedded command line and initramfs.
-2. **Kernel:** unpacks the initramfs (the whole root filesystem) into a tmpfs
-   and runs [`/init`](board/x86_64/rootfs-overlay/init), a shell script.
-3. **`/init`:** does what an initrd would before systemd starts:
+2. **Kernel:** unpacks the initramfs into a ramfs and runs its `/init`,
+   [stage 1](package/cherry-stage1/src/stage1.c). The initramfs holds only
+   stage 1 and the root filesystem image. (`rootfstype=ramfs`: EROFS can
+   mount a file from a ramfs, but not from the default tmpfs.)
+3. **Stage 1:** mounts the image read-only, straight from the file, makes it
+   the root, and runs its [`/init`](board/x86_64/rootfs-overlay/init), a shell
+   script.
+4. **`/init`:** does what an initrd would before systemd starts:
    - mounts `/dev`, `/proc`, `/sys` and `/run`
    - derives the machine's identity from the TPM (see
      [Machine identity](#machine-identity))
    - starts systemd with that machine ID, or, without a usable TPM, with
      `cherry-no-tpm.target` instead of the default target
-4. **systemd:**
-   - remounts `/` read-only (Buildroot's `/etc/fstab`)
+5. **systemd:**
    - mounts a tmpfs on `/var` and fills it from the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
    - sets up compressed swap in RAM (see [Memory](#memory))
@@ -120,16 +124,22 @@ Because `/etc` is read-only:
   boot for now
 - `/root` is a symlink into `/var`
 
-The root filesystem takes its uncompressed size in RAM.
-
 ## Memory
 
 Everything lives in RAM: the root filesystem, `/var` with its containers, and
-the memory processes allocate. Under memory pressure, the kernel compresses the
-coldest pages into zram, a swap device in RAM, instead of running out:
+the memory processes allocate.
+
+The root filesystem stays compressed. Its only copy is the EROFS image in the
+initramfs: 79 MB for 215 MiB of files, compressed with zstd in clusters of up
+to 64 KiB. The kernel keeps the files in use in its page cache, decompressed,
+and drops them under memory pressure; it reads them from the image again when
+they are needed.
+
+Under memory pressure, the kernel also compresses the coldest pages into zram,
+a swap device in RAM, instead of running out:
 
 - **What it compresses:** process memory, and tmpfs pages too, i.e. cold files
-  of the root filesystem and of `/var`, where containers live.
+  of `/var`, where containers live.
 - **When:** only under memory pressure. Until then, nothing goes to zram.
 - **Setup:** `cherry-zram-swap.service` sets up `/dev/zram0` at every boot:
   - compressed with zstd
