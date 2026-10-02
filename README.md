@@ -20,6 +20,7 @@ Once booted:
   read-only.
 - **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
   come later.
+- **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH and an IPFS
   node (see [IPFS](#ipfs)).
@@ -112,6 +113,7 @@ ssh -p 2222 root@localhost
    - remounts `/` read-only (Buildroot's `/etc/fstab`)
    - mounts a tmpfs on `/var` and fills it from the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
+   - sets up compressed swap in RAM (see [Memory](#memory))
 
 Because `/etc` is read-only:
 - SSH host keys are generated under `/var/lib/sshd`, so they change on every
@@ -119,6 +121,25 @@ Because `/etc` is read-only:
 - `/root` is a symlink into `/var`
 
 The root filesystem takes its uncompressed size in RAM.
+
+## Memory
+
+Everything lives in RAM: the root filesystem, `/var` with its containers, and
+the memory processes allocate. Under memory pressure, the kernel compresses the
+coldest pages into zram, a swap device in RAM, instead of running out:
+
+- **What it compresses:** process memory, and tmpfs pages too, i.e. cold files
+  of the root filesystem and of `/var`, where containers live.
+- **When:** only under memory pressure. Until then, nothing goes to zram.
+- **Setup:** `cherry-zram-swap.service` sets up `/dev/zram0` at every boot:
+  - compressed with zstd
+  - as large as the RAM, uncompressed. zram's page table takes 0.4% of that
+    up front: 12 MB on a 3 GB machine.
+- **Swap-ins:** swap is in RAM, so `vm.page-cluster` is 0: the kernel reads
+  single pages from it rather than clusters of 8.
+
+`/proc/swaps` and `/sys/block/zram0/mm_stat` show how much it holds, and in
+how much space.
 
 ## Machine identity
 

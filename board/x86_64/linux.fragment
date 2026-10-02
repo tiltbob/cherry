@@ -97,3 +97,11 @@ CONFIG_HW_RANDOM_VIRTIO=y
 CONFIG_TCG_TPM=y
 CONFIG_TCG_TIS=y
 CONFIG_TCG_CRB=y
+
+# Compressed swap in RAM (cherry-zram-swap.service). Everything, the root
+# filesystem and /var included, is in RAM; under memory pressure, the kernel
+# compresses cold pages, tmpfs ones too, into /dev/zram0 with zstd.
+CONFIG_SWAP=y
+CONFIG_ZRAM=y
+CONFIG_ZRAM_BACKEND_ZSTD=y
+CONFIG_ZRAM_DEF_COMP_ZSTD=y
