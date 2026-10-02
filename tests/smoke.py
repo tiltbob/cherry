@@ -11,6 +11,7 @@
      differently (as pacstrap's pacman hooks do)
   3. a second boot starts from scratch again (nothing persists), except the
      machine's identity: the same TPM, now on TIS, gives the same machine ID
+     and the same IPFS peer ID
   4. debootstrap installs Debian into /var/lib/machines and the container boots
      (skipped when the guest cannot reach deb.debian.org)
   5. rpmstrap installs Fedora into /var/lib/machines and the container boots
@@ -289,6 +290,15 @@ class Smoke:
         log(f"machine identity: EK hash {ek_hash} via {driver}")
         return machine_id
 
+    def ipfs_peer_id(self):
+        """The IPFS daemon runs with the key that ipfs-identity.service derived from the TPM; return its peer ID."""
+        vm = self.vm
+        peer_id = vm.run("ipfs id -f '<id>'")
+        derived = vm.run("journalctl -b -u ipfs-identity --no-pager -o cat "
+                         "| sed -n 's/^IPFS peer ID \\([^ ]*\\).*/\\1/p' | tail -n 1")
+        check(peer_id == derived, f"the IPFS daemon's peer ID {peer_id} is not the TPM-derived one: {derived!r}")
+        return peer_id
+
     def s1_http_boot(self):
         vm = self.vm
         self.boot()
@@ -311,6 +321,7 @@ class Smoke:
         vm.run("test -s /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
         check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
               "the ssh.authorized_keys.root credential was not applied")
+        self.peer_id = self.ipfs_peer_id()
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
                "networkctl; exit 1", timeout=90)
         # systemd arms it before journald runs, so its message is only in the kernel log.
@@ -354,6 +365,7 @@ class Smoke:
         rc, _ = vm.run("test -e /var/cherry-smoke", check_rc=False)
         check(rc != 0, "/var survived a reboot")
         check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
+        check(self.ipfs_peer_id() == self.peer_id, "the IPFS peer ID changed across a reboot")
 
     def s4_debootstrap(self):
         vm = self.vm
@@ -517,7 +529,7 @@ class Smoke:
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
         rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "ipfs.service machines.target", check_rc=False)
+                            "ipfs-identity.service ipfs.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")

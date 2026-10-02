@@ -1,8 +1,7 @@
 # Compressed swap in RAM. Under memory pressure, the kernel moves the coldest
 # pages to /dev/zram0, compressed with zstd: process memory, and tmpfs pages
-# too, i.e. cold files of the root filesystem and of /var, where containers
-# live. It can hold as much as the RAM, uncompressed; its page table takes
-# 0.4% of that up front.
+# too, i.e. cold files of /var, where containers live. It can hold as much as
+# the RAM, uncompressed; its page table takes 0.4% of that up front.
 [Unit]
 Description=Compressed Swap in RAM (zram)
 Documentation=https://docs.kernel.org/admin-guide/blockdev/zram.html

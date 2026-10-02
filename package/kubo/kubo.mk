@@ -20,9 +20,15 @@ define KUBO_INSTALL_PROFILE
 endef
 KUBO_POST_INSTALL_TARGET_HOOKS += KUBO_INSTALL_PROFILE
 
+# ipfs-identity.service creates the daemon's repository, with a key derived
+# from the TPM.
 define KUBO_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -D -m 0644 $(KUBO_PKGDIR)/ipfs.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/ipfs.service
+	$(INSTALL) -D -m 0644 $(KUBO_PKGDIR)/ipfs-identity.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/ipfs-identity.service
+	$(INSTALL) -D -m 0755 $(KUBO_PKGDIR)/ipfs-identity \
+		$(TARGET_DIR)/usr/libexec/ipfs-identity
 	$(INSTALL) -D -m 0644 $(KUBO_PKGDIR)/50-ipfs.conf \
 		$(TARGET_DIR)/usr/lib/sysctl.d/50-ipfs.conf
 endef

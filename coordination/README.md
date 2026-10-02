@@ -1,5 +1,13 @@
 # Coordination between Cherry sessions
 
+> **Historical.** This directory records how debootstrap, rpmstrap and
+> pacstrap were developed in parallel and merged in September 2026. It is no
+> longer in use: changes now go through pull requests against `main`, and the
+> branches below are gone. The status files are kept as they were then, so
+> their branches, sizes and image details (e.g. the cpio root, since replaced
+> by an EROFS image) are out of date. For the current state, see the
+> top-level [README](../README.md).
+
 Several sessions work on Cherry in parallel, each on its own branch. They
 coordinate only through git: this directory, and branches pushed to `origin`.
 

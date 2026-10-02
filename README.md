@@ -13,13 +13,13 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
   [EROFS](https://erofs.docs.kernel.org) image
 
 Once booted:
-- **Identity:** a TPM 2.0 is mandatory. The machine ID comes from the TPM's
-  endorsement key, so it stays the same across reboots (see
+- **Identity:** a TPM 2.0 is mandatory. The machine ID and the IPFS node's key
+  come from the TPM, so they stay the same across reboots (see
   [Machine identity](#machine-identity)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
-- **`/var`:** a tmpfs, so nothing persists yet. Disks for `/var` and containers
-  come later.
+- **`/var`:** a tmpfs of up to half the RAM, so nothing persists yet. Disks
+  for `/var` and containers come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH and an IPFS
@@ -78,7 +78,7 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
   Delete it for a new machine.
 - boots QEMU with the serial console on your terminal
 
-It needs:
+`make qemu` and `make test` need:
 - `qemu-system-x86_64`
 - OVMF and swtpm (`apt install qemu-system-x86 ovmf swtpm`)
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
@@ -182,12 +182,19 @@ index, `/init` uses that template instead, as the TCG EK profile requires. Then:
 `ek-hash`) for later boot steps. Both identify the machine but are not secret:
 anyone with access to the TPM can read the EK.
 
+**The IPFS node's key** comes from the TPM too, so its peer ID is the same at
+every boot (see [IPFS](#ipfs)). `ipfs-identity.service` has the TPM derive an
+HMAC key from its endorsement seed, as it derives the EK, and HMAC a fixed
+label with it. The result is the seed of the node's Ed25519 key. Unlike the
+EK, that key is secret, but nothing protects it from root yet: anything with
+access to the TPM can derive it again.
+
 **Without a usable TPM 2.0,** boot stops: no TPM, a TPM 1.2, or a TPM that
 cannot create its EK. `/init` writes the reason to
 `/run/cherry/identity/error` and starts systemd with `cherry-no-tpm.target`
 instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
-Networking, sshd, config, secrets and containers never start.
+Networking, sshd, IPFS and containers never start.
 
 ## Running containers
 
@@ -244,7 +251,8 @@ machinectl shell fedora
   link, run `systemctl enable --now systemd-networkd` inside it.
 - The repositories are in `/usr/share/rpmstrap/<distro>/*.repo`. To use
   another mirror or distribution, copy that directory, edit it, and pass its
-  path instead of the name.
+  path instead of the name. The path needs a `/` (e.g. `./fedora`): a bare
+  name is looked up in `/usr/share/rpmstrap`.
 - EL8 isn't supported: its repositories need modularity, which Cherry's dnf5
   is built without.
 - The host's rpm only installs packages: `rpmbuild` and `rpmspec` aren't on the
@@ -297,20 +305,24 @@ only on a machine with a TPM.
 
 - **User and repository:** the daemon runs as the `ipfs` user, with its
   repository in `/var/lib/ipfs`.
-- **Nothing persists yet:** `/var` is a tmpfs, so the daemon creates a new
-  repository at every boot. The node gets a new peer ID, and whatever it
-  added, pinned or cached is gone.
+- **Identity:** the node's key comes from the TPM (see
+  [Machine identity](#machine-identity)), so its peer ID is the same at every
+  boot. `ipfs-identity.service` creates the repository with that key before
+  the daemon starts. If that fails, the daemon doesn't start rather than make
+  up a key.
+- **Nothing else persists yet:** `/var` is a tmpfs, so the repository is new
+  at every boot. Whatever the node added, pinned or cached is gone.
 - **Ports:**
   - The swarm listens on port 4001 (TCP, and UDP for QUIC, WebTransport and
     WebRTC) on every address.
   - The RPC API (`127.0.0.1:5001`) and the HTTP gateway (`127.0.0.1:8080`)
     listen on loopback only.
-- **Configuration:** Kubo's defaults, created by `ipfs daemon --init`.
+- **Configuration:** Kubo's defaults, as `ipfs init` creates them.
   - `ipfs config` changes them in the repository, so only until the next
     boot. Most changes take effect after `systemctl restart ipfs`.
   - Telemetry is off: Kubo has no endpoint to send it to.
 - **QUIC:** `/usr/lib/sysctl.d/50-ipfs.conf` raises the socket buffer limits
-  to the 7.5 MB that QUIC asks for.
+  to 7.5 MB, above the 7 MiB that QUIC asks for.
 
 Login shells set `IPFS_PATH=/var/lib/ipfs`, so `ipfs` commands reach the
 daemon through its RPC API:
@@ -338,6 +350,8 @@ This is a development image:
 - SSH accepts keys only.
 - Any local user can control the IPFS node through its RPC API, and its swarm
   port is open to the network: there's no host firewall yet.
+- Root can derive the IPFS node's private key from the TPM at any time: it
+  isn't bound to the boot state (PCRs) yet.
 - The image is not signed.
 
 Secure Boot would mean signing the UKI (`ukify --secureboot-*`). With Secure

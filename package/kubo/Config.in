@@ -1,12 +1,17 @@
 config BR2_PACKAGE_KUBO
 	bool "kubo"
 	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	depends on BR2_PACKAGE_TPM2_TOOLS # ipfs-identity
 	select BR2_PACKAGE_HOST_GO
 	help
 	  Kubo, the reference IPFS implementation: the ipfs command
 	  and daemon. ipfs.service runs the daemon as the ipfs user,
 	  with its repository in /var/lib/ipfs, and login shells set
 	  IPFS_PATH to it so that ipfs commands reach the daemon.
+
+	  ipfs-identity.service creates that repository with a key
+	  derived from the TPM, so that the node's peer ID is the
+	  same at every boot.
 
 	  Built without FUSE (ipfs mount).
 
