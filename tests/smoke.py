@@ -22,10 +22,14 @@
   7. the IPFS daemon runs as its own user, a login shell's ipfs commands reach
      it, and content added through its API comes back through its gateway,
      which listens on loopback only
-  8. zram is the swap device, and under memory pressure tmpfs pages go to it,
+  8. the OpenCode server runs as its own user and listens on loopback only;
+     the binary is the packaged version (stripped, it would be a bare Bun); its
+     API searches its work directory with the image's ripgrep and creates,
+     lists and deletes a session
+  9. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
-  9. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no IPFS, no containers
+  10. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+     console: no network, no sshd, no IPFS, no OpenCode, no containers
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -33,6 +37,7 @@ Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 import argparse
 import base64
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -63,6 +68,13 @@ FATAL = [
 
 
 SKIPPED = "skipped"
+
+
+def opencode_version():
+    """The packaged OpenCode version, from package/opencode/opencode.mk."""
+    mk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "package", "opencode", "opencode.mk")
+    with open(mk) as f:
+        return re.search(r"^OPENCODE_VERSION = (\S+)$", f.read(), re.M).group(1)
 
 
 class TestFailure(Exception):
@@ -497,7 +509,48 @@ class Smoke:
                        "echo $n", timeout=90)
         log(f"IPFS peer ID {peer_id}, {peers} swarm peers")
 
-    def s8_zram(self):
+    def s8_opencode(self):
+        vm = self.vm
+        version = opencode_version()
+        check(vm.run("systemctl is-active opencode.service") == "active", "opencode.service is not running")
+        pid = vm.run("systemctl show -p MainPID --value opencode.service")
+        check(vm.run(f"stat -c %U /proc/{pid}") == "opencode", "the OpenCode server does not run as the opencode user")
+        check(vm.run(f"readlink /proc/{pid}/cwd") == "/var/lib/opencode/work",
+              "the OpenCode server does not work in /var/lib/opencode/work")
+        # Stripped by Buildroot, the Bun single-file executable would run as a bare Bun and print Bun's version.
+        check(vm.run("opencode --version") == version, f"opencode --version is not the packaged {version}")
+        api = "http://127.0.0.1:4096"
+        # The server listens a few seconds after it starts.
+        health = vm.run(f"for i in $(seq 60); do wget -q -O - {api}/global/health && exit 0; sleep 1; done; "
+                        "journalctl -b -u opencode --no-pager | tail -n 20; exit 1", timeout=120)
+        check(health == f'{{"healthy":true,"version":"{version}"}}', f"unexpected health response: {health}")
+        address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
+        rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:4096/global/health", check_rc=False)
+        check(rc != 0, f"the OpenCode server answers on {address}, not only on loopback")
+        # Its file tools search the work directory with the image's ripgrep.
+        owners = vm.run("stat -c '%n %U:%G' /var/lib/opencode /var/lib/opencode/work")
+        check(all(line.endswith(" opencode:opencode") for line in owners.splitlines()),
+              f"/var/lib/opencode does not belong to the opencode user:\n{owners}")
+        vm.run("echo cherry-smoke >/var/lib/opencode/work/hello.txt")
+        check(vm.run(f"wget -q -O - '{api}/find/file?query=hello'") == '["hello.txt"]',
+              "the file search does not find the work directory's file")
+        matches = json.loads(vm.run(f"wget -q -O - '{api}/find?pattern=cherry-smoke'"))
+        check([(m["path"]["text"], m["lines"]["text"]) for m in matches] == [("hello.txt", "cherry-smoke\n")],
+              f"unexpected content search result: {matches}")
+        vm.run("rm /var/lib/opencode/work/hello.txt")
+        # Sessions need no provider: create one, list it, delete it.
+        post = "wget -q -O - --header='Content-Type: application/json' --post-data='{\"title\":\"cherry smoke\"}'"
+        session = json.loads(vm.run(f"{post} {api}/session"))
+        check(session["directory"] == "/var/lib/opencode/work", f"the session is not in the work directory: {session}")
+        sessions = json.loads(vm.run(f"wget -q -O - {api}/session"))
+        check([s["id"] for s in sessions] == [session["id"]], f"the new session is not the one listed: {sessions}")
+        check(vm.run(f"wget -q -O - --method=DELETE {api}/session/{session['id']}") == "true",
+              "deleting the session failed")
+        check(vm.run(f"wget -q -O - {api}/session") == "[]", "the deleted session is still listed")
+        rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
+        log(f"OpenCode {version}: {rss_kb >> 10} MiB resident")
+
+    def s9_zram(self):
         vm = self.vm
         mem_kb = int(vm.run("awk '/^MemTotal:/ { print $2 }' /proc/meminfo"))
         swaps = vm.run("tail -n +2 /proc/swaps")
@@ -520,7 +573,7 @@ class Smoke:
               "data that went through zram came back changed")
         vm.run("rm /var/tmp/zram-test")
 
-    def s9_no_tpm(self):
+    def s10_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -529,7 +582,7 @@ class Smoke:
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
         rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "ipfs-identity.service ipfs.service machines.target", check_rc=False)
+                            "ipfs-identity.service ipfs.service opencode.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
@@ -537,7 +590,8 @@ class Smoke:
 
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_zram, self.s9_no_tpm]
+                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_opencode, self.s9_zram,
+                     self.s10_no_tpm]
         results = []
         try:
             for i, scenario in enumerate(scenarios, 1):

@@ -28,3 +28,17 @@ if [ ! -L "$TARGET_DIR/root" ]; then
 	rm -rf "$TARGET_DIR/root"
 	ln -s var/roothome "$TARGET_DIR/root"
 fi
+
+# opencode is a Bun single-file executable, and stripping it breaks it: it then
+# runs as a bare Bun that no longer finds the program embedded in it (see
+# package/opencode). The defconfig's BR2_STRIP_EXCLUDE_FILES keeps strip off
+# it; make sure the installed binary is still the one that was extracted (the
+# most recently installed build directory, should several versions remain).
+if [ -e "$TARGET_DIR/usr/bin/opencode" ]; then
+	stamp=$(ls -t "$BUILD_DIR"/opencode-*/.stamp_target_installed 2>/dev/null | head -n 1)
+	if [ -z "$stamp" ] || ! cmp -s "${stamp%/*}/opencode" "$TARGET_DIR/usr/bin/opencode"; then
+		echo "post-build: /usr/bin/opencode differs from the extracted binary (stripped?):" \
+			"add opencode to BR2_STRIP_EXCLUDE_FILES" >&2
+		exit 1
+	fi
+fi

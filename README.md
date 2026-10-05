@@ -22,8 +22,9 @@ Once booted:
   for `/var` and containers come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
-  journald, machined/machinectl and systemd-nspawn, plus OpenSSH and an IPFS
-  node (see [IPFS](#ipfs)).
+  journald, machined/machinectl and systemd-nspawn, plus OpenSSH, an IPFS
+  node (see [IPFS](#ipfs)) and an OpenCode server (see
+  [OpenCode](#opencode)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -130,10 +131,11 @@ Everything lives in RAM: the root filesystem, `/var` with its containers, and
 the memory processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
-initramfs: 79 MB for 215 MiB of files, compressed with zstd in clusters of up
-to 64 KiB. The kernel keeps the files in use in its page cache, decompressed,
-and drops them under memory pressure; it reads them from the image again when
-they are needed.
+initramfs: 79 MB for 215 MiB of files before OpenCode, whose binary alone is
+177 MiB and compresses to about 58 MB (see [OpenCode](#opencode)), compressed
+with zstd in clusters of up to 64 KiB. The kernel keeps the files in use in its
+page cache, decompressed, and drops them under memory pressure; it reads them
+from the image again when they are needed.
 
 Under memory pressure, the kernel also compresses the coldest pages into zram,
 a swap device in RAM, instead of running out:
@@ -343,6 +345,49 @@ wget -q -O - http://127.0.0.1:8080/ipfs/<cid>   # the same, through the gateway
 - The repository is in RAM, and Kubo doesn't collect garbage by default.
   `ipfs repo gc` frees blocks that aren't pinned.
 
+## OpenCode
+
+Every Cherry machine runs an [OpenCode](https://opencode.ai) server, as
+`opencode.service`: `opencode serve`, the headless HTTP server of the AI coding
+agent, which the `opencode` TUI and other clients attach to. Like sshd, it
+starts only on a machine with a TPM.
+
+- **User and state:** the server runs as the `opencode` user, with its state
+  under `/var/lib/opencode`, laid out as under a home directory: sessions,
+  provider credentials and logs in `.local/share/opencode`, configuration in
+  `.config/opencode`. `/var` is a tmpfs, so all of it is new at every boot.
+- **Work directory:** `/var/lib/opencode/work`, empty at every boot. Clients
+  can pick another directory, but `/var/lib/opencode` is the only place the
+  server can write: it sees the rest of the system read-only, with a private
+  `/tmp`, and runs without capabilities. Its tools run as the `opencode` user
+  under the same restrictions.
+- **Port:** 4096, on loopback only, without authentication
+  (`OPENCODE_SERVER_PASSWORD` isn't set). `/global/health` answers
+  `{"healthy":true,"version":"..."}`, and `/doc` serves the OpenAPI
+  specification of the [server API](https://opencode.ai/docs/server/).
+- **Providers:** none are configured; nothing on the machine holds a key.
+  Connect one at runtime, from the attached TUI (`/connect`) or through the
+  API, e.g. `PUT /auth/anthropic` with `{"type":"api","key":"..."}`. The
+  credential lands in `/var/lib/opencode`, so it is gone at the next boot.
+- **Tools:** the bash tool runs `bash`; the grep, glob and file search tools
+  use the image's ripgrep rather than download one. There is no git on the
+  image, so OpenCode's snapshots (undoing a session's file changes) and its
+  VCS features are off.
+- **Binary:** upstream's prebuilt x86_64 build, the "baseline" variant that
+  doesn't need AVX2, so it runs on VM CPU models without it. It is a Bun
+  single-file executable, which stripping breaks: Buildroot's strip skips it
+  (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 177 MiB,
+  about 58 MB in the image, and the idle server uses about 330 MB of RAM.
+  Automatic updates are off: a new version comes with a new image.
+
+To use it, forward the port over SSH and attach a TUI from your machine, or
+attach one as `root` on the console:
+
+```sh
+ssh -L 4096:127.0.0.1:4096 -p 2222 root@localhost   # the VM of make qemu
+opencode attach http://127.0.0.1:4096               # on your machine
+```
+
 ## Security notes
 
 This is a development image:
@@ -350,6 +395,8 @@ This is a development image:
 - SSH accepts keys only.
 - Any local user can control the IPFS node through its RPC API, and its swarm
   port is open to the network: there's no host firewall yet.
+- Any local user can drive the OpenCode server through its HTTP API, and so
+  run commands as the `opencode` user: it has no password yet.
 - Root can derive the IPFS node's private key from the TPM at any time: it
   isn't bound to the boot state (PCRs) yet.
 - The image is not signed.

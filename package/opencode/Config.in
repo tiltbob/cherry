@@ -1,0 +1,24 @@
+config BR2_PACKAGE_OPENCODE
+	bool "opencode"
+	# Upstream's prebuilt x86_64 binary, linked against glibc.
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # bash
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS # ripgrep
+	select BR2_PACKAGE_BASH # the shell of its bash tool
+	select BR2_PACKAGE_RIPGREP # its grep, glob and file search tools
+	help
+	  OpenCode, an AI coding agent, as a headless HTTP server.
+	  opencode.service runs `opencode serve` as the opencode user,
+	  listening on 127.0.0.1:4096 only, with its state (sessions,
+	  provider credentials, logs) in /var/lib/opencode. Clients
+	  reach it over SSH port forwarding: `opencode attach`, or its
+	  HTTP API.
+
+	  Upstream's prebuilt binary for x86_64: the "baseline" build,
+	  which doesn't need AVX2, so it runs on any x86_64 machine or
+	  VM CPU model. It is a Bun single-file executable, and strip
+	  breaks it: BR2_STRIP_EXCLUDE_FILES must list opencode.
+
+	  https://opencode.ai

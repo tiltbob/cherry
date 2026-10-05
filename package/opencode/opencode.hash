@@ -1,0 +1,4 @@
+# Locally computed, from the v1.18.34 release asset (upstream publishes no
+# checksums) and the LICENSE file at the v1.18.34 tag
+sha256  24b0d458d21ef548b2752166303defcf7f4945b049fb4876ab78dfaf86d81b27  opencode-linux-x64-baseline.tar.gz
+sha256  625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b  LICENSE

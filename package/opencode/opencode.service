@@ -1,0 +1,54 @@
+[Unit]
+Description=OpenCode Server
+Documentation=https://opencode.ai/docs/server/
+After=network.target
+
+[Service]
+Type=exec
+User=opencode
+Group=opencode
+# Its state, laid out as under a user's home: .local/share/opencode (sessions,
+# auth.json, log/), .config/opencode and .cache/opencode. The agent works in
+# work/ unless a client picks another directory. /var is a tmpfs for now, so
+# all of it is new at every boot.
+StateDirectory=opencode opencode/work
+Environment=HOME=/var/lib/opencode
+WorkingDirectory=/var/lib/opencode/work
+# The image is read-only: a new version comes with a new image.
+Environment=OPENCODE_DISABLE_AUTOUPDATE=1
+# Loopback only: there is no authentication yet (OPENCODE_SERVER_PASSWORD).
+# Reach it through SSH port forwarding.
+ExecStart=/usr/bin/opencode serve --hostname 127.0.0.1 --port 4096
+Restart=on-failure
+
+# Hardening, as for ipfs.service. The agent's tools run as the opencode user
+# inside it: they see the system read-only, except /var/lib/opencode and a
+# private /tmp. No MemoryDenyWriteExecute: Bun's JavaScript JIT needs that.
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+# The agent runs arbitrary commands: a filtered system call fails with EPERM,
+# as it would for any unprivileged process, rather than kill the process.
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
