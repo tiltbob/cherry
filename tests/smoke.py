@@ -22,17 +22,15 @@
   7. the IPFS daemon runs as its own user, a login shell's ipfs commands reach
      it, and content added through its API comes back through its gateway,
      which listens on loopback only
-  8. the OpenCode server runs as its own user, on loopback only, behind the
-     password it made up for the boot; the binary is the packaged version
-     (stripped, it would be a bare Bun); its API searches its work directory
-     and creates, lists and deletes a session
-  9. OpenChamber runs on Bun as the same user, on loopback only (no password
-     was given), serves its web UI, and is attached to the packaged OpenCode
+  8. the OpenCode binary is the packaged version (stripped, it would be a bare
+     Bun), and only the binary: no opencode user, state directory or service
+  9. cherry.service runs OpenChamber on Bun as the cherry user, on loopback
+     only (no password was given), serving its web UI and running the packaged
+     OpenCode as that user too; no openchamber user, state directory or service
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no IPFS, no OpenCode, no OpenChamber, no
-     containers
+     console: no network, no sshd, no IPFS, no OpenChamber, no containers
 
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
@@ -515,77 +513,58 @@ class Smoke:
     def s8_opencode(self):
         vm = self.vm
         version = package_version("opencode")
-        check(vm.run("systemctl is-active opencode.service") == "active", "opencode.service is not running")
-        pid = vm.run("systemctl show -p MainPID --value opencode.service")
-        check(vm.run(f"stat -c %U /proc/{pid}") == "opencode", "the OpenCode server does not run as the opencode user")
-        check(vm.run(f"readlink /proc/{pid}/cwd") == "/var/lib/opencode/work",
-              "the OpenCode server does not work in /var/lib/opencode/work")
         # Stripped by Buildroot, the Bun single-file executable would run as a bare Bun and print Bun's version.
         check(vm.run("opencode --version") == f"opencode v{version}",
               f"opencode --version is not the packaged {version}")
-        # The password opencode-serve made up for the boot; the API takes it as HTTP basic auth.
-        check(vm.run("stat -c '%U %a' /var/lib/opencode/server-password") == "opencode 600",
-              "the server password is not the opencode user's, mode 600")
-        password = vm.run("cat /var/lib/opencode/server-password")
-        check(re.fullmatch(r"[A-Za-z0-9_-]{32}", password), f"unexpected server password {password!r}")
-        auth = base64.b64encode(f"opencode:{password}".encode()).decode()
-        wget = f"wget -q -O - --header='Authorization: Basic {auth}'"
-        api = "http://127.0.0.1:4096/api"
-        # The server listens a few seconds after it starts.
-        info = vm.run(f"for i in $(seq 60); do {wget} {api}/info && exit 0; sleep 1; done; "
-                      "journalctl -b -u opencode --no-pager | tail -n 20; exit 1", timeout=120)
-        check(json.loads(info)["version"] == version, f"unexpected server info: {info}")
-        rc, _ = vm.run(f"wget -q -O /dev/null {api}/info", check_rc=False)
-        check(rc == 8, "the API answers without the password")
-        address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
-        rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:4096/api/info", check_rc=False)
-        check(rc != 0, f"the OpenCode server answers on {address}, not only on loopback")
-        # Its file tools work in the work directory; the image has ripgrep for its grep tool, and git.
-        owners = vm.run("stat -c '%n %U:%G' /var/lib/opencode /var/lib/opencode/work")
-        check(all(line.endswith(" opencode:opencode") for line in owners.splitlines()),
-              f"/var/lib/opencode does not belong to the opencode user:\n{owners}")
-        vm.run("echo cherry-smoke >/var/lib/opencode/work/hello.txt")
-        found = json.loads(vm.run(f"{wget} '{api}/fs/find?query=hello'"))
-        check([(f["path"], f["type"]) for f in found["data"]] == [("hello.txt", "file")],
-              f"the file search does not find the work directory's file: {found}")
-        vm.run("rm /var/lib/opencode/work/hello.txt")
+        # Its grep tool is the image's ripgrep, and git is on the image for its snapshots and worktrees.
         vm.run("test -x /usr/bin/rg && test -x /usr/bin/git")
-        # Sessions need no provider: create one, list it, delete it.
-        post = f"{wget} --header='Content-Type: application/json' --post-data='{{\"title\":\"cherry smoke\"}}'"
-        session = json.loads(vm.run(f"{post} {api}/session"))["data"]
-        check(session["location"]["directory"] == "/var/lib/opencode/work",
-              f"the session is not in the work directory: {session}")
-        sessions = json.loads(vm.run(f"{wget} {api}/session"))["data"]
-        check([s["id"] for s in sessions] == [session["id"]], f"the new session is not the one listed: {sessions}")
-        vm.run(f"{wget} --method=DELETE {api}/session/{session['id']}")
-        check(json.loads(vm.run(f"{wget} {api}/session"))["data"] == [], "the deleted session is still listed")
-        rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
-        log(f"OpenCode {version}: {rss_kb >> 10} MiB resident")
+        # Only the binary: the opencode user, /var/lib/opencode and opencode.service come with
+        # BR2_PACKAGE_OPENCODE_SERVICE, off in Cherry. OpenChamber runs the server, as the cherry user (s9).
+        rc, _ = vm.run("getent passwd opencode", check_rc=False)
+        check(rc != 0, "there is an opencode user")
+        rc, _ = vm.run("test -e /var/lib/opencode || test -e /usr/lib/systemd/system/opencode.service", check_rc=False)
+        check(rc != 0, "/var/lib/opencode or opencode.service is on the image")
 
-    def s9_openchamber(self):
+    def s9_cherry(self):
         vm = self.vm
         version = package_version("openchamber")
-        check(vm.run("systemctl is-active openchamber.service") == "active", "openchamber.service is not running")
-        pid = vm.run("systemctl show -p MainPID --value openchamber.service")
-        check(vm.run(f"stat -c %U /proc/{pid}") == "opencode",
-              "the OpenChamber server does not run as the opencode user")
+        check(vm.run("systemctl is-active cherry.service") == "active", "cherry.service is not running")
+        pid = vm.run("systemctl show -p MainPID --value cherry.service")
+        check(vm.run(f"stat -c %U /proc/{pid}") == "cherry", "the OpenChamber server does not run as the cherry user")
         check(vm.run(f"readlink /proc/{pid}/exe") == "/usr/bin/bun", "the OpenChamber server does not run on Bun")
+        check(vm.run(f"readlink /proc/{pid}/cwd") == "/var/lib/cherry/work",
+              "the OpenChamber server does not work in /var/lib/cherry/work")
         url = "http://127.0.0.1:3000"
         health = vm.run(f"for i in $(seq 120); do wget -q -O - {url}/health && exit 0; sleep 1; done; "
-                        "journalctl -b -u openchamber --no-pager | tail -n 20; exit 1", timeout=240)
+                        "journalctl -b -u cherry --no-pager | tail -n 20; exit 1", timeout=240)
         health = json.loads(health)
         check((health["status"], health["openchamberVersion"]) == ("ok", version), f"unexpected health: {health}")
-        # Attached to opencode.service's server, with its password: no OpenCode of its own.
-        compat = json.loads(vm.run(f"wget -q -O - {url}/api/opencode/compatibility"))
-        check((compat["state"], compat["installation"], compat["version"])
-              == ("compatible", "external", package_version("opencode")),
-              f"OpenChamber is not attached to the packaged OpenCode: {compat}")
+        # The OpenCode it runs is the packaged one; it takes a few seconds more to come up.
+        rc, compat = vm.run(f"for i in $(seq 120); do c=$(wget -q -O - {url}/api/opencode/compatibility); "
+                            "case \"$c\" in *'\"compatible\"'*) echo \"$c\"; exit 0;; esac; sleep 1; done; "
+                            "echo \"$c\"; exit 1", timeout=240, check_rc=False)
+        check(rc == 0, f"OpenChamber's OpenCode is not up: {compat}")
+        compat = json.loads(compat)
+        check(compat["version"] == package_version("opencode"),
+              f"OpenChamber does not run the packaged OpenCode: {compat}")
+        # Everything in the service, OpenCode included, runs as the cherry user.
+        users = vm.run("for p in $(cat /sys/fs/cgroup/system.slice/cherry.service/cgroup.procs); do "
+                       "stat -c %U /proc/$p 2>/dev/null; done | sort -u")
+        check(users == "cherry", f"cherry.service has processes of other users: {users}")
         check("OpenChamber" in vm.run(f"wget -q -O - {url}/"), "the web UI is not served")
         address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
         rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:3000/health", check_rc=False)
         check(rc != 0, f"OpenChamber answers on {address}, not only on loopback, without a UI password")
-        check(vm.run("stat -c %U /var/lib/opencode/.config/openchamber") == "opencode",
-              "OpenChamber's data directory does not belong to the opencode user")
+        owners = vm.run("stat -c '%n %U:%G' /var/lib/cherry /var/lib/cherry/work /var/lib/cherry/.config/openchamber")
+        check(all(line.endswith(" cherry:cherry") for line in owners.splitlines()),
+              f"/var/lib/cherry does not belong to the cherry user:\n{owners}")
+        # The openchamber package's own service is off too (BR2_PACKAGE_OPENCHAMBER_SERVICE): no openchamber user,
+        # /var/lib/openchamber or openchamber.service.
+        rc, _ = vm.run("getent passwd openchamber", check_rc=False)
+        check(rc != 0, "there is an openchamber user")
+        rc, _ = vm.run("test -e /var/lib/openchamber || test -e /usr/lib/systemd/system/openchamber.service",
+                       check_rc=False)
+        check(rc != 0, "/var/lib/openchamber or openchamber.service is on the image")
         rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
         log(f"OpenChamber {version}: {rss_kb >> 10} MiB resident")
 
@@ -621,7 +600,7 @@ class Smoke:
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
         rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "ipfs-identity.service ipfs.service opencode.service openchamber.service "
+                            "ipfs-identity.service ipfs.service cherry.service "
                             "machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")

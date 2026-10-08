@@ -16,7 +16,7 @@ version (and, where releases live at new URLs, the site) in package/<name>/
   npm-modules.list gets their install paths and URLs, and openchamber.hash
   their hashes.
 
-cherry-stage1 and rpmstrap are Cherry's own code, with no upstream.
+cherry, cherry-stage1 and rpmstrap are Cherry's own code, with no upstream.
 
   scripts/update_packages.py                # every package, to its latest
   scripts/update_packages.py kubo pacman    # some of them

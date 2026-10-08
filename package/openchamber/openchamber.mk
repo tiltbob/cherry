@@ -50,13 +50,18 @@ define OPENCHAMBER_INSTALL_TARGET_CMDS
 	cd $(TARGET_DIR)/usr/lib/openchamber/node_modules/bun-pty/rust-pty/target/release && \
 		rm -f *arm64* *musl* *.dylib *.dll
 	$(INSTALL) -D -m 0755 $(OPENCHAMBER_PKGDIR)/openchamber $(TARGET_DIR)/usr/bin/openchamber
-endef
-
-define OPENCHAMBER_INSTALL_INIT_SYSTEMD
-	$(INSTALL) -D -m 0644 $(OPENCHAMBER_PKGDIR)/openchamber.service \
-		$(TARGET_DIR)/usr/lib/systemd/system/openchamber.service
 	$(INSTALL) -D -m 0755 $(OPENCHAMBER_PKGDIR)/openchamber-serve \
 		$(TARGET_DIR)/usr/libexec/openchamber-serve
 endef
+
+# The server as a service, with its user. openchamber-serve, installed above,
+# is for any unit that runs the server: Cherry's cherry.service too.
+ifeq ($(BR2_PACKAGE_OPENCHAMBER_SERVICE),y)
+OPENCHAMBER_USERS = openchamber -1 openchamber -1 * /var/lib/openchamber - - OpenChamber server
+define OPENCHAMBER_INSTALL_INIT_SYSTEMD
+	$(INSTALL) -D -m 0644 $(OPENCHAMBER_PKGDIR)/openchamber.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/openchamber.service
+endef
+endif
 
 $(eval $(generic-package))

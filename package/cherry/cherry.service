@@ -1,18 +1,20 @@
 [Unit]
-Description=OpenChamber Server
+# OpenChamber's server as the cherry user: package/openchamber's
+# openchamber.service, with the user and home changed.
+Description=Cherry: OpenChamber Server
 Documentation=https://github.com/openchamber/openchamber
 After=network.target
 
 [Service]
 Type=exec
-User=openchamber
-Group=openchamber
+User=cherry
+Group=cherry
 # Its home: OpenChamber keeps its data in .config/openchamber under it, and so
 # does the OpenCode it runs. The agent works in work/ unless a project picks
 # another directory. /var is a tmpfs for now, so all of it is new at every boot.
-StateDirectory=openchamber openchamber/work
-Environment=HOME=/var/lib/openchamber
-WorkingDirectory=/var/lib/openchamber/work
+StateDirectory=cherry cherry/work
+Environment=HOME=/var/lib/cherry
+WorkingDirectory=/var/lib/cherry/work
 Environment=OPENCODE_BINARY=/usr/bin/opencode
 Environment=BUN_BINARY=/usr/bin/bun
 # The image is read-only: a new version comes with a new image. No update
@@ -30,8 +32,8 @@ ExecStart=/usr/libexec/openchamber-serve
 Restart=always
 
 # Hardening, as for ipfs.service. Its terminals and tools, and the agent's, run
-# as the openchamber user inside it: they see the system read-only, except
-# /var/lib/openchamber and a private /tmp. No MemoryDenyWriteExecute: Bun's
+# as the cherry user inside it: they see the system read-only, except
+# /var/lib/cherry and a private /tmp. No MemoryDenyWriteExecute: Bun's
 # JavaScript JIT needs that.
 CapabilityBoundingSet=
 NoNewPrivileges=true

@@ -4,8 +4,7 @@
 #
 # OpenCode 2 protects its API and web UI with HTTP basic auth (user opencode)
 # and makes up a password at every start unless it is given one. This keeps one
-# per boot in the state directory, readable by the opencode user, so by
-# openchamber.service, and by root.
+# per boot in the state directory, readable by the opencode user and root.
 set -eu
 
 f=/var/lib/opencode/server-password

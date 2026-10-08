@@ -9,13 +9,10 @@ config BR2_PACKAGE_OPENCODE
 	select BR2_PACKAGE_BASH # the shell of its bash tool
 	select BR2_PACKAGE_RIPGREP # its grep, glob and file search tools
 	help
-	  OpenCode, an AI coding agent, as a server: its HTTP API and
-	  web UI. opencode.service runs `opencode serve` as the opencode
-	  user, listening on 127.0.0.1:4096 only, with its state
-	  (sessions, provider credentials, logs) in /var/lib/opencode
-	  and a password for the boot in
-	  /var/lib/opencode/server-password. Clients reach it over SSH
-	  port forwarding.
+	  OpenCode, an AI coding agent: the opencode command, with its
+	  server (`opencode serve`: the HTTP API and web UI) and its
+	  clients. Just the binary; see below for running the server
+	  as a service.
 
 	  Upstream's prebuilt binary for x86_64: the "baseline" build,
 	  which doesn't need AVX2, so it runs on any x86_64 machine or
@@ -23,3 +20,18 @@ config BR2_PACKAGE_OPENCODE
 	  breaks it: BR2_STRIP_EXCLUDE_FILES must list opencode.
 
 	  https://opencode.ai
+
+if BR2_PACKAGE_OPENCODE
+
+config BR2_PACKAGE_OPENCODE_SERVICE
+	bool "opencode.service"
+	help
+	  Run the server as a system service: the opencode user, with
+	  /var/lib/opencode as its home, and opencode.service, which
+	  runs `opencode serve` as that user, listening on
+	  127.0.0.1:4096 only, with its state (sessions, provider
+	  credentials, logs) under /var/lib/opencode and a password
+	  for the boot in /var/lib/opencode/server-password. Clients
+	  reach it over SSH port forwarding.
+
+endif
