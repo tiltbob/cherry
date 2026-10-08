@@ -54,10 +54,12 @@ Buildroot 2026.08 is a git submodule. This repository is a
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`.
 
-`scripts/update_packages.py` bumps the OpenCode and OpenChamber packages to
-their latest releases on npm, hashes included (`--check` only reports them;
-it needs npm for OpenChamber). Then build, run `make test`, and update the
-sizes below.
+`scripts/update_packages.py` bumps Cherry's packages to their latest upstream
+releases, hashes included: it looks up GitHub and GitLab tags and releases,
+the npm registry and Debian's snapshot archive, and has Buildroot download the
+new release to hash it. `--check` only reports what is newer; a
+`package=version` argument picks a version. It needs git, and npm for
+OpenChamber. Then build, run `make test`, and update the sizes below.
 
 ## Booting
 
