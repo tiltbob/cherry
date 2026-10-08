@@ -3,13 +3,17 @@ name: build
 # Every pull request is built, merged with its base branch, as the "build"
 # check before it merges (merge_group does the same for a merge queue). Pushes
 # to main build again so that pull requests restore warm caches from main.
-# Other branches build only through a pull request, or by hand.
+# Other branches build only through a pull request, or by hand. A published
+# release is built from its tag, and gets the image as an asset (the release
+# job below).
 on:
   push:
     branches: [main]
     paths-ignore: ['coordination/**', '**.md']
   pull_request:
   merge_group:
+  release:
+    types: [published]
   workflow_dispatch:
 
 # A build takes one to two hours; a newer push to the same branch or pull
@@ -168,3 +172,25 @@ jobs:
           name: cherry-x86_64
           path: artifacts/
           retention-days: 14
+
+  # The image a published release was built from, as its asset
+  # cherry-x86_64.efi, once the build and the smoke test passed. Only this job
+  # may write to the repository.
+  release:
+    needs: build
+    if: success() && github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cherry-x86_64
+          path: artifacts
+
+      - name: Attach the image to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload --clobber "$TAG" artifacts/cherry-x86_64.efi

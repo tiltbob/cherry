@@ -63,6 +63,11 @@ OpenChamber. Then build, run `make test`, and update the sizes below.
 
 ## Booting
 
+The image is `output/cherry_x86_64/images/cherry-x86_64.efi` from a build, or
+the asset of a [GitHub release](https://github.com/tiltbob/cherry/releases):
+CI builds every published release from its tag and, once the smoke test
+passed, attaches `cherry-x86_64.efi` to it.
+
 Serve `cherry-x86_64.efi` from any HTTP server and point the machine's UEFI
 HTTP boot at it. There are two common ways:
 
