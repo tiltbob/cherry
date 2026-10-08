@@ -2,17 +2,17 @@
 # Run OpenChamber's server in the foreground, for a systemd unit:
 # openchamber.service, or another package's (Cherry's cherry.service).
 #
-# The browser UI gets a password only if the machine was given one as the
-# systemd credential openchamber.ui_password (e.g. with --credential of
-# scripts/run_qemu.py). Without one, the server listens on loopback only; with
-# one, on every address, which OpenChamber allows only with a password.
+# Loopback only, port 3000: neither OpenChamber nor OpenCode can listen on a
+# Unix socket, and the unit keeps the OpenCode it runs on loopback too
+# (OPENCHAMBER_OPENCODE_HOSTNAME). Reach it through SSH port forwarding, or
+# from another device through the relay of a pairing link. The browser UI gets
+# a password only if the machine was given one as the systemd credential
+# openchamber.ui_password (e.g. with --credential of scripts/run_qemu.py).
 set -eu
 
-host=127.0.0.1
 if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -s "$CREDENTIALS_DIRECTORY/openchamber.ui_password" ]; then
 	OPENCHAMBER_UI_PASSWORD=$(cat "$CREDENTIALS_DIRECTORY/openchamber.ui_password")
 	export OPENCHAMBER_UI_PASSWORD
-	host=0.0.0.0
 fi
 
-exec /usr/bin/openchamber serve --foreground --host "$host" --port 3000
+exec /usr/bin/openchamber serve --foreground --host 127.0.0.1 --port 3000

@@ -442,12 +442,14 @@ on a machine with a TPM.
   `/var` is a tmpfs, so all of it is new at every boot, and `/var/lib/cherry`
   is the only place the service can write: it sees the rest of the system
   read-only, with a private `/tmp`, and runs without capabilities.
-- **Port:** 3000, on loopback only, and no password on the browser UI. Given
-  the systemd credential `openchamber.ui_password`, it listens on every
-  address instead, with that password: for `make qemu`,
+- **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
+  OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
+  socket. Reach the UI through SSH port forwarding (below), or from another
+  device through the relay of a pairing link. `/health` reports OpenChamber's
+  version, `/api/opencode/compatibility` the OpenCode it runs.
+- **Password:** none on the browser UI, unless the machine was given one as
+  the systemd credential `openchamber.ui_password`: for `make qemu`,
   `python3 scripts/run_qemu.py --credential openchamber.ui_password=...`.
-  `/health` reports OpenChamber's version, `/api/opencode/compatibility` the
-  OpenCode it runs.
 - **Restart:** always, after a crash as after a clean exit, such as
   `openchamber stop` or `restart` from a shell.
 - **Pairing link on the console:** once the server is online,
@@ -473,9 +475,8 @@ This is a development image:
 - Any local user can control the IPFS node through its RPC API, and its swarm
   port is open to the network: there's no host firewall yet.
 - OpenChamber's browser UI has no password unless the machine was given one
-  as a credential: on loopback, any local user can use it, and so run commands
-  as the `cherry` user. With the credential, it is open to the network over
-  plain HTTP.
+  as a credential: any local user can use it, and so run commands as the
+  `cherry` user. It is on loopback only, as is the OpenCode behind it.
 - The `cherry` user creates, starts, enters and removes containers through
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with

@@ -25,9 +25,9 @@
      which listens on loopback only
   8. the OpenCode binary is the packaged version (stripped, it would be a bare
      Bun), and only the binary: no opencode user, state directory or service
-  9. cherry.service runs OpenChamber on Bun as the cherry user, on loopback
-     only (no password was given), serving its web UI and running the packaged
-     OpenCode as that user too; once it was online, cherry-connect-url.service
+  9. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
+     UI and running the packaged OpenCode as that user too, both on loopback
+     only; once it was online, cherry-connect-url.service
      showed the pairing link and its QR code on the console, as that user; the
      user's polkit privileges cover machinectl and cherry-bootstrap@ and
      nothing else; no openchamber user, state directory or service
@@ -42,6 +42,7 @@ Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -75,6 +76,15 @@ FATAL = [
 
 
 SKIPPED = "skipped"
+
+
+def tcp_local_address(hexaddr):
+    """Decode a local address of /proc/net/tcp or tcp6 ("0100007F:0BB8") into (ip, port)."""
+    addr, port = hexaddr.split(":")
+    raw = bytes.fromhex(addr)
+    # Each 32-bit word is in host byte order: little-endian on x86.
+    words = [raw[i:i + 4][::-1] for i in range(0, len(raw), 4)]
+    return str(ipaddress.ip_address(b"".join(words))), int(port, 16)
 
 
 def package_version(name):
@@ -592,9 +602,21 @@ class Smoke:
                        "stat -c %U /proc/$p 2>/dev/null; done | sort -u")
         check(users == "cherry", f"cherry.service has processes of other users: {users}")
         check("OpenChamber" in vm.run(f"wget -q -O - {url}/"), "the web UI is not served")
+        # Everything in the service listens on loopback only: OpenChamber on 3000 and its OpenCode on a free port.
+        # The listening TCP sockets of the service's processes, matched by inode in /proc/net/tcp and tcp6.
+        listening = vm.run("inodes=$(for p in $(cat /sys/fs/cgroup/system.slice/cherry.service/cgroup.procs); do "
+                           "ls -l /proc/$p/fd 2>/dev/null; done | sed -n 's/.*socket:\\[\\([0-9]*\\)\\].*/\\1/p'); "
+                           "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v inodes=\"$inodes\" "
+                           "'BEGIN { n = split(inodes, a, \"\\n\"); for (i = 1; i <= n; i++) want[a[i]] } "
+                           "$4 == \"0A\" && ($10 in want) { print $2 }'")
+        sockets = sorted({tcp_local_address(a) for a in listening.split()})
+        check(len(sockets) >= 2 and 3000 in [port for _, port in sockets]
+              and all(ipaddress.ip_address(ip).is_loopback for ip, _ in sockets),
+              f"cherry.service does not listen on loopback only, on 3000 and OpenCode's port: {sockets}")
+        log("cherry.service listens on " + ", ".join(f"{ip}:{port}" for ip, port in sockets))
         address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
         rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:3000/health", check_rc=False)
-        check(rc != 0, f"OpenChamber answers on {address}, not only on loopback, without a UI password")
+        check(rc != 0, f"OpenChamber answers on {address}, not only on loopback")
         owners = vm.run("stat -c '%n %U:%G' /var/lib/cherry /var/lib/cherry/work /var/lib/cherry/.config/openchamber")
         check(all(line.endswith(" cherry:cherry") for line in owners.splitlines()),
               f"/var/lib/cherry does not belong to the cherry user:\n{owners}")

@@ -25,9 +25,9 @@ config BR2_PACKAGE_OPENCHAMBER_SERVICE
 	help
 	  Run the server as a system service: the openchamber user,
 	  with /var/lib/openchamber as its home, and
-	  openchamber.service, which runs the server as that user,
-	  listening on 127.0.0.1:3000. Given the systemd credential
-	  openchamber.ui_password, it listens on every address instead,
-	  with that password on the browser UI.
+	  openchamber.service, which runs the server as that user, on
+	  127.0.0.1:3000 only, with the OpenCode it runs on loopback
+	  too. Given the systemd credential openchamber.ui_password,
+	  the browser UI asks for that password.
 
 endif

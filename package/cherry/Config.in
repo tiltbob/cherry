@@ -6,9 +6,10 @@ config BR2_PACKAGE_CHERRY
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
-	  as that user, listening on 127.0.0.1:3000. Given the systemd
-	  credential openchamber.ui_password, it listens on every
-	  address instead, with that password on the browser UI.
+	  as that user, on 127.0.0.1:3000 only, with the OpenCode it
+	  runs on loopback too. Given the systemd credential
+	  openchamber.ui_password, the browser UI asks for that
+	  password.
 	  cherry-connect-url.service shows the link that pairs another
 	  OpenChamber app with it on the console, once it is online.
 
