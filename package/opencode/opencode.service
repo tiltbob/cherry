@@ -18,8 +18,8 @@ WorkingDirectory=/var/lib/opencode/work
 Environment=OPENCODE_DISABLE_AUTOUPDATE=1
 # Loopback only, port 4096: the API under /api and the web UI, both behind HTTP
 # basic auth (user opencode). opencode-serve makes up the password for the boot
-# and keeps it in /var/lib/opencode/server-password, for openchamber.service
-# and root. Reach the server through SSH port forwarding.
+# and keeps it in /var/lib/opencode/server-password, for root and the opencode
+# user. Reach the server through SSH port forwarding.
 ExecStart=/usr/libexec/opencode-serve
 Restart=on-failure
 

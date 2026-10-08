@@ -1,0 +1,9 @@
+config BR2_PACKAGE_CHERRY
+	bool "cherry"
+	depends on BR2_PACKAGE_OPENCHAMBER
+	help
+	  Cherry's own service: the cherry user, with /var/lib/cherry as
+	  its home, and cherry.service, which runs OpenChamber's server
+	  as that user, listening on 127.0.0.1:3000. Given the systemd
+	  credential openchamber.ui_password, it listens on every
+	  address instead, with that password on the browser UI.

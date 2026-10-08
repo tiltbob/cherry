@@ -5,16 +5,29 @@ config BR2_PACKAGE_OPENCHAMBER
 	depends on BR2_TOOLCHAIN_USES_GLIBC
 	depends on !BR2_STATIC_LIBS
 	depends on BR2_USE_MMU # git
-	depends on BR2_PACKAGE_OPENCODE # the server it drives
+	depends on BR2_PACKAGE_OPENCODE # the agent it runs
 	select BR2_PACKAGE_BUN # its runtime
 	select BR2_PACKAGE_GIT # diffs, worktrees and commits (simple-git)
 	help
 	  OpenChamber, a web workspace for running and reviewing
 	  OpenCode's agent work: upstream's npm package @openchamber/web
-	  with its dependencies, run on Bun. openchamber.service runs
-	  its server as the opencode user, listening on 127.0.0.1:3000,
-	  attached to opencode.service's server. Given the systemd
-	  credential openchamber.ui_password, it listens on every
-	  address instead, with that password on the browser UI.
+	  with its dependencies, run on Bun, and openchamber, its
+	  command line. /usr/libexec/openchamber-serve runs its server
+	  for a systemd unit: openchamber.service below, or another
+	  package's (Cherry's cherry.service).
 
 	  https://github.com/openchamber/openchamber
+
+if BR2_PACKAGE_OPENCHAMBER
+
+config BR2_PACKAGE_OPENCHAMBER_SERVICE
+	bool "openchamber.service"
+	help
+	  Run the server as a system service: the openchamber user,
+	  with /var/lib/openchamber as its home, and
+	  openchamber.service, which runs the server as that user,
+	  listening on 127.0.0.1:3000. Given the systemd credential
+	  openchamber.ui_password, it listens on every address instead,
+	  with that password on the browser UI.
+
+endif
