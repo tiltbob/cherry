@@ -12,7 +12,8 @@
   3. a second boot starts from scratch again (nothing persists), except the
      machine's identity: the same TPM, now on TIS, gives the same machine ID
      and the same IPFS peer ID
-  4. debootstrap installs Debian into /var/lib/machines and the container boots
+  4. the cherry user creates a Debian container with cherry-bootstrap@.service
+     (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
   5. rpmstrap installs Fedora into /var/lib/machines and the container boots
      (skipped when the guest cannot reach mirrors.fedoraproject.org)
@@ -27,8 +28,9 @@
   9. cherry.service runs OpenChamber on Bun as the cherry user, on loopback
      only (no password was given), serving its web UI and running the packaged
      OpenCode as that user too; once it was online, cherry-connect-url.service
-     showed the pairing link and its QR code on the console, as that user; no
-     openchamber user, state directory or service
+     showed the pairing link and its QR code on the console, as that user; the
+     user's polkit privileges cover machinectl and cherry-bootstrap@ and
+     nothing else; no openchamber user, state directory or service
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
@@ -60,6 +62,8 @@ PANIC = re.compile(r"Kernel panic - not syncing")
 # DER SubjectPublicKeyInfo of an uncompressed NIST P-256 public key, up to the point.
 P256_SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
 NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
+# Run a command as the cherry user, from the root shell on the console.
+AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 FATAL = [
     (re.compile(r"No bootable option"), "the firmware found nothing to boot"),
@@ -392,10 +396,14 @@ class Smoke:
             log(f"skipped: the guest cannot reach {mirror}: {out}")
             return SKIPPED
         root = "/var/lib/machines/debian"
-        vm.run(f"debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie {root} {mirror} "
-               ">/tmp/debootstrap.log 2>&1 || { tail -n 40 /tmp/debootstrap.log; exit 1; }", timeout=1800)
+        # The whole lifecycle as the cherry user: cherry-bootstrap@.service runs debootstrap as root for it (its
+        # log readable), and polkit lets it drive machinectl.
+        log_file = "/var/log/cherry-bootstrap/debian:trixie:debian.log"
+        vm.run(f"{AS_CHERRY} systemctl start cherry-bootstrap@debian:trixie:debian "
+               f"|| {{ tail -n 40 {log_file}; exit 1; }}", timeout=1800)
+        check(vm.run(f"stat -c %a {log_file}") == "644", "the bootstrap log is not readable by the cherry user")
         check("VERSION_CODENAME=trixie" in vm.run(f"cat {root}/etc/os-release"), "debootstrap did not install trixie")
-        vm.run("machinectl start debian")
+        vm.run(f"{AS_CHERRY} machinectl start debian")
         # The container's console goes to the host journal. Wait there rather than with
         # `systemctl -M debian is-system-running --wait`, which can block forever when started this early.
         vm.run("for i in $(seq 120); do journalctl -u systemd-nspawn@debian --no-pager "
@@ -407,9 +415,12 @@ class Smoke:
             log("the Debian container is degraded:\n" + vm.run("systemctl -M debian --failed --no-legend --plain"))
         version = vm.run("systemd-run -M debian --wait -q -P cat /etc/debian_version")
         check(version.startswith("13"), f"unexpected /etc/debian_version in the container: {version!r}")
-        vm.run("machinectl terminate debian; for i in $(seq 30); do machinectl show debian >/dev/null 2>&1 || exit 0; "
-               "sleep 1; done; exit 1", timeout=60)
-        vm.run(f"rm -rf {root}")
+        vm.run(f"{AS_CHERRY} machinectl terminate debian; "
+               "for i in $(seq 30); do machinectl show debian >/dev/null 2>&1 || exit 0; sleep 1; done; exit 1",
+               timeout=60)
+        vm.run(f"{AS_CHERRY} machinectl remove debian")
+        rc, _ = vm.run(f"test -e {root}", check_rc=False)
+        check(rc != 0, "machinectl remove left the container tree behind")
 
     def s5_rpmstrap(self):
         vm = self.vm
@@ -562,6 +573,20 @@ class Smoke:
         check(rc == 0, "no QR code in cherry-connect-url's journal")
         check(vm.run("stat -c %U /var/lib/cherry/.config/openchamber/client-pairing-sessions.json") == "cherry",
               "the pairing session was not created as the cherry user")
+        # Its container privileges, through polkit: machinectl's image operations are allowed (so the failure is
+        # the missing image, not a denial), starting cherry-bootstrap@ is allowed (the script rejects an empty
+        # machine name), and any other unit is denied.
+        vm.run(f"{AS_CHERRY} machinectl list --no-legend")
+        rc, out = vm.run(f"{AS_CHERRY} machinectl remove cherry-smoke-none", check_rc=False)
+        check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
+              f"machinectl remove as cherry did not fail on the missing image alone: {out}")
+        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-bootstrap@debian:trixie:", check_rc=False)
+        check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
+              f"starting cherry-bootstrap@ as cherry did not fail on the empty machine name alone: {out}")
+        vm.run("systemctl reset-failed 'cherry-bootstrap@debian:trixie:.service'")
+        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-connect-url.service", check_rc=False)
+        check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
+              f"the cherry user may start units other than cherry-bootstrap@: {out}")
         # Everything in the service, OpenCode included, runs as the cherry user.
         users = vm.run("for p in $(cat /sys/fs/cgroup/system.slice/cherry.service/cgroup.procs); do "
                        "stat -c %U /proc/$p 2>/dev/null; done | sort -u")

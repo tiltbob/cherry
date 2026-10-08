@@ -1,0 +1,61 @@
+#!/bin/sh
+# cherry-bootstrap@.service: create a container in /var/lib/machines, as root,
+# for the cherry user, which may start this unit but not run the bootstrap tools
+# itself. The instance names the distribution, its release and the machine,
+# separated by colons, and the README's command for each tool does the rest:
+#
+#   systemctl start cherry-bootstrap@debian:trixie:mybox   # debootstrap
+#   systemctl start cherry-bootstrap@fedora:44:mybox       # rpmstrap, any profile
+#   systemctl start cherry-bootstrap@arch::mybox           # pacstrap
+#   machinectl start mybox
+#
+# The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
+# read. A failed bootstrap leaves no tree behind.
+set -eu
+
+instance=$1
+IFS=: read -r distro release name <<EOF2
+$instance
+EOF2
+
+case $name in
+'' | .* | *[!A-Za-z0-9_.-]*)
+	echo "bad machine name '$name': letters, digits, '.', '_' and '-', not starting with '.'" >&2
+	exit 1 ;;
+esac
+for part in "$distro" "$release"; do
+	case $part in
+	-* | *[!A-Za-z0-9_.-]*)
+		echo "bad distribution or release '$part': letters, digits, '.', '_' and '-', not starting with '-'" >&2
+		exit 1 ;;
+	esac
+done
+if [ "$distro" = arch ] && [ -n "$release" ]; then
+	echo "Arch Linux has no release: use arch::$name" >&2
+	exit 1
+fi
+dir=/var/lib/machines/$name
+if [ -e "$dir" ]; then
+	echo "$dir exists" >&2
+	exit 1
+fi
+
+log=$LOGS_DIRECTORY/$instance.log
+echo "bootstrapping $dir, log in $log"
+exec >"$log" 2>&1
+trap 'rm -rf "$dir"' EXIT
+
+case $distro in
+debian)
+	debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus "$release" "$dir" ;;
+arch)
+	systemctl start pacman-init.service
+	mkdir -p "$dir"
+	pacstrap -K -c "$dir" base
+	rm -rf /var/cache/pacman/pkg/* ;;
+*)
+	rpmstrap "$distro" "$release" "$dir" ;;
+esac
+
+trap - EXIT
+echo "done: machinectl start $name"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Cherry: Bootstrap Container %i
+Documentation=https://github.com/tiltbob/cherry#running-containers
+# For the cherry user, which may start this unit (see 50-cherry.rules) but not
+# run the bootstrap tools; `systemctl start` returns when the container is
+# ready, and the log is readable at /var/log/cherry-bootstrap/<instance>.log.
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cherry-bootstrap %i
+LogsDirectory=cherry-bootstrap
+LogsDirectoryMode=0755

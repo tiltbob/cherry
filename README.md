@@ -222,6 +222,30 @@ to the container and masquerades its traffic.
 Everything lives in memory for now. Containers and their configuration are
 gone after a reboot.
 
+### As the cherry user
+
+The `cherry` user, which [cherry.service](#cherry-service) runs OpenChamber and
+the OpenCode agent as, manages containers too, without being root. polkit
+rules (`/usr/share/polkit-1/rules.d/50-cherry.rules`) let it drive
+systemd-machined with `machinectl`: `start`, `poweroff`, `terminate`, `kill`,
+`remove`, `clone`, `shell` and `login` on any container, though not the host's
+own shell or login (`machinectl shell .host`). To create one, it starts
+`cherry-bootstrap@.service`, the only unit it may start, which runs the
+bootstrap tool below as root, with the README's command for it. The instance
+is the distribution, its release and the machine's name, separated by colons:
+
+```sh
+systemctl start cherry-bootstrap@debian:trixie:mybox    # debootstrap
+systemctl start cherry-bootstrap@fedora:44:mybox        # rpmstrap, any of its profiles
+systemctl start cherry-bootstrap@arch::mybox            # pacstrap
+machinectl start mybox
+machinectl shell mybox
+```
+
+`systemctl start` returns when the container is ready, or fails; the tool's
+output is in `/var/log/cherry-bootstrap/<instance>.log`, readable by the
+`cherry` user, and a failed bootstrap leaves no tree behind.
+
 ### Debian containers with debootstrap
 
 `debootstrap` installs Debian into a directory and verifies the archive's
@@ -452,6 +476,10 @@ This is a development image:
   as a credential: on loopback, any local user can use it, and so run commands
   as the `cherry` user. With the credential, it is open to the network over
   plain HTTP.
+- The `cherry` user creates, starts, enters and removes containers through
+  polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
+  container, and the bootstrap tools run as root on the host for it, with
+  checked arguments.
 - Root can derive the IPFS node's private key from the TPM at any time: it
   isn't bound to the boot state (PCRs) yet.
 - The image is not signed.
