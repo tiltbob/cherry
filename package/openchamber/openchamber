@@ -1,0 +1,3 @@
+#!/bin/sh
+# OpenChamber's command line, run on Bun (see package/openchamber).
+exec /usr/bin/bun /usr/lib/openchamber/node_modules/@openchamber/web/bin/cli.js "$@"

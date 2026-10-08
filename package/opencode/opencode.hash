@@ -1,0 +1,5 @@
+# From the npm registry: the integrity field of @opencode/cli-linux-x64-baseline
+# 2.0.25 (npm view @opencode/cli-linux-x64-baseline@2.0.25 dist.integrity)
+sha512  a4cf1dcb3a16982774692e9788b5bc2dead734490e53f060eda29f0271d0c8e2600dc055cbeb94b4972feb8a3e3a4dd23616018f820aaa12295651bfceaed671  cli-linux-x64-baseline-2.0.25.tgz
+# Locally computed, from the LICENSE file at the v2.0.25 tag
+sha256  625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b  LICENSE

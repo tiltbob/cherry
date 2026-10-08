@@ -1,0 +1,20 @@
+#!/bin/sh
+# opencode.service: run the server with a password that its local clients can
+# read.
+#
+# OpenCode 2 protects its API and web UI with HTTP basic auth (user opencode)
+# and makes up a password at every start unless it is given one. This keeps one
+# per boot in the state directory, readable by the opencode user, so by
+# openchamber.service, and by root.
+set -eu
+
+f=/var/lib/opencode/server-password
+if [ ! -s "$f" ]; then
+	umask 077
+	head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' >"$f.tmp"
+	mv "$f.tmp" "$f"
+fi
+OPENCODE_PASSWORD=$(cat "$f")
+export OPENCODE_PASSWORD
+
+exec /usr/bin/opencode serve --hostname 127.0.0.1 --port 4096

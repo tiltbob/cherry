@@ -4,10 +4,10 @@
 #
 ################################################################################
 
-RPM6_VERSION_MAJOR = 6.1
-RPM6_VERSION = $(RPM6_VERSION_MAJOR).0
+RPM6_VERSION = 6.1.0
 RPM6_SOURCE = rpm-$(RPM6_VERSION).tar.bz2
-RPM6_SITE = http://ftp.rpm.org/releases/rpm-$(RPM6_VERSION_MAJOR).x
+# Releases sit under their major.minor series: rpm-6.1.x for 6.1.0.
+RPM6_SITE = http://ftp.rpm.org/releases/rpm-$(basename $(RPM6_VERSION)).x
 RPM6_LICENSE = GPL-2.0+ or LGPL-2.0+ (library only)
 RPM6_LICENSE_FILES = COPYING
 RPM6_CPE_ID_VENDOR = rpm

@@ -1,0 +1,4 @@
+# From https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/SHASUMS256.txt.asc
+sha256  c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f  bun-linux-x64-baseline.zip
+# Locally computed, from the LICENSE.md file at the bun-v1.4.2 tag
+sha256  b9caf52728691b4057e371232c221a132883198be2f3d2ddf92c90404c984b1a  LICENSE.md

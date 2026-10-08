@@ -1,0 +1,21 @@
+#!/bin/sh
+# openchamber.service: run OpenChamber's server, attached to opencode.service.
+#
+# The browser UI gets a password only if the machine was given one as the
+# systemd credential openchamber.ui_password (e.g. with --credential of
+# scripts/run_qemu.py). Without one, the server listens on loopback only; with
+# one, on every address, which OpenChamber allows only with a password.
+set -eu
+
+# The password of opencode.service's server (see /usr/libexec/opencode-serve).
+OPENCODE_PASSWORD=$(cat /var/lib/opencode/server-password)
+export OPENCODE_PASSWORD
+
+host=127.0.0.1
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -s "$CREDENTIALS_DIRECTORY/openchamber.ui_password" ]; then
+	OPENCHAMBER_UI_PASSWORD=$(cat "$CREDENTIALS_DIRECTORY/openchamber.ui_password")
+	export OPENCHAMBER_UI_PASSWORD
+	host=0.0.0.0
+fi
+
+exec /usr/bin/openchamber serve --foreground --host "$host" --port 3000
