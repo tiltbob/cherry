@@ -5,7 +5,7 @@ name: build
 # to main build again so that pull requests restore warm caches from main.
 # Other branches build only through a pull request, or by hand. A published
 # release is built from its tag, and gets the image as an asset (the release
-# job below).
+# job below); SDK releases, tagged sdk-*, are sdk.yml's and skip this.
 on:
   push:
     branches: [main]
@@ -39,6 +39,7 @@ jobs:
       - id: diff
         env:
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           case $GITHUB_EVENT_NAME in
           pull_request) base=HEAD^1 ;; # the merge commit's base branch parent
@@ -46,6 +47,8 @@ jobs:
           *) base= ;;
           esac
           build=true
+          # An SDK release (sdk.yml) is not an image release.
+          case $GITHUB_EVENT_NAME:$RELEASE_TAG in release:sdk-*) build=false ;; esac
           if [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
             printf '%s\n' "$files"
             grep -qvE '^coordination/|\.md$' <<<"$files" || build=false

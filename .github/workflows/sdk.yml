@@ -1,0 +1,153 @@
+name: sdk
+
+# The cross toolchain alone, as Buildroot's relocatable SDK tarball: `make sdk`
+# on configs/cherry_sdk_x86_64_defconfig. A tag sdk-<version> publishes it as
+# the GitHub release of that name, with its SHA-256; a run by hand only keeps
+# it as a workflow artifact. Caches are shared with the build workflow where
+# they match: the toolchain's ccache entries hit on either side.
+on:
+  push:
+    tags: ['sdk-*']
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write # the release
+    env:
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out Buildroot
+        run: git submodule update --init --depth 1 buildroot
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential file cpio unzip rsync bc wget git python3 libncurses-dev
+
+      # The same toolchain key as the build workflow, so its ccache serves here.
+      - name: Compute cache keys
+        id: keys
+        run: |
+          br=$(git rev-parse HEAD:buildroot)
+          toolchain=$({ echo "$br"; grep -E '^BR2_(x86|TOOLCHAIN|KERNEL_HEADERS|GCC|BINUTILS|GLIBC)' configs/*_defconfig; } | sha256sum | cut -c1-16)
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+      # Under keys of their own, so the build workflow's prefix matches never
+      # pick up these smaller caches.
+      - name: Restore download cache
+        id: dl
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: sdk-dl-${{ steps.keys.outputs.toolchain }}
+          restore-keys: |
+            sdk-dl-
+            dl-
+
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+          restore-keys: |
+            sdk-ccache-${{ steps.keys.outputs.toolchain }}-
+            ccache-${{ steps.keys.outputs.toolchain }}-
+            sdk-ccache-
+            ccache-
+
+      - name: Build the SDK
+        run: make sdk
+
+      - name: Save download cache
+        if: always() && steps.dl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: sdk-dl-${{ steps.keys.outputs.toolchain }}
+
+      - name: Save ccache
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+
+      # Unpacked somewhere else and relocated, the SDK compiles and links C and
+      # C++ for the target; the target being x86_64 glibc, the runner can run
+      # the static binaries, and the sysroot's libc reports its version.
+      - name: Check the SDK
+        run: |
+          set -x
+          sdk=/tmp/sdk/cherry-sdk-x86_64
+          mkdir -p /tmp/sdk
+          tar -xzf output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz -C /tmp/sdk
+          "$sdk/relocate-sdk.sh"
+          echo '#include <stdio.h>
+          int main(void) { puts("C: hello from the SDK"); return 0; }' > /tmp/hello.c
+          "$sdk/bin/x86_64-buildroot-linux-gnu-gcc" -static -O2 /tmp/hello.c -o /tmp/hello-c && /tmp/hello-c
+          echo '#include <iostream>
+          int main() { std::cout << "C++: hello from the SDK" << std::endl; return 0; }' > /tmp/hello.cc
+          "$sdk/bin/x86_64-buildroot-linux-gnu-g++" -static -O2 /tmp/hello.cc -o /tmp/hello-cc && /tmp/hello-cc
+          sysroot=$("$sdk/bin/x86_64-buildroot-linux-gnu-gcc" -print-sysroot)
+          {
+            echo "Buildroot $(git -C buildroot describe --tags --always)"
+            "$sdk/bin/x86_64-buildroot-linux-gnu-gcc" --version | head -n 1
+            "$sdk/bin/x86_64-buildroot-linux-gnu-ld" --version | head -n 1
+            "$sysroot/lib/libc.so.6" | head -n 1
+            echo "Linux headers $(awk '/LINUX_VERSION_CODE/ { v = $3 } END { printf "%d.%d.%d", v / 65536, v % 65536 / 256, v % 256 }' "$sysroot/usr/include/linux/version.h")"
+          } | tee /tmp/sdk/versions.txt
+
+      - name: Checksum
+        run: |
+          cd output/cherry_sdk_x86_64/images
+          sha256sum cherry-sdk-x86_64.tar.gz | tee cherry-sdk-x86_64.tar.gz.sha256
+          ls -lh cherry-sdk-x86_64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cherry-sdk-x86_64
+          path: |
+            output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz
+            output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz.sha256
+          retention-days: 14
+
+      # The release named after the tag: created here, or the one that created
+      # the tag, which then gets the files.
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd output/cherry_sdk_x86_64/images
+          {
+            echo "Cherry's cross toolchain, built from \`configs/cherry_sdk_x86_64_defconfig\` at $GITHUB_SHA by \`make sdk\`:"
+            echo
+            sed 's/^/- /' /tmp/sdk/versions.txt
+            echo
+            echo "Unpack \`cherry-sdk-x86_64.tar.gz\` anywhere and run its \`relocate-sdk.sh\`."
+            echo
+            echo '```'
+            cat cherry-sdk-x86_64.tar.gz.sha256
+            echo '```'
+          } > /tmp/sdk/notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload --clobber "$TAG" cherry-sdk-x86_64.tar.gz cherry-sdk-x86_64.tar.gz.sha256
+            gh release edit "$TAG" --notes-file /tmp/sdk/notes.md
+          else
+            gh release create "$TAG" --title "Cherry SDK $TAG" --notes-file /tmp/sdk/notes.md \
+              cherry-sdk-x86_64.tar.gz cherry-sdk-x86_64.tar.gz.sha256
+          fi

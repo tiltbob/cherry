@@ -54,6 +54,14 @@ Buildroot 2026.08 is a git submodule. This repository is a
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`.
 
+`make sdk` builds the cross toolchain alone, from
+`configs/cherry_sdk_x86_64_defconfig` (the toolchain options of the main
+defconfig, nothing else), as Buildroot's relocatable SDK:
+`output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz`, to unpack anywhere
+and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>` has CI
+build it and publish it as the GitHub release of that name, with its SHA-256
+(`.github/workflows/sdk.yml`).
+
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
 the npm registry and Debian's snapshot archive, and has Buildroot download the
