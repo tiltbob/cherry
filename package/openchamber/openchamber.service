@@ -1,0 +1,62 @@
+[Unit]
+Description=OpenChamber Server
+Documentation=https://github.com/openchamber/openchamber
+# Attached to opencode.service's server, with its password (see
+# /usr/libexec/openchamber-serve); OpenChamber starts no OpenCode of its own.
+Requires=opencode.service
+After=network.target opencode.service
+
+[Service]
+Type=exec
+User=opencode
+Group=opencode
+# The home of opencode.service: OpenChamber keeps its data in
+# .config/openchamber under it, and the agent's files are in its reach. /var is
+# a tmpfs for now, so all of it is new at every boot.
+StateDirectory=opencode
+Environment=HOME=/var/lib/opencode
+WorkingDirectory=/var/lib/opencode/work
+Environment=OPENCODE_HOST=http://127.0.0.1:4096
+Environment=OPENCODE_SKIP_START=true
+Environment=OPENCODE_BINARY=/usr/bin/opencode
+Environment=BUN_BINARY=/usr/bin/bun
+# For its terminals: bash's line editing handles multibyte characters.
+Environment=LANG=C.UTF-8
+# The browser UI's password, if the machine was given one (SMBIOS strings,
+# see scripts/run_qemu.py --credential). Then it listens on every address.
+ImportCredential=openchamber.ui_password
+ExecStart=/usr/libexec/openchamber-serve
+Restart=on-failure
+
+# Hardening, as for opencode.service. Its terminals and tools run as the
+# opencode user inside it: they see the system read-only, except
+# /var/lib/opencode and a private /tmp. No MemoryDenyWriteExecute: Bun's
+# JavaScript JIT needs that.
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+# Terminals run arbitrary commands: a filtered system call fails with EPERM,
+# as it would for any unprivileged process, rather than kill the process.
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

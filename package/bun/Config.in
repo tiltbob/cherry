@@ -1,0 +1,13 @@
+config BR2_PACKAGE_BUN
+	bool "bun"
+	# Upstream's prebuilt x86_64 binary, linked against glibc.
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on !BR2_STATIC_LIBS
+	help
+	  Bun, a JavaScript runtime: the bun command, for OpenChamber's
+	  server. Upstream's prebuilt binary for x86_64, the "baseline"
+	  build that doesn't need AVX2, so it runs on any x86_64 machine
+	  or VM CPU model.
+
+	  https://bun.sh

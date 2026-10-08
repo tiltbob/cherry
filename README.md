@@ -23,8 +23,8 @@ Once booted:
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH, an IPFS
-  node (see [IPFS](#ipfs)) and an OpenCode server (see
-  [OpenCode](#opencode)).
+  node (see [IPFS](#ipfs)), an OpenCode server and OpenChamber, its web
+  workspace (see [OpenCode](#opencode) and [OpenChamber](#openchamber)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -53,6 +53,11 @@ Buildroot 2026.08 is a git submodule. This repository is a
 
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`.
+
+`scripts/update_packages.py` bumps the OpenCode and OpenChamber packages to
+their latest releases on npm, hashes included (`--check` only reports them;
+it needs npm for OpenChamber). Then build, run `make test`, and update the
+sizes below.
 
 ## Booting
 
@@ -131,9 +136,10 @@ Everything lives in RAM: the root filesystem, `/var` with its containers, and
 the memory processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
-initramfs: 79 MB for 215 MiB of files before OpenCode, whose binary alone is
-177 MiB and compresses to about 58 MB (see [OpenCode](#opencode)), compressed
-with zstd in clusters of up to 64 KiB. The kernel keeps the files in use in its
+initramfs: 79 MB for 215 MiB of files before OpenCode, OpenChamber and Bun,
+which add about 175 MB for 450 MiB of files (see [OpenCode](#opencode) and
+[OpenChamber](#openchamber)), compressed with zstd in clusters of up to 64 KiB.
+The kernel keeps the files in use in its
 page cache, decompressed, and drops them under memory pressure; it reads them
 from the image again when they are needed.
 
@@ -348,9 +354,8 @@ wget -q -O - http://127.0.0.1:8080/ipfs/<cid>   # the same, through the gateway
 ## OpenCode
 
 Every Cherry machine runs an [OpenCode](https://opencode.ai) server, as
-`opencode.service`: `opencode serve`, the headless HTTP server of the AI coding
-agent, which the `opencode` TUI and other clients attach to. Like sshd, it
-starts only on a machine with a TPM.
+`opencode.service`: `opencode serve`, the HTTP API and web UI of the AI coding
+agent. Like sshd, it starts only on a machine with a TPM.
 
 - **User and state:** the server runs as the `opencode` user, with its state
   under `/var/lib/opencode`, laid out as under a home directory: sessions,
@@ -361,32 +366,66 @@ starts only on a machine with a TPM.
   server can write: it sees the rest of the system read-only, with a private
   `/tmp`, and runs without capabilities. Its tools run as the `opencode` user
   under the same restrictions.
-- **Port:** 4096, on loopback only, without authentication
-  (`OPENCODE_SERVER_PASSWORD` isn't set). `/global/health` answers
-  `{"healthy":true,"version":"..."}`, and `/doc` serves the OpenAPI
-  specification of the [server API](https://opencode.ai/docs/server/).
+- **Port and password:** 4096, on loopback only. OpenCode 2 serves its API
+  under `/api` and its web UI on that port, both behind HTTP basic auth as
+  user `opencode`. The service makes up the password at every boot and keeps
+  it in `/var/lib/opencode/server-password`, readable by root and the
+  `opencode` user. `/api/info` answers `{"version":"..."}`, and
+  `/openapi.json` describes the [API](https://opencode.ai/v2/docs/api/).
 - **Providers:** none are configured; nothing on the machine holds a key.
-  Connect one at runtime, from the attached TUI (`/connect`) or through the
-  API, e.g. `PUT /auth/anthropic` with `{"type":"api","key":"..."}`. The
-  credential lands in `/var/lib/opencode`, so it is gone at the next boot.
-- **Tools:** the bash tool runs `bash`; the grep, glob and file search tools
-  use the image's ripgrep rather than download one. There is no git on the
-  image, so OpenCode's snapshots (undoing a session's file changes) and its
-  VCS features are off.
-- **Binary:** upstream's prebuilt x86_64 build, the "baseline" variant that
-  doesn't need AVX2, so it runs on VM CPU models without it. It is a Bun
-  single-file executable, which stripping breaks: Buildroot's strip skips it
-  (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 177 MiB,
-  about 58 MB in the image, and the idle server uses about 330 MB of RAM.
+  Connect one at runtime, in OpenCode's web UI or in OpenChamber (see
+  [OpenChamber](#openchamber)). The credential lands in `/var/lib/opencode`,
+  so it is gone at the next boot.
+- **Tools:** the bash tool runs `bash`, the grep tool the image's ripgrep, and
+  git is on the image for its snapshots and worktrees.
+- **Binary:** upstream's prebuilt x86_64 build, from the npm platform package
+  `@opencode/cli-linux-x64-baseline`: the "baseline" variant that doesn't need
+  AVX2, so it runs on VM CPU models without it. It is a Bun single-file
+  executable, which stripping breaks: Buildroot's strip skips it
+  (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 200 MiB,
+  about 98 MB in the image, and the idle server uses about 170 MB of RAM.
   Automatic updates are off: a new version comes with a new image.
 
-To use it, forward the port over SSH and attach a TUI from your machine, or
-attach one as `root` on the console:
+To use it, forward the port over SSH, then open `http://127.0.0.1:4096/` in a
+browser, or point OpenCode's own clients at it with `--server` and the
+password in `OPENCODE_PASSWORD`:
 
 ```sh
-ssh -L 4096:127.0.0.1:4096 -p 2222 root@localhost   # the VM of make qemu
-opencode attach http://127.0.0.1:4096               # on your machine
+ssh -L 4096:127.0.0.1:4096 -L 3000:127.0.0.1:3000 -p 2222 root@localhost  # the VM of make qemu
+export OPENCODE_PASSWORD=$(ssh -p 2222 root@localhost cat /var/lib/opencode/server-password)
+opencode session list --server http://127.0.0.1:4096
 ```
+
+## OpenChamber
+
+Every Cherry machine also runs
+[OpenChamber](https://github.com/openchamber/openchamber), a web workspace for
+running and reviewing the agent's work, as `openchamber.service`: its server,
+attached to `opencode.service` with the password above. Like OpenCode, it
+starts only on a machine with a TPM.
+
+- **Runtime:** upstream's npm package `@openchamber/web` with its
+  dependencies, under `/usr/lib/openchamber`, run on [Bun](https://bun.sh)
+  (`/usr/bin/bun`, upstream's prebuilt x86_64 "baseline" build), as upstream's
+  own container does. `openchamber` on the command line is its CLI.
+- **User and data:** the `opencode` user, with the same home, so its data is in
+  `/var/lib/opencode/.config/openchamber`, new at every boot, and it sees the
+  system under the same restrictions as OpenCode.
+- **Port:** 3000, on loopback only, and no password on the browser UI. Given
+  the systemd credential `openchamber.ui_password`, it listens on every
+  address instead, with that password: for `make qemu`,
+  `python3 scripts/run_qemu.py --credential openchamber.ui_password=...`.
+  `/health` reports its version, `/api/opencode/compatibility` the OpenCode it
+  is attached to.
+- **Attached, not managing:** OpenChamber takes OpenCode as an external
+  server. It starts none of its own, and can't restart or upgrade this one.
+- **Left out:** local speech recognition and synthesis (sherpa-onnx, 32 MiB,
+  plus models downloaded at run time), and tunnels (no cloudflared or ngrok on
+  the image). Its update checks and device-pairing relay reach the network.
+- **Size:** Bun is 76 MiB, about 37 MB in the image; the npm tree 175 MiB,
+  about 41 MB. The idle server uses about 115 MB of RAM.
+
+With the port forwarded as above, open `http://127.0.0.1:3000/`.
 
 ## Security notes
 
@@ -395,8 +434,13 @@ This is a development image:
 - SSH accepts keys only.
 - Any local user can control the IPFS node through its RPC API, and its swarm
   port is open to the network: there's no host firewall yet.
-- Any local user can drive the OpenCode server through its HTTP API, and so
-  run commands as the `opencode` user: it has no password yet.
+- The OpenCode server's password is in `/var/lib/opencode/server-password`,
+  readable by root and the `opencode` user. With it, any local user can drive
+  the server through its HTTP API, and so run commands as the `opencode` user.
+- OpenChamber's browser UI has no password unless the machine was given one
+  as a credential: on loopback, any local user can use it, and so run commands
+  as the `opencode` user. With the credential, it is open to the network over
+  plain HTTP.
 - Root can derive the IPFS node's private key from the TPM at any time: it
   isn't bound to the boot state (PCRs) yet.
 - The image is not signed.

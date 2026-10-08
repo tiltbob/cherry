@@ -16,9 +16,11 @@ Environment=HOME=/var/lib/opencode
 WorkingDirectory=/var/lib/opencode/work
 # The image is read-only: a new version comes with a new image.
 Environment=OPENCODE_DISABLE_AUTOUPDATE=1
-# Loopback only: there is no authentication yet (OPENCODE_SERVER_PASSWORD).
-# Reach it through SSH port forwarding.
-ExecStart=/usr/bin/opencode serve --hostname 127.0.0.1 --port 4096
+# Loopback only, port 4096: the API under /api and the web UI, both behind HTTP
+# basic auth (user opencode). opencode-serve makes up the password for the boot
+# and keeps it in /var/lib/opencode/server-password, for openchamber.service
+# and root. Reach the server through SSH port forwarding.
+ExecStart=/usr/libexec/opencode-serve
 Restart=on-failure
 
 # Hardening, as for ipfs.service. The agent's tools run as the opencode user

@@ -9,12 +9,13 @@ config BR2_PACKAGE_OPENCODE
 	select BR2_PACKAGE_BASH # the shell of its bash tool
 	select BR2_PACKAGE_RIPGREP # its grep, glob and file search tools
 	help
-	  OpenCode, an AI coding agent, as a headless HTTP server.
-	  opencode.service runs `opencode serve` as the opencode user,
-	  listening on 127.0.0.1:4096 only, with its state (sessions,
-	  provider credentials, logs) in /var/lib/opencode. Clients
-	  reach it over SSH port forwarding: `opencode attach`, or its
-	  HTTP API.
+	  OpenCode, an AI coding agent, as a server: its HTTP API and
+	  web UI. opencode.service runs `opencode serve` as the opencode
+	  user, listening on 127.0.0.1:4096 only, with its state
+	  (sessions, provider credentials, logs) in /var/lib/opencode
+	  and a password for the boot in
+	  /var/lib/opencode/server-password. Clients reach it over SSH
+	  port forwarding.
 
 	  Upstream's prebuilt binary for x86_64: the "baseline" build,
 	  which doesn't need AVX2, so it runs on any x86_64 machine or

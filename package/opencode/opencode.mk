@@ -4,15 +4,15 @@
 #
 ################################################################################
 
-OPENCODE_VERSION = 1.18.34
-OPENCODE_SITE = https://github.com/anomalyco/opencode/releases/download/v$(OPENCODE_VERSION)
+OPENCODE_VERSION = 2.0.25
+OPENCODE_SITE = https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-
 # Upstream's prebuilt binary: OpenCode is a TypeScript program compiled into a
 # single executable with Bun, and building it needs Bun and its npm
-# dependencies on the host. The "baseline" x86_64 build doesn't need AVX2, so
-# it also runs on VMs whose CPU model lacks it (QEMU's qemu64, x86-64-v2).
-# The tarball holds the binary alone, under no directory.
-OPENCODE_SOURCE = opencode-linux-x64-baseline.tar.gz
-OPENCODE_STRIP_COMPONENTS = 0
+# dependencies on the host. OpenCode 2 is released on npm, as one platform
+# package per binary (@opencode/cli pulls in the matching one). The "baseline"
+# x86_64 build doesn't need AVX2, so it also runs on VMs whose CPU model lacks
+# it (QEMU's qemu64, x86-64-v2).
+OPENCODE_SOURCE = cli-linux-x64-baseline-$(OPENCODE_VERSION).tgz
 # The release doesn't carry the license; take it from the tagged source.
 OPENCODE_EXTRA_DOWNLOADS = https://raw.githubusercontent.com/anomalyco/opencode/v$(OPENCODE_VERSION)/LICENSE
 OPENCODE_LICENSE = MIT
@@ -29,12 +29,15 @@ OPENCODE_POST_EXTRACT_HOOKS += OPENCODE_ADD_LICENSE
 # version), so the defconfig's BR2_STRIP_EXCLUDE_FILES lists opencode, and
 # post-build.sh checks that the installed binary is still the extracted one.
 define OPENCODE_INSTALL_TARGET_CMDS
-	$(INSTALL) -D -m 0755 $(@D)/opencode $(TARGET_DIR)/usr/bin/opencode
+	$(INSTALL) -D -m 0755 $(@D)/bin/opencode $(TARGET_DIR)/usr/bin/opencode
 endef
 
+# opencode-serve gives the server its password for the boot.
 define OPENCODE_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -D -m 0644 $(OPENCODE_PKGDIR)/opencode.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/opencode.service
+	$(INSTALL) -D -m 0755 $(OPENCODE_PKGDIR)/opencode-serve \
+		$(TARGET_DIR)/usr/libexec/opencode-serve
 endef
 
 $(eval $(generic-package))

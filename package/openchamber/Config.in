@@ -1,0 +1,20 @@
+config BR2_PACKAGE_OPENCHAMBER
+	bool "openchamber"
+	# Runs on bun, upstream's prebuilt x86_64 binary (glibc).
+	depends on BR2_x86_64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on !BR2_STATIC_LIBS
+	depends on BR2_USE_MMU # git
+	depends on BR2_PACKAGE_OPENCODE # the server it drives
+	select BR2_PACKAGE_BUN # its runtime
+	select BR2_PACKAGE_GIT # diffs, worktrees and commits (simple-git)
+	help
+	  OpenChamber, a web workspace for running and reviewing
+	  OpenCode's agent work: upstream's npm package @openchamber/web
+	  with its dependencies, run on Bun. openchamber.service runs
+	  its server as the opencode user, listening on 127.0.0.1:3000,
+	  attached to opencode.service's server. Given the systemd
+	  credential openchamber.ui_password, it listens on every
+	  address instead, with that password on the browser UI.
+
+	  https://github.com/openchamber/openchamber
