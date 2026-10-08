@@ -20,13 +20,17 @@ Environment=OPENCODE_HOST=http://127.0.0.1:4096
 Environment=OPENCODE_SKIP_START=true
 Environment=OPENCODE_BINARY=/usr/bin/opencode
 Environment=BUN_BINARY=/usr/bin/bun
+# No update checks, and `openchamber update` says that updates are disabled:
+# Cherry's patch to OpenChamber, the image being read-only.
 # For its terminals: bash's line editing handles multibyte characters.
 Environment=LANG=C.UTF-8
 # The browser UI's password, if the machine was given one (SMBIOS strings,
 # see scripts/run_qemu.py --credential). Then it listens on every address.
 ImportCredential=openchamber.ui_password
 ExecStart=/usr/libexec/openchamber-serve
-Restart=on-failure
+# Also after a clean exit: `openchamber stop` or `restart` from a shell end the
+# server through its API, and it should come back.
+Restart=always
 
 # Hardening, as for opencode.service. Its terminals and tools run as the
 # opencode user inside it: they see the system read-only, except

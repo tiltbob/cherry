@@ -1,0 +1,39 @@
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Disable update checks and `openchamber update`: the image is read-only
+
+On Cherry, OpenChamber is part of a read-only system image, and a new
+version only comes with a new image. So there is nothing to check for:
+
+- checkForUpdates reports no update without asking the update API, nor
+  the npm registry and GitHub it falls back to. That covers the web UI's
+  update-check route (no banner, and the install route answers "No update
+  available").
+- `openchamber update` fails with a message that updates are disabled on
+  this platform, through the CLI's usual error path, in JSON mode too.
+
+Upstream: not applicable, Cherry-specific
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+diff -ru a/node_modules/@openchamber/web/bin/lib/commands-update.js b/node_modules/@openchamber/web/bin/lib/commands-update.js
+--- a/node_modules/@openchamber/web/bin/lib/commands-update.js
++++ b/node_modules/@openchamber/web/bin/lib/commands-update.js
+@@ -18,6 +18,7 @@
+ 
+ function createUpdateCommand({ importFromFilePath, packageManagerPath, serveCommand }) {
+   return async function updateCommand(options = {}) {
++    throw new Error('Updates are disabled on this platform: OpenChamber is part of the system image, and a new version comes with a new image.');
+     const showOutput = shouldRenderHumanOutput(options);
+     const updateSpin = createSpinner(options);
+ 
+diff -ru a/node_modules/@openchamber/web/server/lib/package-manager.js b/node_modules/@openchamber/web/server/lib/package-manager.js
+--- a/node_modules/@openchamber/web/server/lib/package-manager.js
++++ b/node_modules/@openchamber/web/server/lib/package-manager.js
+@@ -792,6 +792,7 @@
+ 
+ export async function checkForUpdates(options = {}) {
+   const currentVersion = options.currentVersion || getCurrentVersion();
++  return { available: false, currentVersion };
+   const pm = detectPackageManager();
+   const appType = normalizeAppType(options.appType);
+   const platform = normalizePlatform(options.platform);

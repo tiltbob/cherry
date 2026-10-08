@@ -423,7 +423,8 @@ starts only on a machine with a TPM.
   server. It starts none of its own, and can't restart or upgrade this one.
 - **Left out:** local speech recognition and synthesis (sherpa-onnx, 32 MiB,
   plus models downloaded at run time), and tunnels (no cloudflared or ngrok on
-  the image). Its update checks and device-pairing relay reach the network.
+  the image). Update checks are off and `openchamber update` says so, as the
+  image is read-only; the device-pairing relay reaches the network.
 - **Size:** Bun is 76 MiB, about 37 MB in the image; the npm tree 175 MiB,
   about 41 MB. The idle server uses about 115 MB of RAM.
 
