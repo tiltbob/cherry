@@ -1,0 +1,37 @@
+#!/bin/sh
+# cherry-connect-url.service: once OpenChamber is online, show the link that
+# pairs another OpenChamber app with this server, and its QR code, on every
+# console (screen and serial alike) and in the journal.
+#
+# `openchamber connect-url --relay --qr` runs as the cherry user, in whose home
+# the server keeps the pairing sessions it redeems. It would start a server of
+# its own if none answered on port 3000, so this waits for cherry.service's
+# first. --relay puts the relay transport in the link, so a device off the local
+# network can use it; the server brings the relay up within a minute. The link
+# is single-use and expires after 10 minutes: for a fresh one,
+# `systemctl restart cherry-connect-url.service`.
+set -u
+
+show() {
+	# On every console, as cherry-no-tpm.service does, and on stdout: the journal.
+	for tty in $(cat /sys/class/tty/console/active); do
+		printf '\n%s\n\n' "$1" >"/dev/$tty"
+	done
+	printf '%s\n' "$1"
+}
+
+i=0
+until wget -q -T 5 -O /dev/null http://127.0.0.1:3000/health; do
+	i=$((i + 1))
+	if [ "$i" -ge 300 ]; then
+		show "OpenChamber did not come online within 5 minutes, so there is no pairing link: see journalctl -u cherry.service"
+		exit 1
+	fi
+	sleep 1
+done
+
+output=$(systemd-run --quiet --wait --pipe --collect -p User=cherry -E NO_COLOR=1 \
+	/usr/bin/openchamber connect-url --relay --qr 2>&1)
+rc=$?
+show "$output"
+exit $rc

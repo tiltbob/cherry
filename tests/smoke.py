@@ -26,7 +26,9 @@
      Bun), and only the binary: no opencode user, state directory or service
   9. cherry.service runs OpenChamber on Bun as the cherry user, on loopback
      only (no password was given), serving its web UI and running the packaged
-     OpenCode as that user too; no openchamber user, state directory or service
+     OpenCode as that user too; once it was online, cherry-connect-url.service
+     showed the pairing link and its QR code on the console, as that user; no
+     openchamber user, state directory or service
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
@@ -547,6 +549,19 @@ class Smoke:
         compat = json.loads(compat)
         check(compat["version"] == package_version("opencode"),
               f"OpenChamber does not run the packaged OpenCode: {compat}")
+        # Once the server was online, cherry-connect-url.service showed the link that pairs another OpenChamber app
+        # with it, and its QR code, on the consoles (before the login prompts) and in the journal:
+        # `openchamber connect-url --relay --qr`, run as the cherry user.
+        check(vm.run("systemctl is-active cherry-connect-url.service") == "active",
+              "cherry-connect-url.service did not succeed")
+        journal = "journalctl -b -u cherry-connect-url --no-pager -o cat"
+        shown = vm.run(journal)
+        check("openchamber://connect?v=2&p=" in shown, f"no pairing link in cherry-connect-url's journal:\n{shown}")
+        # The QR code's modules are block characters (U+2588 is a full one).
+        rc, _ = vm.run(f"{journal} | grep -q -F \"$(printf '\\342\\226\\210')\"", check_rc=False)
+        check(rc == 0, "no QR code in cherry-connect-url's journal")
+        check(vm.run("stat -c %U /var/lib/cherry/.config/openchamber/client-pairing-sessions.json") == "cherry",
+              "the pairing session was not created as the cherry user")
         # Everything in the service, OpenCode included, runs as the cherry user.
         users = vm.run("for p in $(cat /sys/fs/cgroup/system.slice/cherry.service/cgroup.procs); do "
                        "stat -c %U /proc/$p 2>/dev/null; done | sort -u")

@@ -1,0 +1,17 @@
+[Unit]
+Description=Cherry: Show OpenChamber's Pairing Link on the Console
+Documentation=https://github.com/openchamber/openchamber
+# Once the server is online (/usr/libexec/cherry-connect-url waits for it), and
+# before the login prompts, so they don't print over the QR code.
+Requires=cherry.service
+After=cherry.service
+Wants=getty-pre.target
+Before=getty-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/cherry-connect-url
+
+[Install]
+WantedBy=multi-user.target

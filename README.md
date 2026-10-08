@@ -421,6 +421,13 @@ on a machine with a TPM.
   OpenCode it runs.
 - **Restart:** always, after a crash as after a clean exit, such as
   `openchamber stop` or `restart` from a shell.
+- **Pairing link on the console:** once the server is online,
+  `cherry-connect-url.service` shows the link that pairs another OpenChamber
+  app with it, and its QR code, on every console, before the login prompts,
+  and in the journal: `openchamber connect-url --relay --qr`, run as the
+  `cherry` user. The link carries the relay transport, so a device off the
+  local network can use it; it is single-use and expires after 10 minutes.
+  `systemctl restart cherry-connect-url.service` shows a fresh one.
 
 To use it, forward the port over SSH, then open `http://127.0.0.1:3000/` in a
 browser:
