@@ -12,7 +12,10 @@ O ?= $(CURDIR)/output/$(DEFCONFIG:_defconfig=)
 export BR2_DL_DIR ?= $(CURDIR)/dl
 export BR2_CCACHE_DIR ?= $(CURDIR)/.ccache
 
-BR := $(MAKE) -C $(CURDIR)/buildroot O=$(abspath $(O)) BR2_EXTERNAL=$(CURDIR)
+# DEFCONFIG also names the file Buildroot's savedefconfig writes, so pass its
+# path: as a plain name it would land in buildroot/.
+BR := $(MAKE) -C $(CURDIR)/buildroot O=$(abspath $(O)) BR2_EXTERNAL=$(CURDIR) \
+	DEFCONFIG=$(CURDIR)/configs/$(DEFCONFIG)
 
 .PHONY: all build menuconfig savedefconfig linux-menuconfig \
 	linux-update-defconfig qemu test sdk clean help
@@ -28,8 +31,9 @@ $(O)/.config: | buildroot/Makefile
 build: $(O)/.config
 	$(BR)
 
+# make <name>_defconfig configures output/<name> from configs/<name>_defconfig.
 %_defconfig: | buildroot/Makefile
-	$(BR) $@
+	$(MAKE) -C $(CURDIR)/buildroot O=$(CURDIR)/output/$* BR2_EXTERNAL=$(CURDIR) $@
 
 menuconfig savedefconfig linux-menuconfig linux-update-defconfig: $(O)/.config
 	$(BR) $@
