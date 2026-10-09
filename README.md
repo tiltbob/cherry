@@ -58,7 +58,9 @@ Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 more, old versions and vendored tarballs, and `--delete` removes it. CI does
 that before saving its download cache, which it saves, like its ccache, only
 from `main`: GitHub shows a cache to the branch that saved it and, from
-`main`, to every branch, within 10 GB per repository.
+`main`, to every branch, within 10 GB per repository. The `sdk` workflow keeps
+a download cache of its own, pruned to the SDK configuration; neither workflow
+restores the other's downloads.
 
 The main defconfig doesn't build its cross toolchain: it downloads it, as an
 external toolchain, from a [GitHub release](https://github.com/tiltbob/cherry/releases)
