@@ -9,7 +9,24 @@ name: build
 on:
   push:
     branches: [main]
-    paths-ignore: ['coordination/**', '**.md']
+    # What neither the image nor the smoke test sees (the changes job below
+    # skips the build for the same files on a pull request, where `make check`
+    # still runs for them): the coordination notes and Markdown, the SDK
+    # workflow, the scripts the build never runs, and the checks' own tests;
+    # tests/smoke.py stays, the build runs it.
+    paths-ignore:
+      - 'coordination/**'
+      - '**.md'
+      - '.github/workflows/sdk.yml'
+      - 'scripts/prune_dl.py'
+      - 'scripts/update_packages.py'
+      - 'tests/bootstrap.sh'
+      - 'tests/polkit.js'
+      - 'tests/postbuild.sh'
+      - 'tests/scenarios.py'
+      - 'tests/syntax.sh'
+      - 'tests/units.sh'
+      - '.shellcheckrc'
   pull_request:
   merge_group:
   release:
@@ -26,7 +43,8 @@ jobs:
   # A required check must report on every pull request, which paths-ignore
   # would prevent. So pull requests and merge groups that change only
   # coordination/ or Markdown files skip the build job instead, and a skipped
-  # job counts as passed.
+  # job counts as passed. Then the fast checks (`make check`): a lint or
+  # wiring error fails here within a minute, before the build.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -51,14 +69,33 @@ jobs:
           case $GITHUB_EVENT_NAME:$RELEASE_TAG in release:sdk-*) build=false ;; esac
           if [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
             printf '%s\n' "$files"
-            grep -qvE '^coordination/|\.md$' <<<"$files" || build=false
+            # The same files as the push trigger's paths-ignore above.
+            ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
+            ignore="$ignore|^tests/(bootstrap\.sh|polkit\.js|postbuild\.sh|scenarios\.py|syntax\.sh|units\.sh)$|^\.shellcheckrc$"
+            grep -qvE "$ignore" <<<"$files" || build=false
           fi
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
+
+      # The checks: Buildroot's check-package needs the submodule, shellcheck,
+      # flake8 and python3-magic; the others python3-yaml and systemd-analyze;
+      # the polkit test node, which the runner has.
+      - name: Check out Buildroot
+        run: git submodule update --init --depth 1 buildroot
+
+      - name: Install check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            shellcheck python3-flake8 python3-magic python3-yaml systemd
+
+      - name: Check
+        run: make check
 
   build:
     needs: changes
     # Also when the changes job failed, leaving its output empty: a required
-    # check must not pass without a build.
+    # check must not pass without a build, and a skipped job would. The first
+    # step then fails the job at once instead of building (make check failed).
     if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 330
@@ -67,6 +104,12 @@ jobs:
       # Per-run hit statistics; the counters in .ccache accumulate across runs.
       CCACHE_STATSLOG: /tmp/ccache-stats.log
     steps:
+      - name: Checks passed
+        if: needs.changes.result != 'success'
+        run: |
+          echo "::error::the changes job failed (make check): nothing is built until it passes"
+          exit 1
+
       # The runner starts with about 14 GB free. Deleting unused preinstalled
       # SDKs and Docker images frees about 22 GB more but takes two minutes, so
       # it runs in the background while the next steps and the build start.
@@ -123,6 +166,13 @@ jobs:
             ${{ steps.keys.outputs.ccache-toolchain }}-
             ccache-
 
+      # About two minutes with a warm download cache and six to nine with a
+      # cold one (runs 37871168472, 37868856682 and 37874544923); nine with
+      # the cross toolchain built here, before main's external toolchain (run
+      # 37864822370), which now unpacks in seconds. The rest is host-ccache (and host-zstd), built
+      # first as every package depends on it, and the prebuilt Rust and Go,
+      # which vendoring the Cargo and Go packages' dependencies at download
+      # time needs; with a cold cache, the vendoring itself.
       - name: Download sources
         run: make br-source
 

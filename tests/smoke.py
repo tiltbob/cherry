@@ -36,6 +36,8 @@
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
      console: no network, no sshd, no IPFS, no OpenChamber, no containers
 
+The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
+1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
 
@@ -68,7 +70,8 @@ AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 FATAL = [
     (re.compile(r"No bootable option"), "the firmware found nothing to boot"),
-    (re.compile(r'BdsDxe: starting Boot[0-9A-F]{4} "EFI Internal Shell'), "the firmware fell through to the UEFI shell"),
+    (re.compile(r'BdsDxe: starting Boot[0-9A-F]{4} "EFI Internal Shell'),
+     "the firmware fell through to the UEFI shell"),
     (re.compile(r"^Shell> ", re.M), "the firmware started the UEFI shell"),
     (re.compile(r"Found ordering cycle"), "systemd found an ordering cycle"),
     (PANIC, "kernel panic"),
@@ -76,6 +79,22 @@ FATAL = [
 
 
 SKIPPED = "skipped"
+SCENARIO = re.compile(r"s(\d+)_")
+
+
+def scenario_names(cls):
+    """The names of cls's s<N>_ methods in the order of N, which must be 1, 2, ... with no gap or duplicate."""
+    found = {}
+    for name in dir(cls):
+        m = SCENARIO.match(name)
+        if m and callable(getattr(cls, name)):
+            found.setdefault(int(m[1]), []).append(name)
+    problems = [f"{' and '.join(names)} share the number {n}" for n, names in sorted(found.items()) if len(names) > 1]
+    problems += [f"no s{n}_ scenario" for n in range(1, max(found, default=0) + 1) if n not in found]
+    problems += [f"{found[n][0]} is numbered below 1" for n in sorted(found) if n < 1]
+    check(not problems, "the s<N>_ scenarios must be numbered 1, 2, ... with no gap or duplicate: "
+          + "; ".join(problems))
+    return [found[n][0] for n in sorted(found)]
 
 
 def tcp_local_address(hexaddr):
@@ -191,8 +210,8 @@ class VM:
         run_qemu.write_vars(vars_path, run_qemu.boot_url(self.server))
         if tpm_interface:
             self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, "tpm"))
-        cmd = run_qemu.qemu_command(vars_path, serial="stdio", credentials=["agetty.autologin=root",
-                                                                             f"ssh.authorized_keys.root={TEST_KEY}"],
+        cmd = run_qemu.qemu_command(vars_path, serial="stdio",
+                                    credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
                                     tpm=self.tpm, tpm_interface=tpm_interface)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -252,8 +271,8 @@ class VM:
         rc, state = self.run("systemctl is-system-running --wait", timeout=600, check_rc=False)
         state = state.splitlines()[-1] if state else ""
         if state != "running":
-            details = self.run("systemctl --failed --no-legend --plain; journalctl -b -p warning --no-pager | tail -n 60",
-                               check_rc=False)[1]
+            details = self.run("systemctl --failed --no-legend --plain; "
+                               "journalctl -b -p warning --no-pager | tail -n 60", check_rc=False)[1]
             log(f"system state {state!r}:\n{details}")
         return state
 
@@ -358,7 +377,8 @@ class Smoke:
         check(vm.run("systemctl show -p RuntimeWatchdogUSec --value") == "30s", "RuntimeWatchdogSec not applied")
         log("memory of the booted OS, before any container:\n" + vm.run(
             "free -k; df -k /var /run | sed 's/^/  /'; "
-            "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' /proc/meminfo"))
+            "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' "
+            "/proc/meminfo"))
 
     def s2_nspawn(self):
         vm = self.vm
@@ -401,7 +421,8 @@ class Smoke:
         mirror = "http://deb.debian.org/debian"
         # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
         rc, out = vm.run(f"for i in $(seq 12); do wget -q -T 10 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease "
-                         "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1", timeout=240, check_rc=False)
+                         "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1",
+                         timeout=240, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {mirror}: {out}")
             return SKIPPED
@@ -512,7 +533,8 @@ class Smoke:
         check(vm.run("systemctl is-active ipfs.service") == "active", "ipfs.service is not running")
         pid = vm.run("systemctl show -p MainPID --value ipfs.service")
         check(vm.run(f"stat -c %U /proc/{pid}") == "ipfs", "the IPFS daemon does not run as the ipfs user")
-        check(vm.run("echo $IPFS_PATH") == "/var/lib/ipfs", "login shells don't set IPFS_PATH to the daemon's repository")
+        check(vm.run("echo $IPFS_PATH") == "/var/lib/ipfs",
+              "login shells don't set IPFS_PATH to the daemon's repository")
         check(vm.run("stat -c %U $IPFS_PATH/config") == "ipfs", "the IPFS repository does not belong to the ipfs user")
         # Through the daemon's RPC API: the CLI finds its address in $IPFS_PATH/api.
         peer_id = vm.run("ipfs id -f '<id>'")
@@ -594,12 +616,19 @@ class Smoke:
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
               f"starting cherry-bootstrap@ as cherry did not fail on the empty machine name alone: {out}")
         vm.run("systemctl reset-failed 'cherry-bootstrap@debian:trixie:.service'")
-        # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too: without a tree for the
-        # name, it fails in nspawn, not on authorization.
-        rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-none", check_rc=False)
+        # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too. machinectl first asks
+        # machined whether the image exists, so the probe gives the name one: an empty directory, which nspawn
+        # refuses as not an OS tree. The start then reaches systemd and fails in nspawn, not on authorization,
+        # leaving the unit failed (machinectl 258 reports the failed job by its exit status alone).
+        vm.run("mkdir /var/lib/machines/cherry-smoke-empty")
+        rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-empty", check_rc=False)
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
-              f"machinectl start as cherry did not fail on the missing tree alone: {out}")
-        vm.run("systemctl reset-failed systemd-nspawn@cherry-smoke-none.service")
+              f"machinectl start as cherry did not fail on the empty tree alone: {out}")
+        rc, state = vm.run("systemctl is-failed systemd-nspawn@cherry-smoke-empty.service", check_rc=False)
+        check(rc == 0, f"machinectl start as cherry did not start systemd-nspawn@cherry-smoke-empty.service "
+                       f"(state {state!r}): {out}")
+        vm.run("systemctl reset-failed systemd-nspawn@cherry-smoke-empty.service && "
+               "rmdir /var/lib/machines/cherry-smoke-empty")
         rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-connect-url.service", check_rc=False)
         check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
               f"the cherry user may start units other than cherry-bootstrap@: {out}")
@@ -676,16 +705,13 @@ class Smoke:
         vm.run("journalctl -b -u cherry-no-tpm.service --no-pager | grep -q 'Stopped: no usable TPM 2.0'")
 
     def run(self):
-        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_opencode, self.s9_cherry,
-                     self.s10_zram, self.s11_no_tpm]
+        names = scenario_names(type(self))
         results = []
         try:
-            for i, scenario in enumerate(scenarios, 1):
-                name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")
-                log(f"=== {i}. {name}")
+            for i, name in enumerate(names, 1):
+                log(f"=== {i}. {name[len(f's{i}_'):].replace('_', ' ')}")
                 start = time.monotonic()
-                outcome = "skipped" if scenario() == SKIPPED else "passed"
+                outcome = "skipped" if getattr(self, name)() == SKIPPED else "passed"
                 results.append(outcome)
                 log(f"=== {i}. {outcome} in {time.monotonic() - start:.0f}s")
         finally:
