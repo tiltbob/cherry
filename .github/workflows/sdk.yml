@@ -5,8 +5,9 @@ name: sdk
 # the GitHub release of that name, with its SHA-256; so does a run by hand
 # given that name as its input, which then creates the tag on the commit it
 # runs on; a run by hand without one only keeps the tarball as a workflow
-# artifact. Caches are shared with the build workflow where they match, and
-# saved only from main, as there.
+# artifact. The ccache is shared with the build workflow where the toolchain
+# matches; the download cache is this workflow's own. Both are saved only from
+# main, as there.
 on:
   push:
     tags: ['sdk-*']
@@ -59,17 +60,18 @@ jobs:
           toolchain=$({ echo "$br"; grep -E '^BR2_(x86|TOOLCHAIN|KERNEL_HEADERS|GCC|BINUTILS|GLIBC)' configs/*_defconfig; } | sha256sum | cut -c1-16)
           echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
 
-      # Under keys of their own, so the build workflow's prefix matches never
-      # pick up these smaller caches.
+      # Under keys of their own, and never the build workflow's: each download
+      # cache is pruned to its own configuration before it is saved, so the
+      # build's holds none of the toolchain's sources and this one none of the
+      # image's. The two keep separate caches, in both directions (the build
+      # workflow's prefix, dl-, matches no sdk-dl- key either).
       - name: Restore download cache
         id: dl
         uses: actions/cache/restore@v4
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
-          restore-keys: |
-            sdk-dl-
-            dl-
+          restore-keys: sdk-dl-
 
       - name: Restore ccache
         id: ccache
