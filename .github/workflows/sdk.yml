@@ -41,7 +41,7 @@ jobs:
           *) echo "the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
           esac
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
@@ -67,7 +67,7 @@ jobs:
       # workflow's prefix, dl-, matches no sdk-dl- key either).
       - name: Restore download cache
         id: dl
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
@@ -75,7 +75,7 @@ jobs:
 
       - name: Restore ccache
         id: ccache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .ccache
           key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
@@ -97,14 +97,14 @@ jobs:
 
       - name: Save download cache
         if: always() && github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
 
       - name: Save ccache
         if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .ccache
           key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
@@ -141,7 +141,7 @@ jobs:
           sha256sum cherry-sdk-x86_64.tar.gz | tee cherry-sdk-x86_64.tar.gz.sha256
           ls -lh cherry-sdk-x86_64.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cherry-sdk-x86_64

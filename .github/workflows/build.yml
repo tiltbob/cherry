@@ -57,7 +57,7 @@ jobs:
     outputs:
       build: ${{ steps.diff.outputs.build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -146,7 +146,7 @@ jobs:
           df -h /
           sudo sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; docker image prune --all --force' >/dev/null 2>&1 </dev/null &
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # git describe provides the image version
 
@@ -177,7 +177,7 @@ jobs:
 
       - name: Restore download cache
         id: dl
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
@@ -185,7 +185,7 @@ jobs:
 
       - name: Restore ccache
         id: ccache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .ccache
           key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
@@ -216,7 +216,7 @@ jobs:
 
       - name: Save download cache
         if: github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
@@ -232,7 +232,7 @@ jobs:
       # Also after a failed or cancelled build, so the next run resumes warm.
       - name: Save ccache
         if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .ccache
           key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
@@ -260,7 +260,7 @@ jobs:
           cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
           cp output/cherry_x86_64/test/serial.log artifacts/ || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: cherry-x86_64
@@ -279,7 +279,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cherry-x86_64
           path: artifacts
