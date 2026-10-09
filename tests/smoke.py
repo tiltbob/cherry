@@ -619,7 +619,7 @@ class Smoke:
         # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too. machinectl first asks
         # machined whether the image exists, so the probe gives the name one: an empty directory, which nspawn
         # refuses as not an OS tree. The start then reaches systemd and fails in nspawn, not on authorization,
-        # leaving the unit failed.
+        # leaving the unit failed (machinectl 258 reports the failed job by its exit status alone).
         vm.run("mkdir /var/lib/machines/cherry-smoke-empty")
         rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-empty", check_rc=False)
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
