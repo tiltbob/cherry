@@ -9,7 +9,24 @@ name: build
 on:
   push:
     branches: [main]
-    paths-ignore: ['coordination/**', '**.md']
+    # What neither the image nor the smoke test sees (the changes job below
+    # skips the build for the same files on a pull request, where `make check`
+    # still runs for them): the coordination notes and Markdown, the SDK
+    # workflow, the scripts the build never runs, and the checks' own tests;
+    # tests/smoke.py stays, the build runs it.
+    paths-ignore:
+      - 'coordination/**'
+      - '**.md'
+      - '.github/workflows/sdk.yml'
+      - 'scripts/prune_dl.py'
+      - 'scripts/update_packages.py'
+      - 'tests/bootstrap.sh'
+      - 'tests/polkit.js'
+      - 'tests/postbuild.sh'
+      - 'tests/scenarios.py'
+      - 'tests/syntax.sh'
+      - 'tests/units.sh'
+      - '.shellcheckrc'
   pull_request:
   merge_group:
   release:
@@ -52,7 +69,10 @@ jobs:
           case $GITHUB_EVENT_NAME:$RELEASE_TAG in release:sdk-*) build=false ;; esac
           if [ -n "$base" ] && files=$(git diff --name-only "$base" HEAD); then
             printf '%s\n' "$files"
-            grep -qvE '^coordination/|\.md$' <<<"$files" || build=false
+            # The same files as the push trigger's paths-ignore above.
+            ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
+            ignore="$ignore|^tests/(bootstrap\.sh|polkit\.js|postbuild\.sh|scenarios\.py|syntax\.sh|units\.sh)$|^\.shellcheckrc$"
+            grep -qvE "$ignore" <<<"$files" || build=false
           fi
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
 
