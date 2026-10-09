@@ -10,9 +10,11 @@
 #   machinectl start mybox
 #
 # The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
-# read. A failed bootstrap leaves no tree behind.
+# read. A failed bootstrap leaves no tree behind. $CHERRY_MACHINES_DIR replaces
+# /var/lib/machines (tests/bootstrap.sh).
 set -eu
 
+machines=${CHERRY_MACHINES_DIR:-/var/lib/machines}
 instance=$1
 IFS=: read -r distro release name <<EOF2
 $instance
@@ -34,7 +36,7 @@ if [ "$distro" = arch ] && [ -n "$release" ]; then
 	echo "Arch Linux has no release: use arch::$name" >&2
 	exit 1
 fi
-dir=/var/lib/machines/$name
+dir=$machines/$name
 if [ -e "$dir" ]; then
 	echo "$dir exists" >&2
 	exit 1
