@@ -54,14 +54,24 @@ Buildroot 2026.08 is a git submodule. This repository is a
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`.
 
-`make sdk` builds the cross toolchain alone, from
-`configs/cherry_sdk_x86_64_defconfig` (the toolchain options of the main
-defconfig, nothing else), as Buildroot's relocatable SDK:
+The main defconfig doesn't build its cross toolchain: it downloads it, as an
+external toolchain, from a [GitHub release](https://github.com/tiltbob/cherry/releases)
+named `sdk-<version>` (`BR2_TOOLCHAIN_EXTERNAL_URL`; its SHA-256 is in
+`patches/toolchain-external-custom/toolchain-external-custom.hash`). That
+saves the toolchain's build, about ten minutes with a warm ccache and an hour
+without, on every build; Buildroot still checks that the toolchain's gcc,
+kernel headers and C library are the ones the defconfig says.
+
+The toolchain itself comes from `configs/cherry_sdk_x86_64_defconfig`, which
+has the toolchain options and nothing else: `make sdk` builds it, as
+Buildroot's relocatable SDK, into
 `output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz`, to unpack anywhere
 and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>`, or
 running the `sdk` workflow by hand with that name as its input, has CI build
 it and publish it as the GitHub release of that name, with its SHA-256
-(`.github/workflows/sdk.yml`).
+(`.github/workflows/sdk.yml`). To change the toolchain: edit the SDK
+defconfig, publish a release (`sdk-YYYY.MM.DD.NNN`, with NNN counting the
+day's releases), then point the main defconfig's URL and the hash file at it.
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
