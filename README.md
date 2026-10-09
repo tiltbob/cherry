@@ -58,8 +58,9 @@ Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `configs/cherry_sdk_x86_64_defconfig` (the toolchain options of the main
 defconfig, nothing else), as Buildroot's relocatable SDK:
 `output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz`, to unpack anywhere
-and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>` has CI
-build it and publish it as the GitHub release of that name, with its SHA-256
+and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>`, or
+running the `sdk` workflow by hand with that name as its input, has CI build
+it and publish it as the GitHub release of that name, with its SHA-256
 (`.github/workflows/sdk.yml`).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
