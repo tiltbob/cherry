@@ -36,6 +36,8 @@
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
      console: no network, no sshd, no IPFS, no OpenChamber, no containers
 
+The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
+1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
 Timeouts scale with CHERRY_TEST_TIMEOUT_MULT (default 1 with KVM, 4 without).
 """
 
@@ -76,6 +78,22 @@ FATAL = [
 
 
 SKIPPED = "skipped"
+SCENARIO = re.compile(r"s(\d+)_")
+
+
+def scenario_names(cls):
+    """The names of cls's s<N>_ methods in the order of N, which must be 1, 2, ... with no gap or duplicate."""
+    found = {}
+    for name in dir(cls):
+        m = SCENARIO.match(name)
+        if m and callable(getattr(cls, name)):
+            found.setdefault(int(m[1]), []).append(name)
+    problems = [f"{' and '.join(names)} share the number {n}" for n, names in sorted(found.items()) if len(names) > 1]
+    problems += [f"no s{n}_ scenario" for n in range(1, max(found, default=0) + 1) if n not in found]
+    problems += [f"{found[n][0]} is numbered below 1" for n in sorted(found) if n < 1]
+    check(not problems, "the s<N>_ scenarios must be numbered 1, 2, ... with no gap or duplicate: "
+          + "; ".join(problems))
+    return [found[n][0] for n in sorted(found)]
 
 
 def tcp_local_address(hexaddr):
@@ -676,16 +694,13 @@ class Smoke:
         vm.run("journalctl -b -u cherry-no-tpm.service --no-pager | grep -q 'Stopped: no usable TPM 2.0'")
 
     def run(self):
-        scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_opencode, self.s9_cherry,
-                     self.s10_zram, self.s11_no_tpm]
+        names = scenario_names(type(self))
         results = []
         try:
-            for i, scenario in enumerate(scenarios, 1):
-                name = scenario.__name__[len(f"s{i}_"):].replace("_", " ")
-                log(f"=== {i}. {name}")
+            for i, name in enumerate(names, 1):
+                log(f"=== {i}. {name[len(f's{i}_'):].replace('_', ' ')}")
                 start = time.monotonic()
-                outcome = "skipped" if scenario() == SKIPPED else "passed"
+                outcome = "skipped" if getattr(self, name)() == SKIPPED else "passed"
                 results.append(outcome)
                 log(f"=== {i}. {outcome} in {time.monotonic() - start:.0f}s")
         finally:
