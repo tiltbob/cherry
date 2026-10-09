@@ -52,7 +52,12 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make clean` | remove `output/cherry_x86_64` |
 
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
-`BR2_DL_DIR` and `BR2_CCACHE_DIR`.
+`BR2_DL_DIR` and `BR2_CCACHE_DIR`. Buildroot never deletes a download:
+`python3 scripts/prune_dl.py` lists what in `dl/` no configuration needs any
+more, old versions and vendored tarballs, and `--delete` removes it. CI does
+that before saving its download cache, which it saves, like its ccache, only
+from `main`: GitHub shows a cache to the branch that saved it and, from
+`main`, to every branch, within 10 GB per repository.
 
 The main defconfig doesn't build its cross toolchain: it downloads it, as an
 external toolchain, from a [GitHub release](https://github.com/tiltbob/cherry/releases)
