@@ -671,7 +671,7 @@ class Smoke:
 
     def run(self):
         scenarios = [self.s1_http_boot, self.s2_nspawn, self.s3_stateless_reboot, self.s4_debootstrap,
-                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_opencode, self.s9_openchamber,
+                     self.s5_rpmstrap, self.s6_pacstrap, self.s7_ipfs, self.s8_opencode, self.s9_cherry,
                      self.s10_zram, self.s11_no_tpm]
         results = []
         try:
