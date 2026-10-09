@@ -616,12 +616,19 @@ class Smoke:
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
               f"starting cherry-bootstrap@ as cherry did not fail on the empty machine name alone: {out}")
         vm.run("systemctl reset-failed 'cherry-bootstrap@debian:trixie:.service'")
-        # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too: without a tree for the
-        # name, it fails in nspawn, not on authorization.
-        rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-none", check_rc=False)
+        # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too. machinectl first asks
+        # machined whether the image exists, so the probe gives the name one: an empty directory, which nspawn
+        # refuses as not an OS tree. The start then reaches systemd and fails in nspawn, not on authorization,
+        # leaving the unit failed.
+        vm.run("mkdir /var/lib/machines/cherry-smoke-empty")
+        rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-empty", check_rc=False)
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
-              f"machinectl start as cherry did not fail on the missing tree alone: {out}")
-        vm.run("systemctl reset-failed systemd-nspawn@cherry-smoke-none.service")
+              f"machinectl start as cherry did not fail on the empty tree alone: {out}")
+        rc, state = vm.run("systemctl is-failed systemd-nspawn@cherry-smoke-empty.service", check_rc=False)
+        check(rc == 0, f"machinectl start as cherry did not start systemd-nspawn@cherry-smoke-empty.service "
+                       f"(state {state!r}): {out}")
+        vm.run("systemctl reset-failed systemd-nspawn@cherry-smoke-empty.service && "
+               "rmdir /var/lib/machines/cherry-smoke-empty")
         rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-connect-url.service", check_rc=False)
         check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
               f"the cherry user may start units other than cherry-bootstrap@: {out}")
