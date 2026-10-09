@@ -166,10 +166,10 @@ jobs:
             ${{ steps.keys.outputs.ccache-toolchain }}-
             ccache-
 
-      # About two minutes with a warm download cache and six with a cold one
-      # (runs 37871168472 and 37868856682); nine with the cross toolchain
-      # built here, before main's external toolchain (run 37864822370), which
-      # now unpacks in seconds. The rest is host-ccache (and host-zstd), built
+      # About two minutes with a warm download cache and six to nine with a
+      # cold one (runs 37871168472, 37868856682 and 37874544923); nine with
+      # the cross toolchain built here, before main's external toolchain (run
+      # 37864822370), which now unpacks in seconds. The rest is host-ccache (and host-zstd), built
       # first as every package depends on it, and the prebuilt Rust and Go,
       # which vendoring the Cargo and Go packages' dependencies at download
       # time needs; with a cold cache, the vendoring itself.
