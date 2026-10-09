@@ -1,0 +1,6 @@
+# shellcheck, run by buildroot/utils/check-package over the scripts under
+# package/ (make check).
+# SC2013 (info): "To read lines rather than words, use a while read loop".
+# /sys/class/tty/console/active is one line of console names, so splitting it
+# into words is the point (package/cherry/cherry-connect-url).
+disable=SC2013

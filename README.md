@@ -49,6 +49,7 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make br-<target>` | any Buildroot target, e.g. `make br-systemd-rebuild` |
 | `make qemu` | UEFI HTTP boot in QEMU + OVMF, with a software TPM |
 | `make test` | end-to-end smoke test in QEMU ([tests/smoke.py](tests/smoke.py)) |
+| `make check` | fast checks that need no build (below) |
 | `make clean` | remove `output/cherry_x86_64` |
 
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
@@ -77,6 +78,19 @@ it and publish it as the GitHub release of that name, with its SHA-256
 (`.github/workflows/sdk.yml`). To change the toolchain: edit the SDK
 defconfig, publish a release (`sdk-YYYY.MM.DD.NNN`, with NNN counting the
 day's releases), then point the main defconfig's URL and the hash file at it.
+
+`make check` runs the checks that need no build, in about a minute, and CI
+runs them before every build (`.github/workflows/build.yml`): Buildroot's
+`check-package` over `Config.in`, `package/` and `configs/` (with shellcheck
+on the scripts), flake8 over `tests/` and `scripts/`, the workflows as YAML,
+`sh -n` over every shell script, `systemd-analyze verify` over every unit
+against a root laid out as the image (so a unit's `ExecStart=` must name a
+script where its package installs it), and tests of their own under `tests/`:
+the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
+argument checks and tool calls, and `post-build.sh`'s check of `opencode`.
+`make -k check` runs on after a failure; `make check-<name>` runs one. They
+need shellcheck, flake8, python3-magic, python3-yaml and systemd's
+`systemd-analyze`, and node for the polkit rules (skipped without it).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
