@@ -248,10 +248,12 @@ the OpenCode agent as, manages containers too, without being root. polkit
 rules (`/usr/share/polkit-1/rules.d/50-cherry.rules`) let it drive
 systemd-machined with `machinectl`: `start`, `poweroff`, `terminate`, `kill`,
 `remove`, `clone`, `shell` and `login` on any container, though not the host's
-own shell or login (`machinectl shell .host`). To create one, it starts
-`cherry-bootstrap@.service`, the only unit it may start, which runs the
-bootstrap tool below as root, with the README's command for it. The instance
-is the distribution, its release and the machine's name, separated by colons:
+own shell or login (`machinectl shell .host`). `machinectl start` is a start
+of `systemd-nspawn@<name>.service`, so it may start, stop and restart those
+units, and no other but `cherry-bootstrap@.service`, which creates a
+container: it runs the bootstrap tool below as root, with the README's command
+for it. The instance is the distribution, its release and the machine's name,
+separated by colons:
 
 ```sh
 systemctl start cherry-bootstrap@debian:trixie:mybox    # debootstrap

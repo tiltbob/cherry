@@ -1,8 +1,10 @@
 // The cherry user, which cherry.service runs OpenChamber and the OpenCode
 // agent as, manages containers with machinectl: start, poweroff, terminate,
 // kill, remove, clone, shell and login (not the host's own shell, login or
-// pty), and creates them with cherry-bootstrap@.service, the only unit it may
-// start. Everyone else keeps polkit's defaults.
+// pty), and creates them with cherry-bootstrap@.service. machinectl start
+// goes to systemd, not machined: it starts systemd-nspawn@<name>.service, so
+// those units it may start, stop and restart; cherry-bootstrap@ units it may
+// start; no other unit. Everyone else keeps polkit's defaults.
 polkit.addRule(function(action, subject) {
     if (subject.user != "cherry")
         return polkit.Result.NOT_HANDLED;
@@ -12,9 +14,14 @@ polkit.addRule(function(action, subject) {
         action.id == "org.freedesktop.machine1.login" ||
         action.id == "org.freedesktop.machine1.open-pty")
         return polkit.Result.YES;
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("verb") == "start" &&
-        (action.lookup("unit") || "").indexOf("cherry-bootstrap@") == 0)
-        return polkit.Result.YES;
+    if (action.id == "org.freedesktop.systemd1.manage-units") {
+        var unit = action.lookup("unit") || "";
+        var verb = action.lookup("verb");
+        if (unit.indexOf("systemd-nspawn@") == 0 &&
+            (verb == "start" || verb == "stop" || verb == "restart"))
+            return polkit.Result.YES;
+        if (unit.indexOf("cherry-bootstrap@") == 0 && verb == "start")
+            return polkit.Result.YES;
+    }
     return polkit.Result.NOT_HANDLED;
 });
