@@ -36,7 +36,7 @@ fi
 # most recently installed build directory, should several versions remain).
 if [ -e "$TARGET_DIR/usr/bin/opencode" ]; then
 	stamp=$(ls -t "$BUILD_DIR"/opencode-*/.stamp_target_installed 2>/dev/null | head -n 1)
-	if [ -z "$stamp" ] || ! cmp -s "${stamp%/*}/opencode" "$TARGET_DIR/usr/bin/opencode"; then
+	if [ -z "$stamp" ] || ! cmp -s "${stamp%/*}/bin/opencode" "$TARGET_DIR/usr/bin/opencode"; then
 		echo "post-build: /usr/bin/opencode differs from the extracted binary (stripped?):" \
 			"add opencode to BR2_STRIP_EXCLUDE_FILES" >&2
 		exit 1

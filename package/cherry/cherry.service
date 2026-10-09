@@ -17,6 +17,10 @@ Environment=HOME=/var/lib/cherry
 WorkingDirectory=/var/lib/cherry/work
 Environment=OPENCODE_BINARY=/usr/bin/opencode
 Environment=BUN_BINARY=/usr/bin/bun
+# Loopback only, both: OpenChamber on 127.0.0.1:3000 (openchamber-serve), and
+# the OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a
+# Unix socket.
+Environment=OPENCHAMBER_OPENCODE_HOSTNAME=127.0.0.1
 # The image is read-only: a new version comes with a new image. No update
 # checks, and `openchamber update` says that updates are disabled (Cherry's
 # patch to OpenChamber); OpenCode's own are off too.
@@ -24,7 +28,7 @@ Environment=OPENCODE_DISABLE_AUTOUPDATE=1
 # For its terminals: bash's line editing handles multibyte characters.
 Environment=LANG=C.UTF-8
 # The browser UI's password, if the machine was given one (SMBIOS strings,
-# see scripts/run_qemu.py --credential). Then it listens on every address.
+# see scripts/run_qemu.py --credential).
 ImportCredential=openchamber.ui_password
 ExecStart=/usr/libexec/openchamber-serve
 # Also after a clean exit: `openchamber stop` or `restart` from a shell end the

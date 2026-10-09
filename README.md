@@ -54,6 +54,14 @@ Buildroot 2026.08 is a git submodule. This repository is a
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`.
 
+`make sdk` builds the cross toolchain alone, from
+`configs/cherry_sdk_x86_64_defconfig` (the toolchain options of the main
+defconfig, nothing else), as Buildroot's relocatable SDK:
+`output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz`, to unpack anywhere
+and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>` has CI
+build it and publish it as the GitHub release of that name, with its SHA-256
+(`.github/workflows/sdk.yml`).
+
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
 the npm registry and Debian's snapshot archive, and has Buildroot download the
@@ -62,6 +70,11 @@ new release to hash it. `--check` only reports what is newer; a
 OpenChamber. Then build, run `make test`, and update the sizes below.
 
 ## Booting
+
+The image is `output/cherry_x86_64/images/cherry-x86_64.efi` from a build, or
+the asset of a [GitHub release](https://github.com/tiltbob/cherry/releases):
+CI builds every published release from its tag and, once the smoke test
+passed, attaches `cherry-x86_64.efi` to it.
 
 Serve `cherry-x86_64.efi` from any HTTP server and point the machine's UEFI
 HTTP boot at it. There are two common ways:
@@ -216,6 +229,30 @@ to the container and masquerades its traffic.
 
 Everything lives in memory for now. Containers and their configuration are
 gone after a reboot.
+
+### As the cherry user
+
+The `cherry` user, which [cherry.service](#cherry-service) runs OpenChamber and
+the OpenCode agent as, manages containers too, without being root. polkit
+rules (`/usr/share/polkit-1/rules.d/50-cherry.rules`) let it drive
+systemd-machined with `machinectl`: `start`, `poweroff`, `terminate`, `kill`,
+`remove`, `clone`, `shell` and `login` on any container, though not the host's
+own shell or login (`machinectl shell .host`). To create one, it starts
+`cherry-bootstrap@.service`, the only unit it may start, which runs the
+bootstrap tool below as root, with the README's command for it. The instance
+is the distribution, its release and the machine's name, separated by colons:
+
+```sh
+systemctl start cherry-bootstrap@debian:trixie:mybox    # debootstrap
+systemctl start cherry-bootstrap@fedora:44:mybox        # rpmstrap, any of its profiles
+systemctl start cherry-bootstrap@arch::mybox            # pacstrap
+machinectl start mybox
+machinectl shell mybox
+```
+
+`systemctl start` returns when the container is ready, or fails; the tool's
+output is in `/var/log/cherry-bootstrap/<instance>.log`, readable by the
+`cherry` user, and a failed bootstrap leaves no tree behind.
 
 ### Debian containers with debootstrap
 
@@ -413,12 +450,14 @@ on a machine with a TPM.
   `/var` is a tmpfs, so all of it is new at every boot, and `/var/lib/cherry`
   is the only place the service can write: it sees the rest of the system
   read-only, with a private `/tmp`, and runs without capabilities.
-- **Port:** 3000, on loopback only, and no password on the browser UI. Given
-  the systemd credential `openchamber.ui_password`, it listens on every
-  address instead, with that password: for `make qemu`,
+- **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
+  OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
+  socket. Reach the UI through SSH port forwarding (below), or from another
+  device through the relay of a pairing link. `/health` reports OpenChamber's
+  version, `/api/opencode/compatibility` the OpenCode it runs.
+- **Password:** none on the browser UI, unless the machine was given one as
+  the systemd credential `openchamber.ui_password`: for `make qemu`,
   `python3 scripts/run_qemu.py --credential openchamber.ui_password=...`.
-  `/health` reports OpenChamber's version, `/api/opencode/compatibility` the
-  OpenCode it runs.
 - **Restart:** always, after a crash as after a clean exit, such as
   `openchamber stop` or `restart` from a shell.
 - **Pairing link on the console:** once the server is online,
@@ -444,9 +483,12 @@ This is a development image:
 - Any local user can control the IPFS node through its RPC API, and its swarm
   port is open to the network: there's no host firewall yet.
 - OpenChamber's browser UI has no password unless the machine was given one
-  as a credential: on loopback, any local user can use it, and so run commands
-  as the `cherry` user. With the credential, it is open to the network over
-  plain HTTP.
+  as a credential: any local user can use it, and so run commands as the
+  `cherry` user. It is on loopback only, as is the OpenCode behind it.
+- The `cherry` user creates, starts, enters and removes containers through
+  polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
+  container, and the bootstrap tools run as root on the host for it, with
+  checked arguments.
 - Root can derive the IPFS node's private key from the TPM at any time: it
   isn't bound to the boot state (PCRs) yet.
 - The image is not signed.
