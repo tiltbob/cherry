@@ -106,7 +106,10 @@ OpenChamber. Then build, run `make test`, and update the sizes below.
 The image is `output/cherry_x86_64/images/cherry-x86_64.efi` from a build, or
 the asset of a [GitHub release](https://github.com/tiltbob/cherry/releases):
 CI builds every published release from its tag and, once the smoke test
-passed, attaches `cherry-x86_64.efi` to it.
+passed, attaches `cherry-x86_64.efi` and its SHA-256 to it. To cut a release
+without a tag, run the `build` workflow by hand on `main` with the release's
+name, `v<version>`, as its input: the run builds the image under that name,
+tests it, then creates the release and its tag on the commit it built.
 
 Serve `cherry-x86_64.efi` from any HTTP server and point the machine's UEFI
 HTTP boot at it. There are two common ways:

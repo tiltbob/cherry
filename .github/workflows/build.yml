@@ -5,7 +5,9 @@ name: build
 # to main build again and save the caches that pull requests restore.
 # Other branches build only through a pull request, or by hand. A published
 # release is built from its tag, and gets the image as an asset (the release
-# job below); SDK releases, tagged sdk-*, are sdk.yml's and skip this.
+# job below); so does a run by hand on main given a release name, v<version>,
+# which creates the release and its tag on the commit it built. SDK releases,
+# tagged sdk-*, are sdk.yml's and skip this.
 on:
   push:
     branches: [main]
@@ -32,6 +34,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish the image as this release and tag (v<version>, from main), or leave empty for a plain build'
+        type: string
+        default: ''
 
 # A build takes one to two hours; a newer push to the same branch or pull
 # request replaces the running build instead of queueing behind it.
@@ -75,6 +82,27 @@ jobs:
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
+
+      # A release by hand is named v<version>, cut from main, and new: a bad
+      # name fails here, not after the build.
+      - name: Check the release name
+        if: inputs.release != ''
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          case $RELEASE in
+          *[!A-Za-z0-9._-]* | v[!0-9]* | v) echo "::error::a release is named v<version>, not '$RELEASE'"; exit 1 ;;
+          v*) ;;
+          *) echo "::error::a release is named v<version>, not '$RELEASE'"; exit 1 ;;
+          esac
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::a release is cut from main, not from $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE" >/dev/null; then
+            echo "::error::the tag $RELEASE exists already"
+            exit 1
+          fi
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
       # flake8 and python3-magic; the others python3-yaml and systemd-analyze;
@@ -193,8 +221,13 @@ jobs:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
 
+      # A release by hand names the image after itself (os-release, the boot
+      # banner), as `git describe` would once the release job has created the
+      # tag on this commit.
       - name: Build
-        run: make
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: make ${RELEASE:+BR2_EXTERNAL_CHERRY_VERSION=$RELEASE}
 
       # Also after a failed or cancelled build, so the next run resumes warm.
       - name: Save ccache
@@ -234,12 +267,14 @@ jobs:
           path: artifacts/
           retention-days: 14
 
-  # The image a published release was built from, as its asset
-  # cherry-x86_64.efi, once the build and the smoke test passed. Only this job
-  # may write to the repository.
+  # The image as the release's asset cherry-x86_64.efi, with its SHA-256, once
+  # the build and the smoke test passed: a published release was built from
+  # its tag and gets the files; a run by hand given a release name creates the
+  # release, and its tag on this commit, with them. Only this job may write to
+  # the repository.
   release:
     needs: build
-    if: success() && github.event_name == 'release'
+    if: success() && (github.event_name == 'release' || inputs.release != '')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -249,9 +284,26 @@ jobs:
           name: cherry-x86_64
           path: artifacts
 
-      - name: Attach the image to the release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload --clobber "$TAG" artifacts/cherry-x86_64.efi
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}
+        run: |
+          cd artifacts
+          sha256sum cherry-x86_64.efi | tee cherry-x86_64.efi.sha256
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload --clobber "$TAG" cherry-x86_64.efi cherry-x86_64.efi.sha256
+          else
+            {
+              echo "Cherry $TAG: \`cherry-x86_64.efi\`, built from $GITHUB_SHA by run $GITHUB_RUN_ID of the build workflow, which smoke-tested it."
+              echo
+              echo "Serve it over HTTP and point a machine's UEFI HTTP boot at it (the README's Booting section)."
+              echo
+              echo '```'
+              cat cherry-x86_64.efi.sha256
+              echo '```'
+            } > notes.md
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "Cherry $TAG" --notes-file notes.md \
+              cherry-x86_64.efi cherry-x86_64.efi.sha256
+          fi
