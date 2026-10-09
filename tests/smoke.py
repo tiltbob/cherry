@@ -594,6 +594,12 @@ class Smoke:
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
               f"starting cherry-bootstrap@ as cherry did not fail on the empty machine name alone: {out}")
         vm.run("systemctl reset-failed 'cherry-bootstrap@debian:trixie:.service'")
+        # `machinectl start` is a start of systemd-nspawn@<name>.service, allowed too: without a tree for the
+        # name, it fails in nspawn, not on authorization.
+        rc, out = vm.run(f"{AS_CHERRY} machinectl start cherry-smoke-none", check_rc=False)
+        check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
+              f"machinectl start as cherry did not fail on the missing tree alone: {out}")
+        vm.run("systemctl reset-failed systemd-nspawn@cherry-smoke-none.service")
         rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-connect-url.service", check_rc=False)
         check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
               f"the cherry user may start units other than cherry-bootstrap@: {out}")

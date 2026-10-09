@@ -5,8 +5,8 @@ name: sdk
 # the GitHub release of that name, with its SHA-256; so does a run by hand
 # given that name as its input, which then creates the tag on the commit it
 # runs on; a run by hand without one only keeps the tarball as a workflow
-# artifact. Caches are shared with the build workflow where they match: the
-# toolchain's ccache entries hit on either side.
+# artifact. Caches are shared with the build workflow where they match, and
+# saved only from main, as there.
 on:
   push:
     tags: ['sdk-*']
@@ -86,15 +86,22 @@ jobs:
       - name: Build the SDK
         run: make sdk
 
+      # Caches are saved only from a run on main (by hand): a cache saved by a
+      # run on a tag is visible to that tag alone (see build.yml). The download
+      # cache only when it changed, and pruned first.
+      - name: Prune downloads
+        if: always() && github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
+        run: python3 scripts/prune_dl.py --config cherry_sdk_x86_64_defconfig --delete
+
       - name: Save download cache
-        if: always() && steps.dl.outputs.cache-hit != 'true'
+        if: always() && github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
 
       - name: Save ccache
-        if: always() && steps.ccache.outcome == 'success'
+        if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: .ccache
@@ -102,7 +109,8 @@ jobs:
 
       # Unpacked somewhere else and relocated, the SDK compiles and links C and
       # C++ for the target; the target being x86_64 glibc, the runner can run
-      # the static binaries, and the sysroot's libc reports its version.
+      # the static binaries, and the sysroot's libc, through the sysroot's own
+      # dynamic loader (the runner's would fail on it), reports its version.
       - name: Check the SDK
         run: |
           set -x
@@ -121,7 +129,7 @@ jobs:
             echo "Buildroot $(git -C buildroot describe --tags --always)"
             "$sdk/bin/x86_64-buildroot-linux-gnu-gcc" --version | head -n 1
             "$sdk/bin/x86_64-buildroot-linux-gnu-ld" --version | head -n 1
-            "$sysroot/lib/libc.so.6" | head -n 1
+            "$sysroot/lib/ld-linux-x86-64.so.2" "$sysroot/lib/libc.so.6" | head -n 1
             echo "Linux headers $(awk '/LINUX_VERSION_CODE/ { v = $3 } END { printf "%d.%d.%d", v / 65536, v % 65536 / 256, v % 256 }' "$sysroot/usr/include/linux/version.h")"
           } | tee /tmp/sdk/versions.txt
 
