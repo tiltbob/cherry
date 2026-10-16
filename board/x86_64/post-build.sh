@@ -17,6 +17,12 @@ IMAGE_VERSION=$version
 HOME_URL="https://github.com/tiltbob/cherry"
 EOT
 
+# The defconfig's hostname is a pattern, cherry-????????, whose ?s systemd
+# fills at boot from the machine ID (hostname(5)). /etc/hosts can't name it,
+# so drop the 127.0.1.1 line Buildroot writes for it: nss-myhostname resolves
+# the hostname instead.
+sed -i '/^127\.0\.1\.1[[:space:]]/d' "$TARGET_DIR/etc/hosts"
+
 # The root filesystem is read-only: root's home lives on /var (a tmpfs for
 # now), so e.g. systemd's ssh.authorized_keys.root credential can be applied.
 # The target must exist at build time for makedevs; Buildroot's VAR_FACTORY

@@ -3,7 +3,9 @@
 # fake TARGET_DIR and BUILD_DIR, laid out as package/opencode's build directory
 # is (opencode-<version>/<the binary's path in the .mk>, plus Buildroot's
 # .stamp_target_installed). An installed binary identical to the extracted one
-# passes; a differing one fails; a missing stamp fails.
+# passes; a differing one fails; a missing stamp fails. It also writes
+# os-release, moves /root to /var, and drops the 127.0.1.1 line of the
+# hostname pattern from /etc/hosts.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -24,7 +26,9 @@ build=$BUILD_DIR/opencode-$version
 # A fresh TARGET_DIR and BUILD_DIR, the installed binary identical to the extracted one.
 setup() {
 	rm -rf "$target" "$BUILD_DIR"
-	mkdir -p "$target/usr/bin" "$target/usr/lib" "$target/root" "$build/$(dirname "$binary")"
+	mkdir -p "$target/usr/bin" "$target/usr/lib" "$target/root" "$target/etc" "$build/$(dirname "$binary")"
+	# As Buildroot writes it for BR2_TARGET_GENERIC_HOSTNAME.
+	printf '127.0.0.1\tlocalhost\n127.0.1.1\tcherry-????????\n' >"$target/etc/hosts"
 	printf 'a Bun single-file executable, say\n' >"$build/$binary"
 	cp "$build/$binary" "$target/usr/bin/opencode"
 	: >"$build/.stamp_target_installed"
@@ -45,6 +49,8 @@ run
 [ "$rc" -eq 0 ] || die "an identical binary failed the check: $out"
 grep -qx 'VERSION="test"' "$target/usr/lib/os-release" || die "os-release lacks the version: $(cat "$target/usr/lib/os-release")"
 [ "$(readlink "$target/root")" = var/roothome ] || die "/root is not a symlink to var/roothome"
+[ "$(cat "$target/etc/hosts")" = "$(printf '127.0.0.1\tlocalhost')" ] ||
+	die "/etc/hosts is not just localhost: $(cat "$target/etc/hosts")"
 
 setup
 printf 'a bare Bun\n' >"$target/usr/bin/opencode"

@@ -3,14 +3,16 @@
 
   1. the firmware HTTP boots the EFI binary; the root filesystem is the EROFS
      image from the initramfs, read-only; /var is a tmpfs; the machine ID
-     comes from the TPM's endorsement key (a swtpm on CRB); networking and
-     sshd work, an SSH key passed as a credential is installed, no unit failed
+     comes from the TPM's endorsement key (a swtpm on CRB), and the hostname
+     from the machine ID; networking and sshd work, an SSH key passed as a
+     credential is installed, no unit failed
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
      differently (as pacstrap's pacman hooks do)
   3. a second boot starts from scratch again (nothing persists), except the
      machine's identity: the same TPM, now on TIS, gives the same machine ID
+     and hostname
   4. the cherry user creates a Debian container with cherry-bootstrap@.service
      (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
@@ -60,6 +62,8 @@ BOOT = re.compile(r'BdsDxe: starting Boot([0-9A-F]{4}) "([^"]*)"')
 PANIC = re.compile(r"Kernel panic - not syncing")
 # DER SubjectPublicKeyInfo of an uncompressed NIST P-256 public key, up to the point.
 P256_SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004")
+# systemd's key for the ?s of /etc/hostname (hostname_substitute_wildcards() in src/shared/hostname-setup.c).
+HOSTNAME_KEY = bytes.fromhex("9810addf8d7d4fb5891b4b56acc2268f")
 NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 # Run a command as the cherry user, from the root shell on the console.
 AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
@@ -107,6 +111,60 @@ def package_version(name):
     mk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "package", name, f"{name}.mk")
     with open(mk) as f:
         return re.search(rf"^{name.upper()}_VERSION = (\S+)$", f.read(), re.M).group(1)
+
+
+def siphash24(key, data):
+    """SipHash-2-4 of data with a 16-byte key, as systemd's siphash24()."""
+    mask = (1 << 64) - 1
+
+    def rotl(x, b):
+        return (x << b | x >> (64 - b)) & mask
+
+    def rounds(v, n):
+        v0, v1, v2, v3 = v
+        for _ in range(n):
+            v0 = (v0 + v1) & mask
+            v1 = rotl(v1, 13) ^ v0
+            v0 = rotl(v0, 32)
+            v2 = (v2 + v3) & mask
+            v3 = rotl(v3, 16) ^ v2
+            v0 = (v0 + v3) & mask
+            v3 = rotl(v3, 21) ^ v0
+            v2 = (v2 + v1) & mask
+            v1 = rotl(v1, 17) ^ v2
+            v2 = rotl(v2, 32)
+        return [v0, v1, v2, v3]
+
+    k0, k1 = int.from_bytes(key[:8], "little"), int.from_bytes(key[8:], "little")
+    v = [k0 ^ 0x736f6d6570736575, k1 ^ 0x646f72616e646f6d, k0 ^ 0x6c7967656e657261, k1 ^ 0x7465646279746573]
+    # Little-endian 64-bit words; the last one holds the leftover bytes and, in its top byte, the length.
+    end = len(data) - len(data) % 8
+    words = [int.from_bytes(data[i:i + 8], "little") for i in range(0, end, 8)]
+    words.append((len(data) & 0xff) << 56 | int.from_bytes(data[end:], "little"))
+    for m in words:
+        v[3] ^= m
+        v = rounds(v, 2)
+        v[0] ^= m
+    v[2] ^= 0xff
+    v = rounds(v, 4)
+    return v[0] ^ v[1] ^ v[2] ^ v[3]
+
+
+def hostname_from_machine_id(pattern, machine_id):
+    """The hostname systemd sets from an /etc/hostname pattern: each ? becomes the next hex digit, low nibble first,
+    of SipHash-2-4 keyed with HOSTNAME_KEY over the machine ID and a counter (64-bit, little-endian) from 0."""
+    mid = bytes.fromhex(machine_id)
+    name, h, left, counter = "", 0, 0, 0
+    for c in pattern:
+        if c == "?":
+            if left == 0:
+                h, left = siphash24(HOSTNAME_KEY, mid + counter.to_bytes(8, "little")), 64
+                counter += 1
+            c = "0123456789abcdef"[h & 0xf]
+            h >>= 4
+            left -= 4
+        name += c
+    return name
 
 
 class TestFailure(Exception):
@@ -326,12 +384,17 @@ class Smoke:
         check(hashlib.sha256(ek).hexdigest() == ek_hash, f"ek-hash {ek_hash!r} is not the SHA-256 of ek.der")
         machine_id = vm.run("cat /etc/machine-id")
         check(machine_id == ek_hash[:32], f"the machine ID {machine_id} is not derived from the EK hash {ek_hash}")
+        # The hostname: systemd fills the ?s of the image's /etc/hostname from the machine ID.
+        pattern = vm.run("cat /etc/hostname")
+        hostname = vm.run("cat /proc/sys/kernel/hostname")
+        check("?" in pattern and hostname == hostname_from_machine_id(pattern, machine_id),
+              f"the hostname {hostname} is not derived from the machine ID {machine_id} by /etc/hostname's {pattern}")
         # The TPM's own EK: creating it again gives the same key.
         vm.run("tpm2_createek -T device:/dev/tpmrm0 -G ecc -c /tmp/ek.ctx -f der -u /tmp/ek.der >/dev/null && "
                "cmp /tmp/ek.der /run/cherry/identity/ek.der; rc=$?; rm -f /tmp/ek.ctx /tmp/ek.der; exit $rc")
         rc, error = vm.run("cat /run/cherry/identity/error", check_rc=False)
         check(rc != 0, f"an identity error was recorded: {error}")
-        log(f"machine identity: EK hash {ek_hash} via {driver}")
+        log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
 
     def s1_http_boot(self):
