@@ -11,6 +11,13 @@ The swtpm state in <state>/tpm is the VM's TPM, and so its identity: it stays
 the same machine across runs until that directory is deleted. Cherry keeps no
 other state yet, so every run otherwise starts from scratch.
 
+With --secure-boot, the firmware is OVMF's Secure Boot build (with SMM), and
+its variable store, <state>/OVMF_VARS.secboot.fd, persists too. A new one is
+in setup mode, so Cherry enrolls its keys and reboots; QEMU then exits, as the
+firmware forgets the HTTP boot entry on a reboot: run it again to boot on, now
+with Secure Boot. An unsigned image no longer boots then. Delete the file for
+a machine in setup mode again.
+
 Needs qemu-system-x86_64, OVMF, swtpm and virt-fw-vars (python3-virt-firmware,
 or `pip install virt-firmware`; set VIRT_FW_VARS to use a specific copy).
 
@@ -42,16 +49,25 @@ OVMF_CANDIDATES = [
     # Arch
     ("/usr/share/edk2/x64/OVMF_CODE.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
 ]
+# The Secure Boot builds, which need SMM, and their empty variable stores: setup mode.
+OVMF_SECBOOT_CANDIDATES = [
+    ("/usr/share/OVMF/OVMF_CODE_4M.secboot.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+    ("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"),
+    ("/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd", "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+]
+SECBOOT_VARS = "OVMF_VARS.secboot.fd"
 
 
-def find_ovmf():
-    code, vars_ = os.environ.get("OVMF_CODE"), os.environ.get("OVMF_VARS")
+def find_ovmf(secure_boot=False):
+    env = "OVMF_SECBOOT" if secure_boot else "OVMF"
+    code, vars_ = os.environ.get(f"{env}_CODE"), os.environ.get(f"{env}_VARS")
     if code and vars_:
         return code, vars_
-    for code, vars_ in OVMF_CANDIDATES:
+    for code, vars_ in OVMF_SECBOOT_CANDIDATES if secure_boot else OVMF_CANDIDATES:
         if os.path.exists(code) and os.path.exists(vars_):
             return code, vars_
-    sys.exit("OVMF not found: install it (e.g. apt install ovmf) or set OVMF_CODE and OVMF_VARS")
+    sys.exit(f"OVMF{' with Secure Boot' if secure_boot else ''} not found: install it (e.g. apt install ovmf) "
+             f"or set {env}_CODE and {env}_VARS")
 
 
 def kvm_usable():
@@ -80,13 +96,22 @@ def boot_url(server, name=EFI_NAME):
     return f"http://10.0.2.2:{server.server_address[1]}/{name}"
 
 
-def write_vars(path, url):
-    """Fresh UEFI variable store that HTTP boots `url` once (BootNext)."""
+def virt_fw_vars():
     tool = os.environ.get("VIRT_FW_VARS") or shutil.which("virt-fw-vars")
     if not tool:
         sys.exit("virt-fw-vars not found: apt install python3-virt-firmware, or pip install virt-firmware")
-    subprocess.run([tool, "--input", find_ovmf()[1], "--output", path, "--set-boot-uri", url],
+    return tool
+
+
+def write_vars(path, url, secure_boot=False):
+    """Fresh UEFI variable store that HTTP boots `url` once (BootNext); for Secure Boot, in setup mode."""
+    subprocess.run([virt_fw_vars(), "--input", find_ovmf(secure_boot)[1], "--output", path, "--set-boot-uri", url],
                    check=True, stdout=subprocess.DEVNULL)
+
+
+def set_boot_uri(path, url):
+    """HTTP boot `url` once (BootNext) from an existing variable store, keeping the rest."""
+    subprocess.run([virt_fw_vars(), "--inplace", path, "--set-boot-uri", url], check=True, stdout=subprocess.DEVNULL)
 
 
 class Swtpm:
@@ -127,9 +152,15 @@ class Swtpm:
 
 
 def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), memory="3072", cpus="2",
-                 tpm=None, tpm_interface="crb"):
-    code, _ = find_ovmf()
-    cmd = ["qemu-system-x86_64", "-machine", "q35", "-m", str(memory), "-smp", str(cpus)]
+                 tpm=None, tpm_interface="crb", secure_boot=False):
+    """With secure_boot, OVMF's Secure Boot build, whose variables only SMM may write; and QEMU exits when the
+    guest reboots, as the firmware would not HTTP boot again."""
+    code, _ = find_ovmf(secure_boot)
+    cmd = ["qemu-system-x86_64", "-machine", "q35,smm=on" if secure_boot else "q35", "-m", str(memory),
+           "-smp", str(cpus)]
+    if secure_boot:
+        cmd += ["-global", "driver=cfi.pflash01,property=secure,value=on",
+                "-global", "ICH9-LPC.disable_s3=1", "-action", "reboot=shutdown"]
     if kvm_usable():
         cmd += ["-accel", "kvm", "-cpu", "host"]
     else:
@@ -171,21 +202,33 @@ def main():
                              "ssh.authorized_keys.root=\"$(cat ~/.ssh/id_ed25519.pub)\" (repeatable)")
     parser.add_argument("--tpm", choices=TPM_INTERFACES + ("none",), default="crb",
                         help="TPM interface, or none to see Cherry stop without a TPM (default: crb)")
+    parser.add_argument("--secure-boot", action="store_true",
+                        help=f"OVMF with Secure Boot, its variables kept in <state>/{SECBOOT_VARS} (new: setup mode)")
     args = parser.parse_args()
 
     images = os.path.abspath(args.images)
     if not os.path.exists(os.path.join(images, EFI_NAME)):
         sys.exit(f"{os.path.join(images, EFI_NAME)} not found; build first")
     os.makedirs(args.state, exist_ok=True)
-    vars_path = os.path.join(args.state, "OVMF_VARS.fd")
 
     server = serve(images, args.port)
     url = boot_url(server)
-    write_vars(vars_path, url)
+    if args.secure_boot:
+        vars_path = os.path.join(args.state, SECBOOT_VARS)
+        if os.path.exists(vars_path):
+            set_boot_uri(vars_path, url)
+        else:
+            write_vars(vars_path, url, secure_boot=True)
+            print(f"{vars_path}: a new variable store, in setup mode", file=sys.stderr)
+    else:
+        vars_path = os.path.join(args.state, "OVMF_VARS.fd")
+        write_vars(vars_path, url)
     tpm = Swtpm(os.path.join(args.state, "tpm")) if args.tpm != "none" else None
     cmd = qemu_command(vars_path, ssh_port=args.ssh_port, credentials=args.credential,
-                       tpm=tpm, tpm_interface=args.tpm)
+                       tpm=tpm, tpm_interface=args.tpm, secure_boot=args.secure_boot)
     print(f"HTTP boot from {url}", file=sys.stderr)
+    if args.secure_boot:
+        print("Secure Boot: QEMU exits when the guest reboots; run this again to boot on.", file=sys.stderr)
     print("Serial console on this terminal; Ctrl-A x quits, Ctrl-A c toggles the QEMU monitor.", file=sys.stderr)
     print(" ".join(cmd), file=sys.stderr)
     try:
