@@ -74,9 +74,11 @@ The toolchain itself comes from `configs/cherry_sdk_x86_64_defconfig`, which
 has the toolchain options and nothing else: `make sdk` builds it, as
 Buildroot's relocatable SDK, into
 `output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz`, to unpack anywhere
-and fix up with its `relocate-sdk.sh`. Pushing a tag `sdk-<version>`, or
-running the `sdk` workflow by hand with that name as its input, has CI build
-it and publish it as the GitHub release of that name, with its SHA-256
+and fix up with its `relocate-sdk.sh`. The SDK defconfig picks no `/bin/sh`
+either: without busybox, Buildroot's default is bash, which would put readline
+and ncurses in the SDK's sysroot. Pushing a tag `sdk-<version>`, or running
+the `sdk` workflow by hand with that name as its input, has CI build it and
+publish it as the GitHub release of that name, with its SHA-256
 (`.github/workflows/sdk.yml`). To change the toolchain: edit the SDK
 defconfig, publish a release (`sdk-YYYY.MM.DD.NNN`, with NNN counting the
 day's releases), then point the main defconfig's URL and the hash file at it.
