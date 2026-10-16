@@ -196,7 +196,7 @@ the memory processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
 initramfs: 62 MB for 139 MiB of files before OpenCode, OpenChamber and Bun,
-which add about 175 MB for 450 MiB of files (see [OpenCode](#opencode) and
+which add about 182 MB for 465 MiB of files (see [OpenCode](#opencode) and
 [OpenChamber](#openchamber)), compressed with zstd in clusters of up to 64 KiB.
 The kernel keeps the files in use in its
 page cache, decompressed, and drops them under memory pressure; it reads them
@@ -445,7 +445,7 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   `@opencode/cli-linux-x64-baseline`: the "baseline" variant that doesn't need
   AVX2, so it runs on VM CPU models without it. It is a Bun single-file
   executable, which stripping breaks: Buildroot's strip skips it
-  (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 200 MiB,
+  (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 202 MiB,
   about 98 MB in the image, and the idle server uses about 170 MB of RAM.
   Automatic updates are off: a new version comes with a new image.
 - **Tools:** the bash tool runs `bash`, the grep tool the image's ripgrep, and
@@ -475,8 +475,8 @@ serves the browser UI.
   plus models downloaded at run time), and tunnels (no cloudflared or ngrok on
   the image). Update checks are off and `openchamber update` says so, as the
   image is read-only; the device-pairing relay reaches the network.
-- **Size:** Bun is 76 MiB, about 37 MB in the image; the npm tree 175 MiB,
-  about 41 MB. The idle server uses about 115 MB of RAM.
+- **Size:** Bun is 85 MiB, about 42 MB in the image; the npm tree 178 MiB,
+  about 42 MB. The idle server uses about 115 MB of RAM.
 
 ## Cherry service
 
