@@ -77,7 +77,12 @@ CONFIG_MACVLAN=y
 CONFIG_IPVLAN=y
 CONFIG_TUN=y
 
-# nftables, as used by systemd-networkd IPMasquerade= for nspawn veth/zones.
+# nftables, as used by systemd-networkd IPMasquerade= for nspawn veth/zones,
+# and by the firewall (/usr/lib/cherry/firewall.nft), which lets replies in by
+# connection tracking. Without bridge netfilter, a zone's bridge switches
+# packets between its containers without the firewall's forward chain.
+CONFIG_NF_CONNTRACK=y
+# CONFIG_BRIDGE_NETFILTER is not set
 CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 CONFIG_NF_TABLES_IPV4=y

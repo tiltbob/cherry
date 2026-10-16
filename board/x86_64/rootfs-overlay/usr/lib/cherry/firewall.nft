@@ -1,0 +1,65 @@
+# Cherry's firewall, loaded by cherry-firewall.service before any link is
+# configured: nothing comes in unasked but ping, to the host or through it to
+# its containers. Replies to what the host and the containers send come back,
+# and so does what IPv6, DHCP and the containers' networks need to work.
+#
+# This is the only table it touches: systemd-networkd and systemd-nspawn keep
+# their own, io.systemd.nat, for the containers' masquerading (IPMasquerade=)
+# and port forwards (--port=). Loading this file replaces this table at once.
+#
+# To let something in until the next boot, add a rule, e.g. for SSH:
+#   nft add rule inet cherry input tcp dport 22 accept
+# `systemctl restart cherry-firewall` puts the image's rules back.
+
+table inet cherry
+delete table inet cherry
+
+# The host's ends of the containers' links: ve-* for --network-veth (which
+# machinectl start uses), vz-* for the bridge of a --network-zone=. Each gets
+# an address, a DHCP server and masquerading from systemd-networkd's
+# 80-container-*.network, however many containers run.
+define containers = { "ve-*", "vz-*" }
+
+table inet cherry {
+	chain input {
+		type filter hook input priority filter; policy drop;
+
+		ct state vmap { established : accept, related : accept, invalid : drop }
+		iif lo accept
+
+		icmp type echo-request accept
+		icmpv6 type echo-request accept
+
+		# IPv6 works only with neighbor discovery and router advertisements,
+		# which never cross a router (hop limit 255), and multicast listener
+		# queries, which keep switches forwarding neighbor discovery here.
+		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } ip6 hoplimit 255 accept
+		icmpv6 type mld-listener-query ip6 saddr fe80::/10 accept
+
+		# A DHCPv6 reply comes from a server, not from the multicast group the
+		# request went to, so it isn't tracked as a reply. DHCPv4 needs no
+		# rule: networkd's client takes offers on a raw socket, which sees
+		# packets before the firewall, and its renewals are unicast, their
+		# replies tracked.
+		ip6 daddr fe80::/64 udp sport 547 udp dport 546 accept
+
+		# Containers lease their addresses from networkd's DHCP server on
+		# their links. Nothing else on the host is open to them.
+		iifname $containers udp dport 67 accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+
+		ct state vmap { established : accept, related : accept, invalid : drop }
+
+		icmp type echo-request accept
+		icmpv6 type echo-request accept
+
+		# Containers reach out, masqueraded, but not into one another:
+		# containers that should talk share a zone, whose bridge switches their
+		# packets without this chain. Nothing from outside reaches a container
+		# unasked, through a port forward (--port=) either.
+		iifname $containers oifname != $containers accept
+	}
+}

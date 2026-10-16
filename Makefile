@@ -61,10 +61,11 @@ test:
 # Fast checks that need no build, each failing loudly: `make check` runs them
 # all (`make -k check` goes on after a failure), `make check-<name>` one. CI
 # runs them before the build (.github/workflows/build.yml). They need
-# shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze, and
-# node for the polkit rules (skipped without it).
+# shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze, node
+# for the polkit rules (skipped without it), and nft, ip, busybox and user
+# namespaces for the firewall (skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
-	check-scenarios check-polkit check-bootstrap check-postbuild
+	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -107,6 +108,11 @@ check-bootstrap:
 # post-build.sh still catches a stripped opencode.
 check-postbuild:
 	tests/postbuild.sh
+
+# The firewall lets in what the README says, nothing more, in network
+# namespaces of its own.
+check-firewall:
+	tests/firewall.sh
 
 clean:
 	rm -rf $(O)
