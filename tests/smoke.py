@@ -11,7 +11,6 @@
      differently (as pacstrap's pacman hooks do)
   3. a second boot starts from scratch again (nothing persists), except the
      machine's identity: the same TPM, now on TIS, gives the same machine ID
-     and the same IPFS peer ID
   4. the cherry user creates a Debian container with cherry-bootstrap@.service
      (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
@@ -20,21 +19,18 @@
   6. pacstrap installs Arch Linux into /var/lib/machines, the container's own
      pacman downloads in its Landlock sandbox, and the container boots
      (skipped when the guest cannot reach the Arch Linux mirrors)
-  7. the IPFS daemon runs as its own user, a login shell's ipfs commands reach
-     it, and content added through its API comes back through its gateway,
-     which listens on loopback only
-  8. the OpenCode binary is the packaged version (stripped, it would be a bare
+  7. the OpenCode binary is the packaged version (stripped, it would be a bare
      Bun), and only the binary: no opencode user, state directory or service
-  9. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
+  8. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
      UI and running the packaged OpenCode as that user too, both on loopback
      only; once it was online, cherry-connect-url.service
      showed the pairing link and its QR code on the console, as that user; the
      user's polkit privileges cover machinectl and cherry-bootstrap@ and
      nothing else; no openchamber user, state directory or service
-  10. zram is the swap device, and under memory pressure tmpfs pages go to it,
+  9. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
-  11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no IPFS, no OpenChamber, no containers
+  10. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+     console: no network, no sshd, no OpenChamber, no containers
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -338,15 +334,6 @@ class Smoke:
         log(f"machine identity: EK hash {ek_hash} via {driver}")
         return machine_id
 
-    def ipfs_peer_id(self):
-        """The IPFS daemon runs with the key that ipfs-identity.service derived from the TPM; return its peer ID."""
-        vm = self.vm
-        peer_id = vm.run("ipfs id -f '<id>'")
-        derived = vm.run("journalctl -b -u ipfs-identity --no-pager -o cat "
-                         "| sed -n 's/^IPFS peer ID \\([^ ]*\\).*/\\1/p' | tail -n 1")
-        check(peer_id == derived, f"the IPFS daemon's peer ID {peer_id} is not the TPM-derived one: {derived!r}")
-        return peer_id
-
     def s1_http_boot(self):
         vm = self.vm
         self.boot()
@@ -369,7 +356,6 @@ class Smoke:
         vm.run("test -s /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
         check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
               "the ssh.authorized_keys.root credential was not applied")
-        self.peer_id = self.ipfs_peer_id()
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
                "networkctl; exit 1", timeout=90)
         # systemd arms it before journald runs, so its message is only in the kernel log.
@@ -414,7 +400,6 @@ class Smoke:
         rc, _ = vm.run("test -e /var/cherry-smoke", check_rc=False)
         check(rc != 0, "/var survived a reboot")
         check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
-        check(self.ipfs_peer_id() == self.peer_id, "the IPFS peer ID changed across a reboot")
 
     def s4_debootstrap(self):
         vm = self.vm
@@ -528,34 +513,7 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
-    def s7_ipfs(self):
-        vm = self.vm
-        check(vm.run("systemctl is-active ipfs.service") == "active", "ipfs.service is not running")
-        pid = vm.run("systemctl show -p MainPID --value ipfs.service")
-        check(vm.run(f"stat -c %U /proc/{pid}") == "ipfs", "the IPFS daemon does not run as the ipfs user")
-        check(vm.run("echo $IPFS_PATH") == "/var/lib/ipfs",
-              "login shells don't set IPFS_PATH to the daemon's repository")
-        check(vm.run("stat -c %U $IPFS_PATH/config") == "ipfs", "the IPFS repository does not belong to the ipfs user")
-        # Through the daemon's RPC API: the CLI finds its address in $IPFS_PATH/api.
-        peer_id = vm.run("ipfs id -f '<id>'")
-        check(re.fullmatch(r"12D3KooW[1-9A-HJ-NP-Za-km-z]+", peer_id), f"unexpected peer ID {peer_id!r}")
-        cid = vm.run("echo cherry-smoke | ipfs add -Q")
-        check(vm.run(f"ipfs cat {cid}") == "cherry-smoke", "ipfs cat does not return what ipfs add stored")
-        check(vm.run(f"wget -q -O - http://127.0.0.1:8080/ipfs/{cid}") == "cherry-smoke",
-              "the gateway does not serve what ipfs add stored")
-        address = vm.run("ip -4 addr show scope global | sed -n 's/.* inet \\([0-9.]*\\)\\/.*/\\1/p' | head -n 1")
-        rc, _ = vm.run(f"wget -q -T 5 -t 1 -O /dev/null http://{address}:8080/ipfs/{cid}", check_rc=False)
-        check(rc != 0, f"the gateway answers on {address}, not only on loopback")
-        # QUIC gets the socket buffers it asks for.
-        check(vm.run("cat /proc/sys/net/core/rmem_max") == "7500000", "net.core.rmem_max is not raised for QUIC")
-        rc, _ = vm.run("journalctl -b -u ipfs --no-pager | grep -q 'failed to sufficiently increase'", check_rc=False)
-        check(rc == 1, "QUIC could not get the socket buffers it asked for")
-        # Peers need outbound network, so only report them.
-        peers = vm.run("for i in $(seq 30); do n=$(ipfs swarm peers | wc -l); [ $n -gt 0 ] && break; sleep 1; done; "
-                       "echo $n", timeout=90)
-        log(f"IPFS peer ID {peer_id}, {peers} swarm peers")
-
-    def s8_opencode(self):
+    def s7_opencode(self):
         vm = self.vm
         version = package_version("opencode")
         # Stripped by Buildroot, the Bun single-file executable would run as a bare Bun and print Bun's version.
@@ -564,13 +522,13 @@ class Smoke:
         # Its grep tool is the image's ripgrep, and git is on the image for its snapshots and worktrees.
         vm.run("test -x /usr/bin/rg && test -x /usr/bin/git")
         # Only the binary: the opencode user, /var/lib/opencode and opencode.service come with
-        # BR2_PACKAGE_OPENCODE_SERVICE, off in Cherry. OpenChamber runs the server, as the cherry user (s9).
+        # BR2_PACKAGE_OPENCODE_SERVICE, off in Cherry. OpenChamber runs the server, as the cherry user (s8).
         rc, _ = vm.run("getent passwd opencode", check_rc=False)
         check(rc != 0, "there is an opencode user")
         rc, _ = vm.run("test -e /var/lib/opencode || test -e /usr/lib/systemd/system/opencode.service", check_rc=False)
         check(rc != 0, "/var/lib/opencode or opencode.service is on the image")
 
-    def s9_cherry(self):
+    def s8_cherry(self):
         vm = self.vm
         version = package_version("openchamber")
         check(vm.run("systemctl is-active cherry.service") == "active", "cherry.service is not running")
@@ -665,7 +623,7 @@ class Smoke:
         rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
         log(f"OpenChamber {version}: {rss_kb >> 10} MiB resident")
 
-    def s10_zram(self):
+    def s9_zram(self):
         vm = self.vm
         mem_kb = int(vm.run("awk '/^MemTotal:/ { print $2 }' /proc/meminfo"))
         swaps = vm.run("tail -n +2 /proc/swaps")
@@ -688,7 +646,7 @@ class Smoke:
               "data that went through zram came back changed")
         vm.run("rm /var/tmp/zram-test")
 
-    def s11_no_tpm(self):
+    def s10_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -697,8 +655,7 @@ class Smoke:
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
         rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "ipfs-identity.service ipfs.service cherry.service "
-                            "machines.target", check_rc=False)
+                            "cherry.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")

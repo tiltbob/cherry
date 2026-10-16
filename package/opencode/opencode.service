@@ -23,9 +23,9 @@ Environment=OPENCODE_DISABLE_AUTOUPDATE=1
 ExecStart=/usr/libexec/opencode-serve
 Restart=on-failure
 
-# Hardening, as for ipfs.service. The agent's tools run as the opencode user
-# inside it: they see the system read-only, except /var/lib/opencode and a
-# private /tmp. No MemoryDenyWriteExecute: Bun's JavaScript JIT needs that.
+# Hardening. The agent's tools run as the opencode user inside it: they see
+# the system read-only, except /var/lib/opencode and a private /tmp. No
+# MemoryDenyWriteExecute: Bun's JavaScript JIT needs that.
 CapabilityBoundingSet=
 NoNewPrivileges=true
 ProtectSystem=strict
