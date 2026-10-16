@@ -158,10 +158,10 @@ ssh -p 2222 root@localhost
 1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
    kernel with the embedded command line and initramfs.
 2. **Kernel:** unpacks the initramfs into a ramfs and runs its `/init`,
-   [stage 1](package/cherry-stage1/src/stage1.c). The initramfs holds only
-   stage 1 and the root filesystem image. (`rootfstype=ramfs`: EROFS can
-   mount a file from a ramfs, but not from the default tmpfs.)
-3. **Stage 1:** mounts the image read-only, straight from the file, makes it
+   [cherry-pit](package/cherry-pit/src/cherry-pit.c). The initramfs holds
+   only cherry-pit and the root filesystem image. (`rootfstype=ramfs`: EROFS
+   can mount a file from a ramfs, but not from the default tmpfs.)
+3. **cherry-pit:** mounts the image read-only, straight from the file, makes it
    the root, and runs its [`/init`](board/x86_64/rootfs-overlay/init), a shell
    script.
 4. **`/init`:** does what an initrd would before systemd starts:

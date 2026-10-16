@@ -1,5 +1,5 @@
-config BR2_PACKAGE_CHERRY_STAGE1
-	bool "cherry-stage1"
+config BR2_PACKAGE_CHERRY_PIT
+	bool "cherry-pit"
 	help
 	  The /init of Cherry's initramfs: it mounts the root
 	  filesystem, a compressed EROFS image in the initramfs,
