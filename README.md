@@ -16,6 +16,9 @@ Once booted:
 - **Identity:** a TPM 2.0 is mandatory. The machine ID comes from the TPM, and
   the hostname from the machine ID, so they stay the same across reboots (see
   [Machine identity](#machine-identity)).
+- **Secure Boot:** a machine whose firmware is in setup mode enrolls Cherry's
+  keys, whose root is a Nitrokey HSM 2, and reboots with Secure Boot on;
+  releases are signed for it (see [Secure Boot](#secure-boot)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
 - **`/var`:** a tmpfs of up to half the RAM, so nothing persists yet. Disks
@@ -93,13 +96,15 @@ on the scripts), flake8 over `tests/` and `scripts/`, the workflows as YAML,
 against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
-argument checks and tool calls, `post-build.sh`'s check of `opencode`, and the
+argument checks and tool calls, `post-build.sh`'s check of `opencode`, the
 firewall's rules, in network namespaces standing in for a host, its LAN and
-its containers. `make -k check` runs on after a failure; `make check-<name>`
-runs one. They need shellcheck, flake8, python3-magic, python3-yaml and
-systemd's `systemd-analyze`, node for the polkit rules (skipped without it),
-and nft, ip, busybox and user namespaces for the firewall (skipped without
-them).
+its containers, the Secure Boot keys in `board/x86_64/secureboot/` and what
+`cherry-secureboot` enrolls from them, and the key ceremony on a SoftHSM
+token. `make -k check` runs on after a failure; `make check-<name>` runs
+one. They need shellcheck, flake8, python3-magic, python3-yaml, systemd's
+`systemd-analyze` and openssl; node for the polkit rules, nft, ip, busybox
+and user namespaces for the firewall, and softhsm2, opensc and pkcs11-provider
+for the ceremony (each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -113,7 +118,8 @@ OpenChamber. Then build, run `make test`, and update the sizes below.
 The image is `output/cherry_x86_64/images/cherry-x86_64.efi` from a build, or
 the asset of a [GitHub release](https://github.com/tiltbob/cherry/releases):
 CI builds every published release from its tag and, once the smoke test
-passed, attaches `cherry-x86_64.efi` and its SHA-256 to it. To cut a release
+passed, signs `cherry-x86_64.efi` for Secure Boot (see
+[Secure Boot](#secure-boot)) and attaches it and its SHA-256. To cut a release
 without a tag, run the `build` workflow by hand on `main` with the release's
 name, `v<version>`, as its input: the run builds the image under that name,
 tests it, then creates the release and its tag on the commit it built.
@@ -146,10 +152,13 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
 - OVMF and swtpm (`apt install qemu-system-x86 ovmf swtpm`)
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
   `pip install virt-firmware` (set `VIRT_FW_VARS` to use a specific copy)
+- for the smoke test's Secure Boot scenario, `sbsign` (`apt install
+  sbsigntool`) and openssl
 
 The TPM is attached through CRB, as firmware TPMs are. Pass `--tpm tis` to
 `scripts/run_qemu.py` for the TIS interface of discrete TPMs, or `--tpm none`
-to see Cherry stop without a TPM.
+to see Cherry stop without a TPM. `--secure-boot` boots OVMF's Secure Boot
+build instead, in setup mode at first (see [Secure Boot](#secure-boot)).
 
 `root` logs in without a password on the console. SSH is forwarded from host
 port 2222, but the firewall drops it (see [Firewall](#firewall)). To log in
@@ -185,6 +194,8 @@ ssh -p 2222 root@localhost
    - sets up compressed swap in RAM (see [Memory](#memory))
    - loads the firewall before networkd configures any link (see
      [Firewall](#firewall))
+   - when the firmware is in Secure Boot setup mode, enrolls Cherry's keys
+     and reboots, before anything else starts (see [Secure Boot](#secure-boot))
 
 Because `/etc` is read-only:
 - SSH host keys are generated under `/var/lib/sshd`, so they change on every
@@ -304,6 +315,115 @@ nft add rule inet cherry input tcp dport 22 accept      # SSH to the host
 nft add rule inet cherry forward ct status dnat accept  # nspawn's port forwards
 systemctl restart cherry-firewall
 ```
+
+## Secure Boot
+
+A [Nitrokey HSM 2](https://docs.nitrokey.com/nitrokeys/hsm/) is the root of
+trust of Cherry's UEFI Secure Boot. Three RSA-2048 keys are generated on it
+and never leave it:
+
+| Key | Certificate | What it does |
+|---|---|---|
+| PK | `PK.crt`, Cherry Platform Key | owns the machine's Secure Boot keys: signs changes to the KEK |
+| KEK | `KEK.crt`, Cherry Key Exchange Key | signs changes to db and dbx |
+| db | `db.crt`, Cherry Secure Boot CA | its certificate is db: the firmware boots what a certificate it issued signs |
+
+A fourth key signs releases in GitHub Actions, which can't reach the Nitrokey:
+the CA issues its certificate, `release.crt`, and its private key is a secret
+of the `release` environment. A new release key needs no change on any
+machine. All four are RSA-2048, the size every firmware verifies.
+
+`board/x86_64/secureboot/` holds the public half: the four certificates, and
+the signed updates of the PK, KEK and db variables (`PK.auth`, self-signed;
+`KEK.auth`, signed by the PK; `db.auth`, signed by the KEK), which the image
+enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
+
+**The ceremony,** once, on a computer with the Nitrokey plugged in:
+
+```sh
+apt install opensc pkcs11-provider    # pkcs11-tool, sc-hsm-tool, OpenSSL's PKCS#11 provider
+# Initialize the Nitrokey, which erases it, with a key share to back up its
+# keys with. It ships with the SO PIN 3537363231383830 and the PIN 648219:
+# change both afterwards, as Nitrokey's documentation shows.
+sc-hsm-tool --initialize --so-pin 3537363231383830 --pin 648219 --dkek-shares 1
+sc-hsm-tool --create-dkek-share dkek-share.pbe
+sc-hsm-tool --import-dkek-share dkek-share.pbe
+# PK, KEK and the CA on the Nitrokey, their files in board/x86_64/secureboot/:
+scripts/secureboot.py init
+# The release key: its certificate in board/x86_64/secureboot/, the key itself
+# straight into the release environment's secret.
+scripts/secureboot.py issue --key-out - | gh secret set SECUREBOOT_KEY --env release
+git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
+```
+
+- The PIN is asked once per command (or taken from `CHERRY_HSM_PIN`). With
+  other tokens plugged in, pass `--token` with the Nitrokey's label as
+  `pkcs11-tool -L` shows it; `--module` names another PKCS#11 module than
+  OpenSC's.
+- **Back up** the three keys, wrapped by the key share: `sc-hsm-tool
+  --wrap-key <file> --key-reference <n>` for each (`pkcs15-tool -D` lists
+  their references). A second Nitrokey initialized with the same share takes
+  them with `--unwrap-key`. Keep the share and the wrapped keys offline, and
+  apart.
+- **The release environment** (Settings, Environments): limit its deployment
+  branches and tags to `main` and `v*`, so that only release runs see the key.
+- **A new release key:** run `issue` again and commit the new `release.crt`.
+  The old key still signs images that boot until it is revoked (below).
+
+**Releases:** the release job of the build workflow signs `cherry-x86_64.efi`
+with the release key (`sbsign`), checks the signature against the CA
+(`sbverify`), and publishes the signed image. Before the repository has keys,
+it publishes the image unsigned. Once it has, a missing secret, or one that
+isn't `release.crt`'s key, fails the release.
+
+**Enrolling a machine:** clear the firmware's Secure Boot keys, which puts it
+in setup mode (the setup menu calls it "Reset to Setup Mode", "Clear Secure
+Boot keys" or "Delete all Secure Boot variables"), and HTTP boot a signed
+release. Before anything else starts, `cherry-secureboot.service`:
+
+1. finds the drivers the firmware loaded from option ROMs, those of add-in
+   network, graphics and storage cards: the firmware measured each into PCR 2
+   of the TPM, by the Authenticode SHA-256 that db entries hold, and the TPM's
+   event log lists them;
+2. sets db to the CA and those hashes, then the KEK, then the PK, which ends
+   setup mode. Microsoft signs option ROMs, and db leaves Microsoft's CA out:
+   without their hashes, the cards would have no driver. Whatever db and KEK
+   held before goes;
+3. shows what it enrolled on the console, and reboots. The firmware now boots
+   only what the CA's certificates signed, and those option ROMs.
+
+It enrolls nothing, and says why on the console, when the TPM's event log is
+missing or a driver in it has no SHA-256 (the TPM's SHA-256 PCR bank is off),
+or when the firmware refuses a variable before the PK. On every later boot it
+reports in the journal (`journalctl -u cherry-secureboot`) whether Secure Boot
+is on, with Cherry's keys. When the keys are in but Secure Boot is off, which
+is the firmware setup's own switch, out of Cherry's reach, it says so on the
+console. Some firmware asks at the next boot to confirm new keys, and drops
+them if nobody does; Cherry then reports that instead of enrolling again.
+
+Once a machine has Cherry's keys:
+
+- Only signed releases boot on it with Secure Boot on: not a local build,
+  nor other systems (shim, Windows) that Microsoft's CA signed.
+- A new add-in card, or a card's firmware update, brings an option ROM db
+  doesn't know: clear the keys and boot Cherry again, to enroll anew.
+- systemd-stub ignores command-line overrides passed by the firmware.
+
+`python3 scripts/run_qemu.py --secure-boot` boots OVMF's Secure Boot build,
+whose variable store `output/cherry_x86_64/qemu/OVMF_VARS.secboot.fd` starts
+in setup mode and persists: the first run enrolls the keys and QEMU exits as
+the VM reboots; the next one then refuses a local build, which is unsigned.
+The smoke test's last scenario goes through it all, and boots the image signed
+by a CA of its own, which it adds to db, with Secure Boot on. Without keys in
+`board/x86_64/secureboot/`, the image enrolls nothing and the scenario is
+skipped. The image carries the keys from `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS`:
+to try a key hierarchy of your own, e.g. made by `scripts/secureboot.py` on a
+SoftHSM token (as `tests/ceremony.sh` does), point it there, run `make
+br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
+
+Not yet: Cherry applies no dbx updates, which would revoke a leaked release
+key (the KEK would sign them); the kernel's lockdown and module signing are
+off; and nothing is bound to the PCRs that record Secure Boot's state.
 
 ## Running containers
 
@@ -532,8 +652,7 @@ This is a development image:
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
   checked arguments.
-- The image is not signed.
-
-Secure Boot would mean signing the UKI (`ukify --secureboot-*`). With Secure
-Boot enabled, systemd-stub ignores command-line overrides passed by the
-firmware.
+- Releases are signed for Secure Boot, and a machine in setup mode enrolls
+  Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
+  signed. With Secure Boot on, the kernel still loads unsigned modules: its
+  lockdown is off.
