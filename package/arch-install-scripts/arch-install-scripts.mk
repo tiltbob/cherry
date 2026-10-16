@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-ARCH_INSTALL_SCRIPTS_VERSION = 31
+ARCH_INSTALL_SCRIPTS_VERSION = 32
 ARCH_INSTALL_SCRIPTS_SITE = https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/archive/v$(ARCH_INSTALL_SCRIPTS_VERSION)
 ARCH_INSTALL_SCRIPTS_SOURCE = arch-install-scripts-v$(ARCH_INSTALL_SCRIPTS_VERSION).tar.gz
 ARCH_INSTALL_SCRIPTS_LICENSE = GPL-2.0

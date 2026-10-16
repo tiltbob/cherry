@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-BUN_VERSION = 1.4.2
+BUN_VERSION = 1.4.3
 BUN_SITE = https://github.com/oven-sh/bun/releases/download/bun-v$(BUN_VERSION)
 # Upstream's prebuilt binary: building Bun needs Zig and LLVM. The "baseline"
 # x86_64 build doesn't need AVX2, so it also runs on VMs whose CPU model lacks

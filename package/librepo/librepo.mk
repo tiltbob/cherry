@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-LIBREPO_VERSION = 1.21.1
+LIBREPO_VERSION = 1.21.2
 LIBREPO_SITE = https://github.com/rpm-software-management/librepo
 LIBREPO_SITE_METHOD = git
 LIBREPO_LICENSE = LGPL-2.1+
