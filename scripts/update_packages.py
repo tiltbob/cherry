@@ -167,7 +167,7 @@ def update_with_buildroot(name, version, site=None):
             continue
         with open(os.path.join(OUTPUT, info["source_dir"], filename), "rb") as f:
             set_hash(name, filename, "sha256", hashlib.sha256(f.read()).hexdigest())
-    if re.search(r"signature|pgp", read_hashes(name), re.I):
+    if re.search(r"signature|pgp|\.asc\b", read_hashes(name), re.I):
         print(f"note: {name}.hash mentions a signature check; do it again for {version}")
 
 
