@@ -49,7 +49,7 @@ for target in basic getty getty-pre multi-user network shutdown swap sysinit tim
 	printf '[Unit]\nDescription=%s (stub)\n' "$target" >"$units/$target.target"
 done
 # Executables of other packages that ExecStart= lines name.
-for exe in bin/sh sbin/mkswap sbin/swapon usr/bin/ipfs usr/bin/mkdir usr/bin/pacman-key usr/bin/ssh-keygen usr/sbin/sshd; do
+for exe in bin/sh sbin/mkswap sbin/swapon usr/bin/mkdir usr/bin/pacman-key usr/bin/ssh-keygen usr/sbin/sshd; do
 	install -D -m 0755 /dev/null "$root/$exe"
 done
 # The units that the overlay's drop-ins (sshd.service.d, var.mount.d) extend,

@@ -35,10 +35,9 @@ ExecStart=/usr/libexec/openchamber-serve
 # server through its API, and it should come back.
 Restart=always
 
-# Hardening, as for ipfs.service. Its terminals and tools, and the agent's, run
-# as the cherry user inside it: they see the system read-only, except
-# /var/lib/cherry and a private /tmp. No MemoryDenyWriteExecute: Bun's
-# JavaScript JIT needs that.
+# Hardening. Its terminals and tools, and the agent's, run as the cherry user
+# inside it: they see the system read-only, except /var/lib/cherry and a
+# private /tmp. No MemoryDenyWriteExecute: Bun's JavaScript JIT needs that.
 CapabilityBoundingSet=
 NoNewPrivileges=true
 ProtectSystem=strict

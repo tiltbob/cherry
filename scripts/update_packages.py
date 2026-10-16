@@ -16,10 +16,10 @@ version (and, where releases live at new URLs, the site) in package/<name>/
   npm-modules.list gets their install paths and URLs, and openchamber.hash
   their hashes.
 
-cherry, cherry-stage1 and rpmstrap are Cherry's own code, with no upstream.
+cherry, cherry-pit and rpmstrap are Cherry's own code, with no upstream.
 
   scripts/update_packages.py                # every package, to its latest
-  scripts/update_packages.py kubo pacman    # some of them
+  scripts/update_packages.py bun pacman     # some of them
   scripts/update_packages.py toml11=v4.3.0  # a specific version
   scripts/update_packages.py --check        # only report what is newer
 
@@ -365,7 +365,6 @@ PACKAGES = {
     "distribution-gpg-keys": (github_tags("rpm-software-management/distribution-gpg-keys",
                                           r"distribution-gpg-keys-\d+\.\d+-\d+"),),
     "dnf5": (github_tags("rpm-software-management/dnf5", r"\d+\.\d+\.\d+\.\d+"),),
-    "kubo": (github_tags("ipfs/kubo", r"v\d+\.\d+\.\d+"),),
     "librepo": (github_tags("rpm-software-management/librepo", r"\d+\.\d+\.\d+"),),
     "libsolv-rpm": (github_tags("openSUSE/libsolv", r"\d+\.\d+\.\d+"),),
     "openchamber": (npm(OPENCHAMBER_PACKAGE), update_openchamber),

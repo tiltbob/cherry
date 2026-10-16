@@ -1,7 +1,8 @@
 /*
- * Cherry's stage 1, the /init of the initramfs. The initramfs holds only this
- * program and the root filesystem, as a compressed EROFS image. Mount the image
- * read-only, straight from the file, make it the root, and run its /init.
+ * cherry-pit, Cherry's stage 1: the /init of the initramfs. The initramfs holds
+ * only this program and the root filesystem, as a compressed EROFS image. Mount
+ * the image read-only, straight from the file, make it the root, and run its
+ * /init.
  *
  * The image stays in the initramfs (a ramfs: rootfstype=ramfs), now hidden
  * under the new root: its pages are the root filesystem's only copy,
@@ -17,7 +18,7 @@
 static void fail(const char *what)
 {
 	/* PID 1 exits: the kernel panics, and panic=10 reboots (and HTTP boots). */
-	fprintf(stderr, "cherry-stage1: %s: %s\n", what, strerror(errno));
+	fprintf(stderr, "cherry-pit: %s: %s\n", what, strerror(errno));
 	_exit(1);
 }
 

@@ -57,7 +57,7 @@ notHandled.push(["cherry", "org.freedesktop.systemd1.manage-unit-files", { unit:
 notHandled.push(["cherry", "org.freedesktop.login1.power-off", {}]);
 notHandled.push(["cherry", "org.freedesktop.login1.reboot", {}]);
 // Nobody else gets what cherry gets.
-for (const user of ["root", "ipfs", "openchamber", "opencode", "cherryx", ""]) {
+for (const user of ["root", "openchamber", "opencode", "cherryx", ""]) {
   for (const [, id, details] of yes) notHandled.push([user, id, details]);
 }
 

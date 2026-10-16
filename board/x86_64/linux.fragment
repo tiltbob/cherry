@@ -5,8 +5,8 @@
 # x86_64_defconfig turns this on; it would make toolchain upgrades fragile.
 # CONFIG_WERROR is not set
 
-# Direct UEFI (HTTP) boot of a UKI. Its initramfs holds stage 1 and the root
-# filesystem, a zstd-compressed EROFS image that stage 1 mounts straight from
+# Direct UEFI (HTTP) boot of a UKI. Its initramfs holds cherry-pit and the root
+# filesystem, a zstd-compressed EROFS image that cherry-pit mounts straight from
 # the file. The kernel command line is embedded in the UKI.
 CONFIG_EFI=y
 CONFIG_EFI_STUB=y

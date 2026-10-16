@@ -13,8 +13,8 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
   [EROFS](https://erofs.docs.kernel.org) image
 
 Once booted:
-- **Identity:** a TPM 2.0 is mandatory. The machine ID, the hostname and the
-  IPFS node's key come from the TPM, so they stay the same across reboots (see
+- **Identity:** a TPM 2.0 is mandatory. The machine ID comes from the TPM, and
+  the hostname from the machine ID, so they stay the same across reboots (see
   [Machine identity](#machine-identity)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
@@ -22,9 +22,9 @@ Once booted:
   for `/var` and containers come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
-  journald, machined/machinectl and systemd-nspawn, plus OpenSSH, an IPFS
-  node (see [IPFS](#ipfs)), and OpenChamber running the OpenCode agent, as
-  the `cherry` user (see [Cherry service](#cherry-service)).
+  journald, machined/machinectl and systemd-nspawn, plus OpenSSH and
+  OpenChamber running the OpenCode agent, as the `cherry` user (see
+  [Cherry service](#cherry-service)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -158,10 +158,10 @@ ssh -p 2222 root@localhost
 1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
    kernel with the embedded command line and initramfs.
 2. **Kernel:** unpacks the initramfs into a ramfs and runs its `/init`,
-   [stage 1](package/cherry-stage1/src/stage1.c). The initramfs holds only
-   stage 1 and the root filesystem image. (`rootfstype=ramfs`: EROFS can
-   mount a file from a ramfs, but not from the default tmpfs.)
-3. **Stage 1:** mounts the image read-only, straight from the file, makes it
+   [cherry-pit](package/cherry-pit/src/cherry-pit.c). The initramfs holds
+   only cherry-pit and the root filesystem image. (`rootfstype=ramfs`: EROFS
+   can mount a file from a ramfs, but not from the default tmpfs.)
+3. **cherry-pit:** mounts the image read-only, straight from the file, makes it
    the root, and runs its [`/init`](board/x86_64/rootfs-overlay/init), a shell
    script.
 4. **`/init`:** does what an initrd would before systemd starts:
@@ -186,7 +186,7 @@ Everything lives in RAM: the root filesystem, `/var` with its containers, and
 the memory processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
-initramfs: 79 MB for 215 MiB of files before OpenCode, OpenChamber and Bun,
+initramfs: 62 MB for 139 MiB of files before OpenCode, OpenChamber and Bun,
 which add about 175 MB for 450 MiB of files (see [OpenCode](#opencode) and
 [OpenChamber](#openchamber)), compressed with zstd in clusters of up to 64 KiB.
 The kernel keeps the files in use in its
@@ -247,19 +247,12 @@ index, `/init` uses that template instead, as the TCG EK profile requires. Then:
 `ek-hash`) for later boot steps. Both identify the machine but are not secret:
 anyone with access to the TPM can read the EK.
 
-**The IPFS node's key** comes from the TPM too, so its peer ID is the same at
-every boot (see [IPFS](#ipfs)). `ipfs-identity.service` has the TPM derive an
-HMAC key from its endorsement seed, as it derives the EK, and HMAC a fixed
-label with it. The result is the seed of the node's Ed25519 key. Unlike the
-EK, that key is secret, but nothing protects it from root yet: anything with
-access to the TPM can derive it again.
-
 **Without a usable TPM 2.0,** boot stops: no TPM, a TPM 1.2, or a TPM that
 cannot create its EK. `/init` writes the reason to
 `/run/cherry/identity/error` and starts systemd with `cherry-no-tpm.target`
 instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
-Networking, sshd, IPFS and containers never start.
+Networking, sshd and containers never start.
 
 ## Running containers
 
@@ -388,52 +381,6 @@ machinectl shell arch
   to Arch's `systemd-network` user and stop the host's systemd-networkd from
   writing its state.
 
-## IPFS
-
-Every Cherry machine runs an [IPFS](https://ipfs.tech) node:
-[Kubo](https://github.com/ipfs/kubo), as `ipfs.service`. Like sshd, it starts
-only on a machine with a TPM.
-
-- **User and repository:** the daemon runs as the `ipfs` user, with its
-  repository in `/var/lib/ipfs`.
-- **Identity:** the node's key comes from the TPM (see
-  [Machine identity](#machine-identity)), so its peer ID is the same at every
-  boot. `ipfs-identity.service` creates the repository with that key before
-  the daemon starts. If that fails, the daemon doesn't start rather than make
-  up a key.
-- **Nothing else persists yet:** `/var` is a tmpfs, so the repository is new
-  at every boot. Whatever the node added, pinned or cached is gone.
-- **Ports:**
-  - The swarm listens on port 4001 (TCP, and UDP for QUIC, WebTransport and
-    WebRTC) on every address.
-  - The RPC API (`127.0.0.1:5001`) and the HTTP gateway (`127.0.0.1:8080`)
-    listen on loopback only.
-- **Configuration:** Kubo's defaults, as `ipfs init` creates them.
-  - `ipfs config` changes them in the repository, so only until the next
-    boot. Most changes take effect after `systemctl restart ipfs`.
-  - Telemetry is off: Kubo has no endpoint to send it to.
-- **QUIC:** `/usr/lib/sysctl.d/50-ipfs.conf` raises the socket buffer limits
-  to 7.5 MB, above the 7 MiB that QUIC asks for.
-
-Login shells set `IPFS_PATH=/var/lib/ipfs`, so `ipfs` commands reach the
-daemon through its RPC API:
-
-```sh
-ipfs id
-echo hello | ipfs add -Q                        # prints the CID
-ipfs cat <cid>
-wget -q -O - http://127.0.0.1:8080/ipfs/<cid>   # the same, through the gateway
-```
-
-- Elsewhere, for example in `ssh <host> ipfs ...`, set `IPFS_PATH` yourself
-  or pass `--api /ip4/127.0.0.1/tcp/5001`.
-- Run `ipfs` commands only while the daemon runs. Without it, they open the
-  repository directly and leave files owned by root, so the daemon's later
-  writes and garbage collection fail with "permission denied".
-  `chown -R ipfs:ipfs /var/lib/ipfs` repairs that.
-- The repository is in RAM, and Kubo doesn't collect garbage by default.
-  `ipfs repo gc` frees blocks that aren't pinned.
-
 ## OpenCode
 
 Every Cherry machine has [OpenCode](https://opencode.ai), the AI coding agent,
@@ -524,8 +471,6 @@ ssh -L 3000:127.0.0.1:3000 -p 2222 root@localhost  # the VM of make qemu
 This is a development image:
 - `root` has no password on the console (Buildroot's default).
 - SSH accepts keys only.
-- Any local user can control the IPFS node through its RPC API, and its swarm
-  port is open to the network: there's no host firewall yet.
 - OpenChamber's browser UI has no password unless the machine was given one
   as a credential: any local user can use it, and so run commands as the
   `cherry` user. It is on loopback only, as is the OpenCode behind it.
@@ -533,8 +478,6 @@ This is a development image:
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
   checked arguments.
-- Root can derive the IPFS node's private key from the TPM at any time: it
-  isn't bound to the boot state (PCRs) yet.
 - The image is not signed.
 
 Secure Boot would mean signing the UKI (`ukify --secureboot-*`). With Secure
