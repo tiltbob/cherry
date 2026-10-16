@@ -14,7 +14,7 @@ other state yet, so every run otherwise starts from scratch.
 With --secure-boot, the firmware is OVMF's Secure Boot build (with SMM), and
 its variable store, <state>/OVMF_VARS.secboot.fd, persists too. A new one is
 in setup mode, so Cherry enrolls its keys and reboots; QEMU then exits, as the
-firmware forgets the HTTP boot entry on a reboot: run it again to boot on, now
+HTTP boot entry is for one boot only (BootNext): run it again to boot on, now
 with Secure Boot. An unsigned image no longer boots then. Delete the file for
 a machine in setup mode again.
 
