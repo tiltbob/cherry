@@ -38,6 +38,11 @@
      compressed, and come back intact
   10. without a TPM, boot stops at cherry-no-tpm.target with the error on the
      console: no network, no sshd, no OpenChamber, no containers
+  11. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
+     the image's keys and the option ROM driver the firmware loaded (QEMU's
+     iPXE for virtio-net) and reboots; the firmware then refuses the image,
+     unsigned, but boots it with Secure Boot on once signed by a CA the test
+     adds to db (skipped when the image has no keys)
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -60,6 +65,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import run_qemu  # noqa: E402
+import secureboot  # noqa: E402
 
 MULT = float(os.environ.get("CHERRY_TEST_TIMEOUT_MULT", "1" if run_qemu.kvm_usable() else "4"))
 
@@ -271,17 +277,27 @@ class VM:
         self.ssh_port = None
         self.n = 0
 
-    def start(self, tpm_interface="crb"):
-        """Boot with the VM's TPM (one swtpm state for the whole test) on tpm_interface, or None for no TPM."""
+    def start(self, tpm_interface="crb", secure_boot=False, server=None):
+        """Boot with the VM's TPM (one swtpm state for the whole test) on tpm_interface, or None for no TPM, from
+        server (default: the images'). With secure_boot, on OVMF's Secure Boot build, whose variable store lasts from
+        one start to the next (in setup mode at first), and QEMU exits when the guest reboots."""
         self.stop()
-        vars_path = os.path.join(self.workdir, "OVMF_VARS.fd")
-        run_qemu.write_vars(vars_path, run_qemu.boot_url(self.server))
+        url = run_qemu.boot_url(server or self.server)
+        if secure_boot:
+            vars_path = os.path.join(self.workdir, run_qemu.SECBOOT_VARS)
+            if os.path.exists(vars_path):
+                run_qemu.set_boot_uri(vars_path, url)
+            else:
+                run_qemu.write_vars(vars_path, url, secure_boot=True)
+        else:
+            vars_path = os.path.join(self.workdir, "OVMF_VARS.fd")
+            run_qemu.write_vars(vars_path, url)
         if tpm_interface:
             self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, "tpm"))
         self.ssh_port = free_port()
         cmd = run_qemu.qemu_command(vars_path, serial="stdio", ssh_port=self.ssh_port,
                                     credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
-                                    tpm=self.tpm, tpm_interface=tpm_interface)
+                                    tpm=self.tpm, tpm_interface=tpm_interface, secure_boot=secure_boot)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.console = Console(self.proc, os.path.join(self.workdir, "serial.log"))
@@ -298,6 +314,13 @@ class VM:
         if self.tpm:
             self.tpm.stop()
         self.tpm = None
+
+    def wait_exit(self, timeout):
+        """Wait for QEMU to exit by itself, e.g. when the guest reboots on Secure Boot firmware."""
+        try:
+            self.proc.wait(timeout * MULT)
+        except subprocess.TimeoutExpired:
+            raise Timeout(f"QEMU did not exit within {timeout * MULT:.0f}s")
 
     def send(self, text):
         self.proc.stdin.write(text.encode())
@@ -370,11 +393,11 @@ class Smoke:
         self.server = run_qemu.serve(self.images)
         self.vm = VM(self.workdir, self.server)
 
-    def boot(self, tpm_interface="crb", banner=None):
+    def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
         start = time.monotonic()
-        vm.start(tpm_interface)
+        vm.start(tpm_interface, secure_boot=secure_boot, server=server)
         if banner:
             vm.console.expect(re.escape(banner), 600, allow_boot=True)
         vm.wait_shell()
@@ -792,6 +815,77 @@ class Smoke:
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
         vm.run("journalctl -b -u cherry-no-tpm.service --no-pager | grep -q 'Stopped: no usable TPM 2.0'")
+
+    def efi_variables(self):
+        """{name: data} of the Secure Boot firmware's variable store, read on the host."""
+        path = os.path.join(self.workdir, "variables.json")
+        subprocess.run([run_qemu.virt_fw_vars(), "--input", os.path.join(self.workdir, run_qemu.SECBOOT_VARS),
+                        "--output-json", path], check=True, stdout=subprocess.DEVNULL)
+        with open(path) as f:
+            return {v["name"]: bytes.fromhex(v["data"]) for v in json.load(f)["variables"]}
+
+    def s11_secure_boot(self):
+        vm = self.vm
+        keys = "/usr/share/cherry/secureboot"
+        rc, _ = vm.run(f"test -s {keys}/PK.auth", check_rc=False)
+        if rc != 0:
+            log("skipped: the image has no Secure Boot keys (scripts/secureboot.py init writes them)")
+            return SKIPPED
+        for tool in ("openssl", "sbsign"):
+            check(shutil.which(tool), f"{tool} not found: apt install openssl sbsigntool")
+        sets = {var: secureboot.parse_auth2(base64.b64decode(vm.run(f"base64 {keys}/{var}.auth")))[2]
+                for var in ("PK", "KEK", "db")}
+
+        # Setup mode: the keys go in, and the guest reboots, which ends QEMU.
+        vm.start(secure_boot=True)
+        # The banner, folded: any space may be a line break and its indentation.
+        enrolled = re.compile(r"Cherry\s+enrolled\s+its\s+Secure\s+Boot\s+keys:\s+rebooting\s+into\s+Secure\s+Boot\."
+                              r"[\s\S]*?\s+CA\s+and\s+(\d+)\s+option\s+ROM")
+        m, _ = vm.console.expect(enrolled, 900, allow_boot=True)
+        drivers = int(m[1])
+        vm.wait_exit(120)
+        variables = self.efi_variables()
+        for var in ("PK", "KEK"):
+            check(variables.get(var) == sets[var], f"{var} is not the image's")
+        db = secureboot.parse_esl(variables.get("db", b""))
+        hashes = [entry for entry in db[1:] if entry[:2] == (secureboot.EFI_CERT_SHA256, secureboot.CHERRY_OWNER)]
+        check(db[:1] == secureboot.parse_esl(sets["db"]) and len(hashes) == len(db) - 1 == drivers >= 1,
+              f"db is not the image's CA and the {drivers} option ROM driver(s): {db}")
+        check("CherrySecureBootEnrolled" in variables, "the enrollment is not marked")
+        log(f"enrolled PK, KEK, and db: the CA and {drivers} option ROM driver(s)")
+
+        # Secure Boot is on: the image, unsigned, is refused.
+        vm.start(secure_boot=True)
+        vm.console.expect(r"Access Denied|Security Violation", 600, allow_boot=True)
+        vm.stop()
+
+        # Signed by a CA added to db, it boots, with Secure Boot on.
+        tmp = os.path.join(self.workdir, "secureboot")
+        os.makedirs(os.path.join(tmp, "images"))
+        for cmd in (["req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{tmp}/ca.key",
+                     "-subj", "/CN=Cherry smoke test CA/", "-days", "1", "-out", f"{tmp}/ca.crt"],
+                    ["req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{tmp}/signer.key",
+                     "-CA", f"{tmp}/ca.crt", "-CAkey", f"{tmp}/ca.key", "-subj", "/CN=Cherry smoke test signer/",
+                     "-days", "1", "-addext", "basicConstraints=critical,CA:false", "-out", f"{tmp}/signer.crt"]):
+            subprocess.run(["openssl", *cmd], check=True, capture_output=True)
+        subprocess.run([run_qemu.virt_fw_vars(), "--inplace", os.path.join(self.workdir, run_qemu.SECBOOT_VARS),
+                        "--add-db", str(secureboot.CHERRY_OWNER), f"{tmp}/ca.crt"], check=True, capture_output=True)
+        subprocess.run(["sbsign", "--key", f"{tmp}/signer.key", "--cert", f"{tmp}/signer.crt", "--output",
+                        os.path.join(tmp, "images", run_qemu.EFI_NAME), os.path.join(self.images, run_qemu.EFI_NAME)],
+                       check=True, capture_output=True)
+        server = run_qemu.serve(os.path.join(tmp, "images"))
+        try:
+            self.boot(secure_boot=True, server=server)
+        finally:
+            server.shutdown()
+        flags = vm.run("cd /sys/firmware/efi/efivars && for v in SecureBoot SetupMode; do "
+                       "printf '%s=%s ' $v $(od -An -tu1 -j4 -N1 $v-8be4df61-93ca-11d2-aa0d-00e098032b8c); done")
+        check(flags.split() == ["SecureBoot=1", "SetupMode=0"], f"not booted with Secure Boot on: {flags}")
+        report = vm.run("journalctl -b -u cherry-secureboot --no-pager -o cat")
+        check("Secure Boot is on, with Cherry's keys." in report, f"cherry-secureboot reported:\n{report}")
+        rc, _ = vm.run("ls /sys/firmware/efi/efivars/CherrySecureBootEnrolled-*", check_rc=False)
+        check(rc != 0, "the enrollment mark was not cleared")
+        check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
 
     def run(self):
         names = scenario_names(type(self))
