@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cherry's /init. Stage 1, the initramfs's /init (package/cherry-stage1), runs
+# Cherry's /init. cherry-pit, the initramfs's /init (package/cherry-pit), runs
 # it once it has mounted the root filesystem, and it hands over to systemd.
 # Like an initrd, it does what has to happen before systemd starts: systemd sets
 # the machine ID first thing, and Cherry's machine ID comes from the TPM.

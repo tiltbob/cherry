@@ -10,7 +10,7 @@ linux_dir=$(ls -d "$BUILD_DIR"/linux-[0-9]* | tail -n 1)
 
 "$BOARD_DIR/check-kconfig.sh" "$BOARD_DIR/linux.fragment" "$linux_dir/.config"
 
-# The initramfs: stage 1 (package/cherry-stage1) as /init, and Buildroot's
+# The initramfs: cherry-pit (package/cherry-pit) as /init, and Buildroot's
 # EROFS image of the root filesystem. That image is compressed already, so the
 # archive isn't.
 initramfs="$BINARIES_DIR/initramfs.cpio"
@@ -18,7 +18,7 @@ initramfs="$BINARIES_DIR/initramfs.cpio"
 dir /dev 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 dir /sysroot 0755 0 0
-file /init $BINARIES_DIR/stage1 0755 0 0
+file /init $BINARIES_DIR/cherry-pit 0755 0 0
 file /rootfs.erofs $BINARIES_DIR/rootfs.erofs 0400 0 0
 EOF
 
