@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-OPENCHAMBER_VERSION = 2.2.0
+OPENCHAMBER_VERSION = 2.3.3
 OPENCHAMBER_SITE = https://registry.npmjs.org/@openchamber/web/-
 # Upstream's npm package: the server, its command line and the built web UI,
 # published to run on Node.js or Bun; upstream's own container runs it on Bun,

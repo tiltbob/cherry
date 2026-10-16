@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-OPENCODE_VERSION = 2.0.25
+OPENCODE_VERSION = 2.0.31
 OPENCODE_SITE = https://registry.npmjs.org/@opencode/cli-linux-x64-baseline/-
 # Upstream's prebuilt binary: OpenCode is a TypeScript program compiled into a
 # single executable with Bun, and building it needs Bun and its npm

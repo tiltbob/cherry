@@ -29,7 +29,7 @@ diff -ru a/node_modules/@openchamber/web/bin/lib/commands-update.js b/node_modul
 diff -ru a/node_modules/@openchamber/web/server/lib/package-manager.js b/node_modules/@openchamber/web/server/lib/package-manager.js
 --- a/node_modules/@openchamber/web/server/lib/package-manager.js
 +++ b/node_modules/@openchamber/web/server/lib/package-manager.js
-@@ -792,6 +792,7 @@
+@@ -777,6 +777,7 @@
  
  export async function checkForUpdates(options = {}) {
    const currentVersion = options.currentVersion || getCurrentVersion();
