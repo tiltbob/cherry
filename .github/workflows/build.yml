@@ -6,8 +6,10 @@ name: build
 # Other branches build only through a pull request, or by hand. A published
 # release is built from its tag, and gets the image as an asset (the release
 # job below); so does a run by hand on main given a release name, v<version>,
-# which creates the release and its tag on the commit it built. SDK releases,
-# tagged sdk-*, are sdk.yml's and skip this.
+# which creates the release and its tag on the commit it built. Once the
+# repository has Secure Boot keys (board/x86_64/secureboot/), the release job
+# signs the image first. SDK releases, tagged sdk-*, are sdk.yml's and skip
+# this.
 on:
   push:
     branches: [main]
@@ -23,10 +25,12 @@ on:
       - 'scripts/prune_dl.py'
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
+      - 'tests/ceremony.sh'
       - 'tests/firewall.sh'
       - 'tests/polkit.js'
       - 'tests/postbuild.sh'
       - 'tests/scenarios.py'
+      - 'tests/secureboot.sh'
       - 'tests/syntax.sh'
       - 'tests/units.sh'
       - '.shellcheckrc'
@@ -79,7 +83,8 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap\.sh|firewall\.sh|polkit\.js|postbuild\.sh|scenarios\.py|syntax\.sh|units\.sh)$|^\.shellcheckrc$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
+            ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
@@ -106,10 +111,11 @@ jobs:
           fi
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
-      # flake8 and python3-magic; the others python3-yaml and systemd-analyze;
-      # the polkit test node, which the runner has; the firewall test nft,
-      # busybox and user namespaces, which Ubuntu's AppArmor keeps from
-      # unprivileged users unless told otherwise.
+      # flake8 and python3-magic; the others python3-yaml, systemd-analyze and
+      # openssl; the key ceremony's a SoftHSM token, OpenSC and OpenSSL's
+      # pkcs11-provider; the polkit test node, which the runner has; the
+      # firewall test nft, busybox and user namespaces, which Ubuntu's
+      # AppArmor keeps from unprivileged users unless told otherwise.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -118,7 +124,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static
+            nftables busybox-static softhsm2 opensc pkcs11-provider
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
@@ -163,7 +169,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential file cpio unzip rsync bc wget git python3 libncurses-dev \
-            qemu-system-x86 ovmf python3-virt-firmware swtpm
+            qemu-system-x86 ovmf python3-virt-firmware swtpm sbsigntool
 
       # ccache entries for target code only hit with the same toolchain, and a
       # change to the kernel configuration misses every kernel object. So prefer
@@ -276,24 +282,68 @@ jobs:
   # the build and the smoke test passed: a published release was built from
   # its tag and gets the files; a run by hand given a release name creates the
   # release, and its tag on this commit, with them. Only this job may write to
-  # the repository.
+  # the repository, and only this job sees the release signing key: a secret
+  # of the release environment, which should admit main and the v* tags only.
   release:
     needs: build
     if: success() && (github.event_name == 'release' || inputs.release != '')
     runs-on: ubuntu-24.04
+    environment: release
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: board/x86_64/secureboot
+
       - uses: actions/download-artifact@v8
         with:
           name: cherry-x86_64
           path: artifacts
+
+      # Signed with the release key (SECUREBOOT_KEY, from scripts/secureboot.py
+      # issue), whose certificate release.crt the Cherry Secure Boot CA on the
+      # token issued: a machine with Cherry's keys boots it with Secure Boot on,
+      # and one without Secure Boot boots it as before. Before the repository
+      # has keys, the image goes out unsigned; once it has, a missing or wrong
+      # key fails the release rather than publish an image those machines
+      # would refuse.
+      - name: Sign for Secure Boot
+        id: sign
+        env:
+          SECUREBOOT_KEY: ${{ secrets.SECUREBOOT_KEY }}
+        run: |
+          keys=board/x86_64/secureboot
+          if [ ! -e "$keys/db.crt" ]; then
+            echo "::warning::no Secure Boot keys in $keys yet: the image is not signed"
+            exit 0
+          fi
+          if [ ! -e "$keys/release.crt" ] || [ -z "$SECUREBOOT_KEY" ]; then
+            echo "::error::$keys has keys but no release.crt, or the release environment no SECUREBOOT_KEY (scripts/secureboot.py issue)"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbsigntool
+          key=$RUNNER_TEMP/release.key
+          (umask 077 && printf '%s\n' "$SECUREBOOT_KEY" >"$key")
+          if [ "$(openssl pkey -in "$key" -pubout)" != "$(openssl x509 -in "$keys/release.crt" -noout -pubkey)" ]; then
+            rm -f "$key"
+            echo "::error::SECUREBOOT_KEY is not the key of $keys/release.crt"
+            exit 1
+          fi
+          sbsign --key "$key" --cert "$keys/release.crt" --output "$RUNNER_TEMP/cherry-x86_64.efi" artifacts/cherry-x86_64.efi
+          rm -f "$key"
+          sbverify --cert "$keys/db.crt" "$RUNNER_TEMP/cherry-x86_64.efi"
+          mv "$RUNNER_TEMP/cherry-x86_64.efi" artifacts/cherry-x86_64.efi
+          subject=$(openssl x509 -in "$keys/release.crt" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= //p')
+          echo "signed=$subject" >>"$GITHUB_OUTPUT"
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
         run: |
           cd artifacts
           sha256sum cherry-x86_64.efi | tee cherry-x86_64.efi.sha256
@@ -305,6 +355,10 @@ jobs:
               echo
               echo "Serve it over HTTP and point a machine's UEFI HTTP boot at it (the README's Booting section)."
               echo
+              if [ -n "$SIGNED" ]; then
+                echo "Signed for Secure Boot by $SIGNED, whose certificate the Cherry Secure Boot CA issued. A machine in Secure Boot setup mode that boots it enrolls Cherry's keys (the README's Secure Boot section)."
+                echo
+              fi
               echo '```'
               cat cherry-x86_64.efi.sha256
               echo '```'
