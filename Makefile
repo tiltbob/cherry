@@ -61,11 +61,13 @@ test:
 # Fast checks that need no build, each failing loudly: `make check` runs them
 # all (`make -k check` goes on after a failure), `make check-<name>` one. CI
 # runs them before the build (.github/workflows/build.yml). They need
-# shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze, node
-# for the polkit rules (skipped without it), and nft, ip, busybox and user
-# namespaces for the firewall (skipped without them).
+# shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
+# openssl; node for the polkit rules (skipped without it); nft, ip, busybox
+# and user namespaces for the firewall, and softhsm2, opensc and
+# pkcs11-provider for the key ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
-	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall
+	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall \
+	check-secureboot check-ceremony
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -113,6 +115,17 @@ check-postbuild:
 # namespaces of its own.
 check-firewall:
 	tests/firewall.sh
+
+# The Secure Boot keys in board/x86_64/secureboot/ are sound, and the image's
+# cherry-secureboot enrolls them in setup mode as it should.
+check-secureboot:
+	python3 scripts/secureboot.py check
+	tests/secureboot.sh
+
+# scripts/secureboot.py makes the keys on a token: a SoftHSM one (skipped
+# without softhsm2, opensc and pkcs11-provider).
+check-ceremony:
+	tests/ceremony.sh
 
 clean:
 	rm -rf $(O)

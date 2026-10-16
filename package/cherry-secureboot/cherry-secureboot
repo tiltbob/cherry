@@ -1,0 +1,234 @@
+#!/bin/sh
+# cherry-secureboot.service: when the firmware is in Secure Boot setup mode,
+# enroll Cherry's keys and the option ROMs the firmware loaded, then reboot
+# into Secure Boot. Otherwise, report whether Secure Boot is on, with Cherry's
+# keys.
+#
+# The keys are the signed updates that scripts/secureboot.py init made on the
+# token, in $keys: PK.auth (the platform key's certificate, self-signed),
+# KEK.auth (the key exchange key's, signed by the PK) and db.auth (the Cherry
+# Secure Boot CA's, signed by the KEK). They go in in the order db, KEK, PK,
+# replacing whatever db and KEK held: setting the PK ends setup mode, and from
+# then on the firmware checks every change against it. dbx stays as it is.
+#
+# Option ROMs: the firmware runs the UEFI drivers of add-in cards (network,
+# graphics, storage) from their option ROMs, and with Secure Boot on, only
+# those db allows. Microsoft signs them, and Cherry's db leaves Microsoft's CA
+# out, so db gets their hashes instead. The firmware measured every driver it
+# loaded this boot into PCR 2 of the TPM, by the Authenticode SHA-256 that db
+# entries hold, and the TPM's event log lists them. db is then the CA and those
+# hashes, which no key signed: the firmware takes that in setup mode, as from
+# efitools' efi-updatevar. Without the event log, or with a driver in it that
+# has no SHA-256, nothing is enrolled: a card without its driver could keep the
+# machine from booting at all.
+#
+# Some firmware asks at the next boot to confirm new keys and drops them if
+# nobody does. A variable of Cherry's own marks the enrollment until a boot out
+# of setup mode clears it, so that a machine back in setup mode reports that
+# rather than enrolling and rebooting over and over.
+#
+# $CHERRY_SECUREBOOT_KEYS, $CHERRY_EFIVARS and $CHERRY_EVENTLOG replace the
+# keys, efivarfs and the event log (tests/secureboot.sh).
+set -u
+
+keys=${CHERRY_SECUREBOOT_KEYS:-/usr/share/cherry/secureboot}
+efivars=${CHERRY_EFIVARS:-/sys/firmware/efi/efivars}
+eventlog=${CHERRY_EVENTLOG:-/sys/kernel/security/tpm0/binary_bios_measurements}
+
+global=8be4df61-93ca-11d2-aa0d-00e098032b8c
+security=d719b2cb-3d3a-4596-a3bc-dad00e67656f
+marker=CherrySecureBootEnrolled-37310110-2be7-463c-b42a-63e438edf4d7
+# The same GUIDs as scripts/secureboot.py, as they are stored (bytes_le):
+# Cherry's as the owner of signature list entries, EFI_CERT_SHA256_GUID and
+# EFI_CERT_TYPE_PKCS7_GUID.
+owner=10013137e72b3c46b42a63e438edf4d7
+cert_sha256=2616c4c14c509240aca941f936934328
+cert_type_pkcs7=9dd2af4adf68ee498aa9347d375665a7
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# show <message>: on every console (firmware screens and serial-over-LAN
+# alike), as cherry-no-tpm.service does, and in the journal.
+show() {
+	for tty in $(cat /sys/class/tty/console/active 2>/dev/null); do
+		printf '\n%s\n\n' "$1" >"/dev/$tty"
+	done
+	printf '%s\n' "$1"
+}
+
+# banner <title> <text>: show a framed message.
+banner() {
+	rule='=============================================================================='
+	show "$rule
+  $1
+
+$(printf '%s\n' "$2" | fold -s -w 76 | sed 's/ *$//; s/^/  /')
+$rule"
+}
+
+fail() {
+	banner "Cherry did not enroll its Secure Boot keys." "$1"
+	exit 1
+}
+
+# flag <name>: the value of a one-byte global variable (SetupMode, SecureBoot),
+# after its 4 bytes of attributes; empty when it isn't set.
+flag() {
+	od -An -tu1 -j4 -N1 "$efivars/$1-$global" 2>/dev/null | tr -d ' \n'
+}
+
+# value <name-guid>: a variable's data, without its attributes.
+value() {
+	tail -c +5 "$efivars/$1" 2>/dev/null
+}
+
+# payload <file.auth>: the data a signed update sets, after its
+# EFI_VARIABLE_AUTHENTICATION_2: a 16-byte timestamp, then a WIN_CERTIFICATE
+# of dwLength bytes.
+payload() {
+	len=$(od -An -tu4 -j16 -N4 "$1" | tr -d ' \n')
+	tail -c +$((17 + len)) "$1"
+}
+
+# bytes <hex>: write the bytes a hex string spells.
+bytes() {
+	h=$1
+	while [ -n "$h" ]; do
+		rest=${h#??}
+		# shellcheck disable=SC2059 # the format is the byte, in octal
+		printf "\\$(printf %03o "0x${h%"$rest"}")"
+		h=$rest
+	done
+}
+
+# u32 <n>: a little-endian UINT32.
+u32() {
+	bytes "$(printf %08x "$1" | sed 's/\(..\)\(..\)\(..\)\(..\)/\4\3\2\1/')"
+}
+
+# setvar <name-guid> <attributes> <update>: SetVariable() through efivarfs,
+# which takes the attributes (a UINT32) and the data in a single write, and
+# keeps the file of an existing variable immutable.
+setvar() {
+	{ u32 "$2"; cat "$3"; } >"$tmp/write"
+	if [ -e "$efivars/$1" ]; then
+		chattr -i "$efivars/$1" || return
+	fi
+	dd if="$tmp/write" of="$efivars/$1" bs=1M conv=notrunc 2>"$tmp/error"
+}
+
+# The SHA-256 of every driver the firmware loaded this boot, one per line, or
+# "none" for one measured without a SHA-256.
+drivers() {
+	awk '
+	function emit() {
+		if (pcr == 2 && (type == "EV_EFI_BOOT_SERVICES_DRIVER" || type == "EV_EFI_RUNTIME_SERVICES_DRIVER"))
+			print (sha256 != "" ? tolower(sha256) : "none")
+		pcr = ""
+	}
+	/^- EventNum:/ { emit(); type = ""; alg = ""; sha256 = "" }
+	/^  PCRIndex:/ { pcr = $2 }
+	/^  EventType:/ { type = $2 }
+	/^  - AlgorithmId:/ { alg = $3 }
+	/^    Digest:/ && alg == "sha256" { sha256 = $2; gsub(/"/, "", sha256) }
+	/^[a-z]/ { emit() }
+	END { emit() }
+	' "$1" | sort -u
+}
+
+enroll() {
+	if [ -e "$efivars/$marker" ]; then
+		fail "Cherry enrolled its keys at an earlier boot, yet the firmware is in setup mode again: it dropped them. Some firmware asks at boot to confirm new keys: confirm them there. To have Cherry enroll them again, delete the variable $marker (chattr -i, then rm, in $efivars) and reboot."
+	fi
+	for var in PK KEK db; do
+		[ -s "$keys/$var.auth" ] || fail "$keys/$var.auth is missing."
+	done
+	if [ ! -r "$eventlog" ]; then
+		fail "There is no TPM event log ($eventlog) to find the option ROMs the firmware loaded in, and enrolling keys without them could leave the machine unable to boot."
+	fi
+	if ! tpm2_eventlog "$eventlog" >"$tmp/eventlog" 2>"$tmp/error"; then
+		fail "tpm2_eventlog cannot read the TPM event log, to find the option ROMs the firmware loaded in: $(tail -n 3 "$tmp/error")"
+	fi
+	if ! grep -q '^- EventNum:' "$tmp/eventlog"; then
+		fail "The TPM event log is empty: it cannot tell which option ROMs the firmware loaded."
+	fi
+	drivers "$tmp/eventlog" >"$tmp/drivers"
+	if grep -qvE '^[0-9a-f]{64}$' "$tmp/drivers"; then
+		fail "The TPM event log has a driver the firmware loaded without its SHA-256, which db would need: turn on the TPM's SHA-256 PCR bank in the firmware setup."
+	fi
+	n=$(wc -l <"$tmp/drivers")
+
+	# db: db.auth as the KEK signed it, or with the drivers' hashes, unsigned.
+	if [ "$n" -eq 0 ]; then
+		cp "$keys/db.auth" "$tmp/db"
+	else
+		{
+			# EFI_VARIABLE_AUTHENTICATION_2: db.auth's timestamp, and a
+			# WIN_CERTIFICATE_UEFI_GUID with an empty PKCS #7 signature
+			# (dwLength 24, revision 2.0, WIN_CERT_TYPE_EFI_GUID).
+			head -c 16 "$keys/db.auth"
+			bytes 180000000002f10e"$cert_type_pkcs7"
+			# The CA, then an EFI_SIGNATURE_LIST of the hashes.
+			payload "$keys/db.auth"
+			bytes "$cert_sha256"
+			u32 $((28 + 48 * n))
+			u32 0
+			u32 48
+			while read -r hash; do
+				bytes "$owner$hash"
+			done <"$tmp/drivers"
+		} >"$tmp/db"
+	fi
+	# NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS | TIME_BASED_AUTHENTICATED_WRITE_ACCESS
+	setvar "db-$security" 0x27 "$tmp/db" || fail "The firmware refused db: $(cat "$tmp/error")"
+	setvar "KEK-$global" 0x27 "$keys/KEK.auth" || fail "The firmware refused the KEK: $(cat "$tmp/error")"
+	setvar "PK-$global" 0x27 "$keys/PK.auth" || fail "The firmware refused the PK: $(cat "$tmp/error")"
+
+	payload "$keys/PK.auth" >"$tmp/PK.esl"
+	value "PK-$global" >"$tmp/PK"
+	if ! cmp -s "$tmp/PK.esl" "$tmp/PK"; then
+		fail "The firmware took the PK, but it reads back as another."
+	fi
+	if [ "$(flag SetupMode)" != 0 ]; then
+		fail "The firmware took the PK, but is still in setup mode. Reboot: if it is still in setup mode then, it dropped the keys."
+	fi
+	# NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS
+	printf '\001' >"$tmp/one"
+	if ! setvar "$marker" 0x07 "$tmp/one"; then
+		banner "Cherry enrolled its Secure Boot keys, but cannot reboot into Secure Boot itself." "The firmware refused the variable that would stop Cherry from enrolling over and over should it drop the keys: $(cat "$tmp/error") Reboot by hand."
+		exit 1
+	fi
+	banner "Cherry enrolled its Secure Boot keys: rebooting into Secure Boot." "The platform key, the key exchange key, and db: the Cherry Secure Boot CA and $n option ROM driver(s) the firmware loaded."
+	systemctl --no-block reboot
+}
+
+status() {
+	if [ -e "$efivars/$marker" ]; then
+		chattr -i "$efivars/$marker" && rm -f "$efivars/$marker"
+	fi
+	payload "$keys/PK.auth" >"$tmp/PK.esl"
+	value "PK-$global" >"$tmp/PK"
+	ours=no
+	if cmp -s "$tmp/PK.esl" "$tmp/PK"; then
+		ours=yes
+	fi
+	case $(flag SecureBoot):$ours in
+	1:yes)
+		echo "Secure Boot is on, with Cherry's keys." ;;
+	1:no)
+		echo "Secure Boot is on, with another platform key than Cherry's." ;;
+	0:yes)
+		banner "Secure Boot is off." "Cherry's keys are enrolled, but Secure Boot is turned off in the firmware setup: turn it on there." ;;
+	0:no)
+		show "Secure Boot is off, and the platform key is not Cherry's. To enroll Cherry's keys, put the firmware into setup mode (clear its Secure Boot keys) and boot Cherry again." ;;
+	*)
+		echo "The firmware has no Secure Boot." ;;
+	esac
+}
+
+if [ "$(flag SetupMode)" = 1 ]; then
+	enroll
+else
+	status
+fi

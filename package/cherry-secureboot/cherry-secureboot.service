@@ -1,0 +1,19 @@
+[Unit]
+Description=Cherry: Enroll Secure Boot Keys in Setup Mode
+Documentation=https://github.com/tiltbob/cherry#secure-boot
+# Early, before anything else starts: in setup mode, the machine reboots once
+# the keys are in. efivarfs and securityfs (the TPM's event log) are mounted by
+# systemd itself, and /init found the TPM.
+DefaultDependencies=no
+ConditionFirmware=uefi
+ConditionPathExists=/usr/share/cherry/secureboot/PK.auth
+Conflicts=shutdown.target
+Before=sysinit.target shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/cherry-secureboot
+
+[Install]
+WantedBy=sysinit.target
