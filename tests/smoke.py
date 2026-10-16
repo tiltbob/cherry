@@ -5,11 +5,16 @@
      image from the initramfs, read-only; /var is a tmpfs; the machine ID
      comes from the TPM's endorsement key (a swtpm on CRB), and the hostname
      from the machine ID; networking and sshd work, an SSH key passed as a
-     credential is installed, no unit failed
+     credential is installed, no unit failed; the firewall was loaded before
+     networkd started, lets IPv6 router advertisements in, and keeps sshd
+     from answering outside the VM until a rule lets it in, which restarting
+     the firewall takes back out
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
-     differently (as pacstrap's pacman hooks do)
+     differently (as pacstrap's pacman hooks do); through the firewall, the
+     container leases its address from networkd, pings the host and reaches
+     out of the VM, but sshd on the host does not answer it
   3. a second boot starts from scratch again (nothing persists), except the
      machine's identity: the same TPM, now on TIS, gives the same machine ID
      and hostname
@@ -47,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -104,6 +110,13 @@ def tcp_local_address(hexaddr):
     # Each 32-bit word is in host byte order: little-endian on x86.
     words = [raw[i:i + 4][::-1] for i in range(0, len(raw), 4)]
     return str(ipaddress.ip_address(b"".join(words))), int(port, 16)
+
+
+def free_port():
+    """A TCP port on 127.0.0.1 that nothing listens on (yet)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def package_version(name):
@@ -255,6 +268,7 @@ class VM:
         self.proc = None
         self.tpm = None
         self.console = None
+        self.ssh_port = None
         self.n = 0
 
     def start(self, tpm_interface="crb"):
@@ -264,7 +278,8 @@ class VM:
         run_qemu.write_vars(vars_path, run_qemu.boot_url(self.server))
         if tpm_interface:
             self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, "tpm"))
-        cmd = run_qemu.qemu_command(vars_path, serial="stdio",
+        self.ssh_port = free_port()
+        cmd = run_qemu.qemu_command(vars_path, serial="stdio", ssh_port=self.ssh_port,
                                     credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
                                     tpm=self.tpm, tpm_interface=tpm_interface)
         log("starting QEMU: " + " ".join(cmd))
@@ -333,6 +348,15 @@ class VM:
     def fstype(self, mountpoint):
         return self.run(f"awk '$5 == \"{mountpoint}\" {{ t = $0 }} END {{ print t }}' /proc/self/mountinfo")
 
+    def ssh_answers(self):
+        """Whether sshd's banner comes back from outside the VM, through QEMU's port forward. QEMU accepts the
+        connection at once and only then connects to the guest: a dropped SYN shows as silence."""
+        with socket.create_connection(("127.0.0.1", self.ssh_port), timeout=5 * MULT) as s:
+            try:
+                return s.recv(4) == b"SSH-"
+            except TimeoutError:
+                return False
+
 
 class Smoke:
     def __init__(self, args):
@@ -370,6 +394,24 @@ class Smoke:
         rc, errors = vm.run("journalctl -b -u systemd-networkd --no-pager | grep -E 'Failed to update .*state file'",
                             check_rc=False)
         check(rc == 1, "systemd-networkd could not write its state files:\n" + "\n".join(errors.splitlines()[-5:]))
+
+    def check_firewall(self):
+        """The firewall was loaded before systemd-networkd started, lets the router advertisements of QEMU's network
+        in (they give the host an IPv6 address), and keeps sshd from answering outside the VM until a rule lets it
+        in; restarting the firewall takes that rule back out."""
+        vm = self.vm
+        check(vm.run("systemctl is-active cherry-firewall.service") == "active", "the firewall is not loaded")
+        loaded, started = (int(vm.run(f"systemctl show -p {p} --value {unit}")) for p, unit in
+                           (("ActiveEnterTimestampMonotonic", "cherry-firewall"),
+                            ("InactiveExitTimestampMonotonic", "systemd-networkd")))
+        check(loaded <= started, "systemd-networkd started before the firewall was loaded")
+        vm.run("for i in $(seq 60); do ip -6 addr show | grep -q 'inet6 fec0:' && exit 0; sleep 1; done; "
+               "ip -6 addr show; exit 1", timeout=90)
+        check(not vm.ssh_answers(), "sshd answers outside the VM, through the firewall")
+        vm.run("nft add rule inet cherry input tcp dport 22 accept")
+        check(vm.ssh_answers(), "sshd does not answer outside the VM once a rule lets it in")
+        vm.run("systemctl restart cherry-firewall.service")
+        check(not vm.ssh_answers(), "restarting the firewall did not take the rule for sshd back out")
 
     def check_identity(self, interface):
         """The machine ID comes from the endorsement key of the TPM on the given interface; return it."""
@@ -421,6 +463,7 @@ class Smoke:
               "the ssh.authorized_keys.root credential was not applied")
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
                "networkctl; exit 1", timeout=90)
+        self.check_firewall()
         # systemd arms it before journald runs, so its message is only in the kernel log.
         vm.run("test -c /dev/watchdog0 && dmesg | grep -q 'Using hardware watchdog'")
         check(vm.run("systemctl show -p RuntimeWatchdogUSec --value") == "30s", "RuntimeWatchdogSec not applied")
@@ -452,6 +495,32 @@ class Smoke:
                "&& exit 0; sleep 1; done; networkctl status ve-smoke; exit 1", timeout=120)
         vm.run("nft list table ip io.systemd.nat")
         self.check_networkd_state()
+        # Through the firewall, the container leases an address from networkd's DHCP server, pings the host, and
+        # reaches out of the VM, masqueraded, to the HTTP server that served the image; but sshd on the host
+        # answers it neither on its link, over IPv4 or IPv6, nor on the host's own address, though it answers the
+        # host itself. Commands run with the host's tools in the container's network namespace.
+        inside = ("systemd-run -q --wait --pipe --collect "
+                  "-p NetworkNamespacePath=/proc/$(machinectl show smoke -p Leader --value)/ns/net")
+
+        def sshd_answers(address, prefix=""):
+            rc, out = vm.run(f"{prefix} timeout {5 * MULT:g} bash -c 'exec 3<>/dev/tcp/{address}/22 && head -c 4 <&3'",
+                             timeout=60, check_rc=False)
+            return rc == 0 and out == "SSH-"
+
+        out = vm.run(f"{inside} udhcpc -i host0 -f -q -n -t 10 -T 2 -s /bin/true", timeout=120)
+        lease = re.search(r"lease of (\S+) obtained", out)
+        check(lease, f"the container got no lease from networkd's DHCP server:\n{out}")
+        gateway, prefix = vm.run("ip -4 -o addr show dev ve-smoke scope global | awk '{ print $4 }'").split("/")
+        vm.run(f"{inside} sh -c 'ip addr add {lease[1]}/{prefix} dev host0 && ip route add default via {gateway}'")
+        vm.run(f"{inside} ping -c 1 -W 5 {gateway}", timeout=60)
+        vm.run(f"{inside} wget -q -T 10 -t 1 --spider {run_qemu.boot_url(self.server)}", timeout=60)
+        address = vm.run("ip -4 -o addr show | sed -n 's/.* inet \\(10\\.0\\.2\\.[0-9]*\\)\\/.*/\\1/p'")
+        local = vm.run("ip -6 -o addr show dev ve-smoke scope link | sed -n 's/.* inet6 \\(fe80::[^/]*\\)\\/.*/\\1/p'")
+        check(local, "the container's link has no IPv6 link-local address on the host")
+        for target in (address, "::1"):
+            check(sshd_answers(target), f"sshd does not answer the host itself on {target}")
+        for target in (gateway, address, f"{local}%host0"):
+            check(not sshd_answers(target, inside), f"sshd answers the container on {target}, through the firewall")
         vm.run("machinectl terminate smoke; for i in $(seq 30); do machinectl show smoke >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
 

@@ -21,6 +21,8 @@ Once booted:
 - **`/var`:** a tmpfs of up to half the RAM, so nothing persists yet. Disks
   for `/var` and containers come later.
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
+- **Firewall:** nothing comes in unasked but ping, to the host or to its
+  containers (see [Firewall](#firewall)).
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH and
   OpenChamber running the OpenCode agent, as the `cherry` user (see
@@ -89,10 +91,13 @@ on the scripts), flake8 over `tests/` and `scripts/`, the workflows as YAML,
 against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
-argument checks and tool calls, and `post-build.sh`'s check of `opencode`.
-`make -k check` runs on after a failure; `make check-<name>` runs one. They
-need shellcheck, flake8, python3-magic, python3-yaml and systemd's
-`systemd-analyze`, and node for the polkit rules (skipped without it).
+argument checks and tool calls, `post-build.sh`'s check of `opencode`, and the
+firewall's rules, in network namespaces standing in for a host, its LAN and
+its containers. `make -k check` runs on after a failure; `make check-<name>`
+runs one. They need shellcheck, flake8, python3-magic, python3-yaml and
+systemd's `systemd-analyze`, node for the polkit rules (skipped without it),
+and nft, ip, busybox and user namespaces for the firewall (skipped without
+them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -144,12 +149,14 @@ The TPM is attached through CRB, as firmware TPMs are. Pass `--tpm tis` to
 `scripts/run_qemu.py` for the TIS interface of discrete TPMs, or `--tpm none`
 to see Cherry stop without a TPM.
 
-SSH is forwarded from host port 2222. `root` logs in without a password on the
-console. To log in over SSH, pass a key as a
-[systemd credential](https://systemd.io/CREDENTIALS/):
+`root` logs in without a password on the console. SSH is forwarded from host
+port 2222, but the firewall drops it (see [Firewall](#firewall)). To log in
+over SSH, pass a key as a [systemd credential](https://systemd.io/CREDENTIALS/),
+then let SSH in from the console:
 
 ```sh
 python3 scripts/run_qemu.py --credential "ssh.authorized_keys.root=$(cat ~/.ssh/id_ed25519.pub)"
+nft add rule inet cherry input tcp dport 22 accept    # on the console
 ssh -p 2222 root@localhost
 ```
 
@@ -174,6 +181,8 @@ ssh -p 2222 root@localhost
    - mounts a tmpfs on `/var` and fills it from the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
    - sets up compressed swap in RAM (see [Memory](#memory))
+   - loads the firewall before networkd configures any link (see
+     [Firewall](#firewall))
 
 Because `/etc` is read-only:
 - SSH host keys are generated under `/var/lib/sshd`, so they change on every
@@ -254,13 +263,54 @@ instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
 Networking, sshd and containers never start.
 
+## Firewall
+
+`cherry-firewall.service` loads Cherry's nftables rules,
+[`/usr/lib/cherry/firewall.nft`](board/x86_64/rootfs-overlay/usr/lib/cherry/firewall.nft),
+before networkd configures any link, and they stay until shutdown. Nothing
+comes in unasked but ping, to the host or through it to its containers:
+
+- **In:** ping (ICMP and ICMPv6 echo requests), and the replies to what the
+  host and its containers send. Besides those, only what the network needs:
+  IPv6 neighbor discovery, router advertisements and multicast listener
+  queries, and DHCPv6 replies. DHCPv4 needs no rule: networkd's client takes
+  its offers on a raw socket, which sees packets before the firewall.
+- **Dropped,** silently: everything else, SSH included.
+- **Containers,** on the `ve-*` links of `--network-veth` (which `machinectl
+  start` uses) and the `vz-*` bridges of `--network-zone=`, however many:
+  - lease their addresses from networkd's DHCP server on the host, ping it,
+    and reach out, masqueraded by networkd
+  - reach nothing else on the host, and not one another: containers that
+    should talk share a zone, whose bridge switches their packets without the
+    firewall (the kernel has no bridge netfilter)
+  - get nothing from outside unasked, through a port forward (`--port=`)
+    either
+- **Its own table only,** `inet cherry`: networkd and nspawn keep theirs,
+  `io.systemd.nat`, for masquerading and port forwards. Loading the rules
+  replaces `inet cherry` alone.
+
+A container bridged onto the host's Ethernet (`--network-bridge=`), or with
+`--network-macvlan=` or `--network-ipvlan=`, is on the network itself: its
+packets never pass through the host's firewall, and its own network namespace
+has rules of its own, none by default.
+
+To let something in until the next boot, add a rule from the console.
+Restarting the service puts the image's rules back:
+
+```sh
+nft add rule inet cherry input tcp dport 22 accept      # SSH to the host
+nft add rule inet cherry forward ct status dnat accept  # nspawn's port forwards
+systemctl restart cherry-firewall
+```
+
 ## Running containers
 
 Put container trees in `/var/lib/machines`, then start them with
 `machinectl start <name>` or run `systemd-nspawn` directly.
 
 With `--network-veth` (or `VirtualEthernet=yes`), systemd-networkd serves DHCP
-to the container and masquerades its traffic.
+to the container and masquerades its traffic. The firewall lets the container
+out, but nothing in unasked (see [Firewall](#firewall)).
 
 Everything lives in memory for now. Containers and their configuration are
 gone after a reboot.
@@ -443,9 +493,10 @@ on a machine with a TPM.
   read-only, with a private `/tmp`, and runs without capabilities.
 - **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
   OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
-  socket. Reach the UI through SSH port forwarding (below), or from another
-  device through the relay of a pairing link. `/health` reports OpenChamber's
-  version, `/api/opencode/compatibility` the OpenCode it runs.
+  socket. Reach the UI through SSH port forwarding (below), once the firewall
+  lets SSH in, or from another device through the relay of a pairing link.
+  `/health` reports OpenChamber's version, `/api/opencode/compatibility` the
+  OpenCode it runs.
 - **Password:** none on the browser UI, unless the machine was given one as
   the systemd credential `openchamber.ui_password`: for `make qemu`,
   `python3 scripts/run_qemu.py --credential openchamber.ui_password=...`.
@@ -459,8 +510,8 @@ on a machine with a TPM.
   local network can use it; it is single-use and expires after 10 minutes.
   `systemctl restart cherry-connect-url.service` shows a fresh one.
 
-To use it, forward the port over SSH, then open `http://127.0.0.1:3000/` in a
-browser:
+To use it, let SSH in (see [Booting](#booting)), forward the port over SSH,
+then open `http://127.0.0.1:3000/` in a browser:
 
 ```sh
 ssh -L 3000:127.0.0.1:3000 -p 2222 root@localhost  # the VM of make qemu
@@ -470,7 +521,8 @@ ssh -L 3000:127.0.0.1:3000 -p 2222 root@localhost  # the VM of make qemu
 
 This is a development image:
 - `root` has no password on the console (Buildroot's default).
-- SSH accepts keys only.
+- The firewall lets nothing in unasked but ping (see [Firewall](#firewall)).
+  SSH, once let in, accepts keys only.
 - OpenChamber's browser UI has no password unless the machine was given one
   as a credential: any local user can use it, and so run commands as the
   `cherry` user. It is on loopback only, as is the OpenCode behind it.

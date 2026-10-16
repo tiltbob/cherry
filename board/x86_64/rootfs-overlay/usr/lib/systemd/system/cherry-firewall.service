@@ -1,0 +1,18 @@
+# The firewall: nothing comes in unasked but ping, to the host or to its
+# containers (see /usr/lib/cherry/firewall.nft). In place before networkd
+# configures any link, and kept until shutdown: stopping the unit leaves the
+# rules, restarting it puts the image's back.
+[Unit]
+Description=Firewall
+Documentation=man:nft(8)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/lib/cherry/firewall.nft
+
+[Install]
+WantedBy=sysinit.target

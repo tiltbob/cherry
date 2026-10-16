@@ -23,6 +23,7 @@ on:
       - 'scripts/prune_dl.py'
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
+      - 'tests/firewall.sh'
       - 'tests/polkit.js'
       - 'tests/postbuild.sh'
       - 'tests/scenarios.py'
@@ -78,7 +79,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap\.sh|polkit\.js|postbuild\.sh|scenarios\.py|syntax\.sh|units\.sh)$|^\.shellcheckrc$"
+            ignore="$ignore|^tests/(bootstrap\.sh|firewall\.sh|polkit\.js|postbuild\.sh|scenarios\.py|syntax\.sh|units\.sh)$|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
@@ -106,7 +107,9 @@ jobs:
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
       # flake8 and python3-magic; the others python3-yaml and systemd-analyze;
-      # the polkit test node, which the runner has.
+      # the polkit test node, which the runner has; the firewall test nft,
+      # busybox and user namespaces, which Ubuntu's AppArmor keeps from
+      # unprivileged users unless told otherwise.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -114,7 +117,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            shellcheck python3-flake8 python3-magic python3-yaml systemd
+            shellcheck python3-flake8 python3-magic python3-yaml systemd \
+            nftables busybox-static
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
         run: make check
