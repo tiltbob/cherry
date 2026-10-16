@@ -13,8 +13,8 @@ boot. That binary is a [unified kernel image](https://uapi-group.org/specificati
   [EROFS](https://erofs.docs.kernel.org) image
 
 Once booted:
-- **Identity:** a TPM 2.0 is mandatory. The machine ID and the IPFS node's key
-  come from the TPM, so they stay the same across reboots (see
+- **Identity:** a TPM 2.0 is mandatory. The machine ID, the hostname and the
+  IPFS node's key come from the TPM, so they stay the same across reboots (see
   [Machine identity](#machine-identity)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
@@ -235,6 +235,13 @@ index, `/init` uses that template instead, as the TCG EK profile requires. Then:
 - **Machine ID:** the first 32 hex digits of the EK hash. `/init` passes it to
   systemd as `--machine-id=`, so it is in place before systemd starts anything.
   It is stable across reboots, so DHCP leases and journal IDs are too.
+- **Hostname:** `cherry-` and 8 hex digits derived from the machine ID, e.g.
+  `cherry-f587d723`. The image's `/etc/hostname` is `cherry-????????`
+  (`BR2_TARGET_GENERIC_HOSTNAME`), and systemd replaces each `?` with a hex
+  digit of a keyed hash of the machine ID as it sets the hostname
+  ([hostname(5)](https://www.freedesktop.org/software/systemd/man/latest/hostname.html)).
+  A hash rather than the machine ID itself, as the hostname goes out on the
+  network, e.g. in DHCP requests.
 
 `/init` leaves the EK and its hash in `/run/cherry/identity/` (`ek.der`,
 `ek-hash`) for later boot steps. Both identify the machine but are not secret:
