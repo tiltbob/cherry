@@ -528,11 +528,14 @@ after a reboot.
 The `cherry` user, which [cherry.service](#cherry-service) runs OpenChamber and
 the OpenCode agent as, manages containers too, without being root. polkit
 rules (`/usr/share/polkit-1/rules.d/50-cherry.rules`) let it drive
-systemd-machined with `machinectl`: `start`, `poweroff`, `terminate`, `kill`,
-`remove`, `clone`, `shell` and `login` on any container, though not the host's
-own shell or login (`machinectl shell .host`). `machinectl start` is a start
-of `systemd-nspawn@<name>.service`, so it may start, stop and restart those
-units, and no other but `cherry-bootstrap@.service`, which creates a
+systemd-machined with `machinectl`: `start`, `poweroff`, `reboot`,
+`terminate`, `kill`, `remove`, `clone`, `rename`, `read-only`, `set-limit`,
+`shell` and `login` on any container, though not the host's own shell or login
+(`machinectl shell .host`), nor `copy-to`, `copy-from` or `bind`, which
+machined does as root on any host path (see [Security notes](#security-notes)),
+or `clean` and `set-limit` on all the images at once. `machinectl start` is a
+start of `systemd-nspawn@<name>.service`, so it may start, stop and restart
+those units, and no other but `cherry-bootstrap@.service`, which creates a
 container: it runs the bootstrap tool below as root, with the README's command
 for it. The instance is the distribution, its release and the machine's name,
 separated by colons:
@@ -739,7 +742,11 @@ This is a development image:
 - The `cherry` user creates, starts, enters and removes containers through
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
-  checked arguments.
+  checked arguments. It may not copy files between a container and the host
+  or bind-mount host directories into one (`machinectl copy-to`, `copy-from`,
+  `bind`): systemd-machined does those as root, on host paths the caller
+  picks, so they would give it the host (any file to read, root's
+  `/var/roothome/.ssh/authorized_keys` to write).
 - The TPM unseals the key of the encrypted `/var` disk whatever the machine
   boots: it isn't bound to the boot state (PCRs) yet. The disk is unreadable
   away from its machine, but anything that boots the machine (an HTTP boot
