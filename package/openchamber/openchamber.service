@@ -9,7 +9,8 @@ User=openchamber
 Group=openchamber
 # Its home: OpenChamber keeps its data in .config/openchamber under it, and so
 # does the OpenCode it runs. The agent works in work/ unless a project picks
-# another directory. /var is a tmpfs for now, so all of it is new at every boot.
+# another directory. Without the machine's disk, /var is a tmpfs, so all of it
+# is new at every boot.
 StateDirectory=openchamber openchamber/work
 Environment=HOME=/var/lib/openchamber
 WorkingDirectory=/var/lib/openchamber/work

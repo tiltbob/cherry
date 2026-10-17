@@ -67,7 +67,7 @@ test:
 # pkcs11-provider for the key ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall \
-	check-secureboot check-ceremony
+	check-secureboot check-ceremony check-var
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -126,6 +126,10 @@ check-secureboot:
 # without softhsm2, opensc and pkcs11-provider).
 check-ceremony:
 	tests/ceremony.sh
+
+# cherry-var.service claims only a blank disk, and unlocks the right partition.
+check-var:
+	tests/var.sh
 
 clean:
 	rm -rf $(O)

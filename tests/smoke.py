@@ -2,13 +2,13 @@
 """End-to-end smoke test for Cherry: UEFI HTTP boot in QEMU + OVMF (stdlib only).
 
   1. the firmware HTTP boots the EFI binary; the root filesystem is the EROFS
-     image from the initramfs, read-only; /var is a tmpfs; the machine ID
-     comes from the TPM's endorsement key (a swtpm on CRB), and the hostname
-     from the machine ID; networking and sshd work, an SSH key passed as a
-     credential is installed, no unit failed; the firewall was loaded before
-     networkd started, lets IPv6 router advertisements in, and keeps sshd
-     from answering outside the VM until a rule lets it in, which restarting
-     the firewall takes back out
+     image from the initramfs, read-only; /var is a tmpfs, as the machine has
+     no disk; the machine ID comes from the TPM's endorsement key (a swtpm on
+     CRB), and the hostname from the machine ID; networking and sshd work, an
+     SSH key passed as a credential is installed, no unit failed; the firewall
+     was loaded before networkd started, lets IPv6 router advertisements in,
+     and keeps sshd from answering outside the VM until a rule lets it in,
+     which restarting the firewall takes back out
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
@@ -43,6 +43,12 @@
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
      unsigned, but boots it with Secure Boot on once signed by a CA the test
      adds to db (skipped when the image has no keys)
+  12. with disks, the machine makes its blank one its /var: a LUKS2 volume
+     whose key the TPM seals, holding ext4, and leaves the disk with a
+     partition table alone; at the next boot the TPM unlocks it and /var kept
+     its files and the SSH host key; another TPM cannot unlock it, so that
+     machine's /var is a tmpfs and the disk stays as it was, until wipefs, as
+     the README says, makes it blank again
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -80,6 +86,9 @@ NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 # Run a command as the cherry user, from the root shell on the console.
 AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
+# A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
+DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
+           + (4096).to_bytes(4, "little") + bytes(48) + b"\x55\xaa")
 FATAL = [
     (re.compile(r"No bootable option"), "the firmware found nothing to boot"),
     (re.compile(r'BdsDxe: starting Boot[0-9A-F]{4} "EFI Internal Shell'),
@@ -116,6 +125,14 @@ def tcp_local_address(hexaddr):
     # Each 32-bit word is in host byte order: little-endian on x86.
     words = [raw[i:i + 4][::-1] for i in range(0, len(raw), 4)]
     return str(ipaddress.ip_address(b"".join(words))), int(port, 16)
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def free_port():
@@ -277,10 +294,11 @@ class VM:
         self.ssh_port = None
         self.n = 0
 
-    def start(self, tpm_interface="crb", secure_boot=False, server=None):
-        """Boot with the VM's TPM (one swtpm state for the whole test) on tpm_interface, or None for no TPM, from
-        server (default: the images'). With secure_boot, on OVMF's Secure Boot build, whose variable store lasts from
-        one start to the next (in setup mode at first), and QEMU exits when the guest reboots."""
+    def start(self, tpm_interface="crb", secure_boot=False, server=None, tpm="tpm", disks=()):
+        """Boot with a TPM on tpm_interface, or None for no TPM, from server (default: the images'), with the given
+        disk images. The TPM's state is <workdir>/<tpm>: the VM's own TPM, one for the whole test, unless another one
+        is named. With secure_boot, on OVMF's Secure Boot build, whose variable store lasts from one start to the next
+        (in setup mode at first), and QEMU exits when the guest reboots."""
         self.stop()
         url = run_qemu.boot_url(server or self.server)
         if secure_boot:
@@ -293,11 +311,12 @@ class VM:
             vars_path = os.path.join(self.workdir, "OVMF_VARS.fd")
             run_qemu.write_vars(vars_path, url)
         if tpm_interface:
-            self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, "tpm"))
+            self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, tpm))
         self.ssh_port = free_port()
         cmd = run_qemu.qemu_command(vars_path, serial="stdio", ssh_port=self.ssh_port,
                                     credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
-                                    tpm=self.tpm, tpm_interface=tpm_interface, secure_boot=secure_boot)
+                                    tpm=self.tpm, tpm_interface=tpm_interface, secure_boot=secure_boot,
+                                    disks=disks)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.console = Console(self.proc, os.path.join(self.workdir, "serial.log"))
@@ -393,11 +412,12 @@ class Smoke:
         self.server = run_qemu.serve(self.images)
         self.vm = VM(self.workdir, self.server)
 
-    def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None):
+    def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None, tpm="tpm", disks=(),
+             expect="running"):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
         start = time.monotonic()
-        vm.start(tpm_interface, secure_boot=secure_boot, server=server)
+        vm.start(tpm_interface, secure_boot=secure_boot, server=server, tpm=tpm, disks=disks)
         if banner:
             vm.console.expect(re.escape(banner), 600, allow_boot=True)
         vm.wait_shell()
@@ -406,7 +426,7 @@ class Smoke:
               f"the firmware did not download the EFI binary over HTTP: {run_qemu.ImageHandler.requests}")
         log(f"HTTP booted to a shell in {took:.0f}s")
         state = vm.settle()
-        check(state == "running", f"system is {state!r}, not running")
+        check(state == expect, f"system is {state!r}, not {expect}")
 
     def check_networkd_state(self):
         """systemd-networkd still owns /run/systemd/netif and never failed to write its state files there."""
@@ -462,6 +482,18 @@ class Smoke:
         log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
 
+    def check_var_on_disk(self, partition):
+        """/var is the ext4 of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
+        vm = self.vm
+        var = vm.fstype("/var")
+        check(" - ext4 " in var, f"/var is not an ext4: {var}")
+        check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
+        dm = vm.run("grep -lx cherry-var /sys/class/block/dm-*/dm/name | cut -d / -f 5")
+        check(var.split()[2] == vm.run(f"cat /sys/class/block/{dm}/dev"), f"/var is not on {dm}, cherry-var: {var}")
+        check(vm.run(f"cat /sys/class/block/{dm}/dm/uuid").startswith("CRYPT-LUKS2-"), "cherry-var is not LUKS2")
+        check(vm.run(f"ls /sys/class/block/{dm}/slaves") == partition, f"cherry-var is not on {partition}")
+        vm.run(f"grep -qx PARTNAME=cherry-var /sys/class/block/{partition}/uevent")
+
     def s1_http_boot(self):
         vm = self.vm
         self.boot()
@@ -474,6 +506,7 @@ class Smoke:
         var = vm.fstype("/var")
         check(" - tmpfs " in var, f"/var is not a tmpfs: {var}")
         check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
+        vm.run("journalctl -b -u cherry-var --no-pager | grep -q 'no partition labelled cherry-var and no blank disk'")
         check(vm.run("readlink -f /root") == "/var/roothome", "/root is not on /var")
         check("NAME=Cherry" in vm.run("cat /etc/os-release"), "unexpected os-release")
         check("console=ttyS0" in vm.run("cat /proc/cmdline"), "the UKI command line was not used")
@@ -886,6 +919,54 @@ class Smoke:
         rc, _ = vm.run("ls /sys/firmware/efi/efivars/CherrySecureBootEnrolled-*", check_rc=False)
         check(rc != 0, "the enrollment mark was not cleared")
         check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
+
+    def s12_encrypted_var(self):
+        vm = self.vm
+        # vda has a partition table, so it is in use; vdb is blank. Both are large enough to be claimed.
+        used, blank = os.path.join(self.workdir, "used.img"), os.path.join(self.workdir, "blank.img")
+        run_qemu.make_disk(used, 1 << 30)
+        with open(used, "r+b") as f:
+            f.write(DOS_MBR)
+        run_qemu.make_disk(blank, 4 << 30)
+        used_sha256 = file_sha256(used)
+        disks = [used, blank]
+        journal = "journalctl -b -u cherry-var --no-pager -o cat"
+
+        # The machine makes the blank disk its encrypted /var, sealed by its TPM.
+        self.boot(disks=disks)
+        shown = vm.run(journal)
+        log("cherry-var.service:\n" + shown)
+        check("making the blank disk /dev/vdb " in shown, "cherry-var.service did not set up vdb")
+        self.check_var_on_disk("vdb1")
+        luks = vm.run("cryptsetup luksDump /dev/vdb1")
+        check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M), f"no systemd-tpm2 token on /dev/vdb1:\n{luks}")
+        check(len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1, f"not one key slot, the TPM's:\n{luks}")
+        vm.run("echo cherry-smoke >/var/cherry-smoke")
+        host_key = vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
+
+        # The TPM unlocks it at the next boot, and /var kept its files.
+        self.boot(disks=disks)
+        shown = vm.run(journal)
+        check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown,
+              f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
+        self.check_var_on_disk("vdb1")
+        check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
+        check(vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub") == host_key, "the SSH host key changed")
+
+        # Another machine's TPM cannot: its /var is a tmpfs, and the disk is left as it was.
+        self.boot(tpm="tpm-other", disks=[blank], expect="degraded")
+        check(vm.run("systemctl --failed --no-legend --plain | awk '{ print $1 }'") == "cherry-var.service",
+              "cherry-var.service is not the one failed unit")
+        vm.run(f"{journal} | grep -q 'the TPM cannot unlock /dev/vda1'")
+        check(" - tmpfs " in vm.fstype("/var"), "/var is not a tmpfs on another machine")
+        check(re.search(r"^\s+\d+: systemd-tpm2$", vm.run("cryptsetup luksDump /dev/vda1"), re.M),
+              "the disk changed on another machine")
+        # Erased as the README says, it is blank again: no partition, and nothing wipefs finds.
+        vm.run("wipefs --all --force /dev/vda1 /dev/vda")
+        check(vm.run("wipefs --no-act --noheadings /dev/vda; ls -d /sys/class/block/vda/vda* 2>/dev/null; true") == "",
+              "wipefs did not leave the disk blank")
+        vm.stop()
+        check(file_sha256(used) == used_sha256, "the disk with a partition table was written to")
 
     def run(self):
         names = scenario_names(type(self))

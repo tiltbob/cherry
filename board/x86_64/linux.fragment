@@ -107,6 +107,17 @@ CONFIG_TCG_TPM=y
 CONFIG_TCG_TIS=y
 CONFIG_TCG_CRB=y
 
+# /var on a LUKS2 disk whose key the TPM seals (cherry-var.service): dm-crypt
+# with LUKS2's cipher, aes-xts-plain64, on AES-NI or else the generic AES and
+# XTS. cryptsetup reaches the kernel's ciphers from user space (AF_ALG) for
+# the LUKS2 key slots.
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_CRYPT=y
+CONFIG_CRYPTO_AES=y
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_AES_NI_INTEL=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
+
 # Compressed swap in RAM (cherry-zram-swap.service). Everything, the root
 # filesystem and /var included, is in RAM; under memory pressure, the kernel
 # compresses cold pages, tmpfs ones too, into /dev/zram0 with zstd.

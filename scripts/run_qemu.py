@@ -8,8 +8,11 @@ network), starts a software TPM 2.0 (swtpm), and starts QEMU with the serial
 console on this terminal.
 
 The swtpm state in <state>/tpm is the VM's TPM, and so its identity: it stays
-the same machine across runs until that directory is deleted. Cherry keeps no
-other state yet, so every run otherwise starts from scratch.
+the same machine across runs until that directory is deleted. Without a disk,
+every run otherwise starts from scratch. --disk SIZE attaches <state>/disk.img,
+a sparse virtio disk created blank with that size: Cherry makes it the VM's
+encrypted /var at the first boot, its key sealed by that TPM, and unlocks it
+at the next. Delete both for a new machine.
 
 With --secure-boot, the firmware is OVMF's Secure Boot build (with SMM), and
 its variable store, <state>/OVMF_VARS.secboot.fd, persists too. A new one is
@@ -72,6 +75,24 @@ def find_ovmf(secure_boot=False):
 
 def kvm_usable():
     return os.access("/dev/kvm", os.R_OK | os.W_OK)
+
+
+def parse_size(text):
+    """A size in bytes from e.g. 8G, 512M or 1073741824 (K, M, G and T are powers of 1024)."""
+    units = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+    text = text.upper()
+    if text[-1:] in units:
+        return int(text[:-1]) * units[text[-1]]
+    return int(text)
+
+
+def make_disk(path, size):
+    """A blank (all zeros) sparse raw disk image of `size` bytes at `path`, unless one is there already."""
+    try:
+        with open(path, "xb") as f:
+            f.truncate(size)
+    except FileExistsError:
+        pass
 
 
 class ImageHandler(http.server.SimpleHTTPRequestHandler):
@@ -152,7 +173,7 @@ class Swtpm:
 
 
 def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), memory="3072", cpus="2",
-                 tpm=None, tpm_interface="crb", secure_boot=False):
+                 tpm=None, tpm_interface="crb", secure_boot=False, disks=()):
     """With secure_boot, OVMF's Secure Boot build, whose variables only SMM may write; and QEMU exits when the
     guest reboots, as the firmware would not HTTP boot again."""
     code, _ = find_ovmf(secure_boot)
@@ -184,6 +205,9 @@ def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), m
         cmd += ["-chardev", f"socket,id=chrtpm,path={tpm.socket}",
                 "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
                 "-device", f"tpm-{tpm_interface},tpmdev=tpm0"]
+    # Raw disk images on virtio-blk, vda, vdb, ... in this order. Discards punch holes in sparse images.
+    for path in disks:
+        cmd += ["-drive", f"if=virtio,format=raw,discard=unmap,file={path}"]
     # systemd credentials via SMBIOS type 11 strings.
     for key_value in credentials:
         cmd += ["-smbios", f"type=11,value=io.systemd.credential:{key_value}"]
@@ -202,6 +226,9 @@ def main():
                              "ssh.authorized_keys.root=\"$(cat ~/.ssh/id_ed25519.pub)\" (repeatable)")
     parser.add_argument("--tpm", choices=TPM_INTERFACES + ("none",), default="crb",
                         help="TPM interface, or none to see Cherry stop without a TPM (default: crb)")
+    parser.add_argument("--disk", type=parse_size, metavar="SIZE",
+                        help="attach <state>/disk.img, created blank with this size (e.g. 8G) if it is not there, "
+                             "for Cherry's encrypted /var (default: no disk)")
     parser.add_argument("--secure-boot", action="store_true",
                         help=f"OVMF with Secure Boot, its variables kept in <state>/{SECBOOT_VARS} (new: setup mode)")
     args = parser.parse_args()
@@ -223,9 +250,13 @@ def main():
     else:
         vars_path = os.path.join(args.state, "OVMF_VARS.fd")
         write_vars(vars_path, url)
+    disks = []
+    if args.disk:
+        disks.append(os.path.join(args.state, "disk.img"))
+        make_disk(disks[0], args.disk)
     tpm = Swtpm(os.path.join(args.state, "tpm")) if args.tpm != "none" else None
     cmd = qemu_command(vars_path, ssh_port=args.ssh_port, credentials=args.credential,
-                       tpm=tpm, tpm_interface=args.tpm, secure_boot=args.secure_boot)
+                       tpm=tpm, tpm_interface=args.tpm, secure_boot=args.secure_boot, disks=disks)
     print(f"HTTP boot from {url}", file=sys.stderr)
     if args.secure_boot:
         print("Secure Boot: QEMU exits when the guest reboots; run this again to boot on.", file=sys.stderr)
