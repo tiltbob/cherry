@@ -45,10 +45,10 @@
      adds to db (skipped when the image has no keys)
   12. with disks, the machine makes its blank one its /var: a LUKS2 volume
      whose key the TPM seals, holding ext4, and leaves the disk with a
-     partition table alone; at the next boot the TPM unlocks it and /var kept
-     its files and the SSH host key; another TPM cannot unlock it, so that
-     machine's /var is a tmpfs and the disk stays as it was, until wipefs, as
-     the README says, makes it blank again
+     partition table alone; after a poweroff, which unmounts it cleanly, the
+     TPM unlocks it and /var kept its files and the SSH host key; another TPM
+     cannot unlock it, so that machine's /var is a tmpfs and the disk stays as
+     it was, until wipefs, as the README says, makes it blank again
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -943,12 +943,16 @@ class Smoke:
         check(len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1, f"not one key slot, the TPM's:\n{luks}")
         vm.run("echo cherry-smoke >/var/cherry-smoke")
         host_key = vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
+        # Powered off, not pulled: /var is unmounted and the volume closed on the way down.
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
 
-        # The TPM unlocks it at the next boot, and /var kept its files.
+        # The TPM unlocks it at the next boot, its filesystem was left clean, and /var kept its files.
         self.boot(disks=disks)
         shown = vm.run(journal)
         check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown,
               f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
+        check("recovering journal" not in shown, f"/var was not unmounted cleanly at the poweroff:\n{shown}")
         self.check_var_on_disk("vdb1")
         check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
         check(vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub") == host_key, "the SSH host key changed")
