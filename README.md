@@ -436,7 +436,7 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   claimed, as nothing uses it.
 - **A pool** is a volume group of claimed disks:
   - **data disks** hold its volumes, one after the other, with no redundancy;
-  - **cache disks**, SSDs, cache every volume (dm-cache, a cachevol): each
+  - **cache disks**, SSDs, cache every volume (dm-cache, a cache pool): each
     volume is cached on a share of them as large as its share of the data
     disks, writethrough unless the pool is writeback.
 - **Volumes are thick, linear LVs,** not thin ones: the image has no
