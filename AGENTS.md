@@ -1,0 +1,356 @@
+# Working on Cherry
+
+Cherry is a Buildroot-based Linux distribution: one EFI binary, network-booted
+over UEFI HTTP boot, with just enough OS to run systemd-nspawn containers, and
+an AI agent (OpenCode, behind OpenChamber) on every machine to run them. This
+file is for agents and people changing the repository: how it is put together,
+what a change must keep, how to verify one, and how it gets in. What Cherry
+does is in [README.md](README.md); this file doesn't repeat it.
+
+## Read first
+
+1. **[README.md](README.md)**, all of it. It is the specification as much as
+   the manual: the checks under `tests/` test "what the README says", and a
+   change in behavior is incomplete until the README says the new behavior.
+2. **The roadmap,** issue [#4](https://github.com/tiltbob/cherry/issues/4),
+   and its phase issues: [#6](https://github.com/tiltbob/cherry/issues/6)
+   disks, [#7](https://github.com/tiltbob/cherry/issues/7) containers,
+   [#9](https://github.com/tiltbob/cherry/issues/9) OCI,
+   [#10](https://github.com/tiltbob/cherry/issues/10) hardening. They record
+   the principles (one image for every machine; the TPM is the identity; no
+   central config or enrollment; images never leave the node that built them;
+   every trusted key is baked in at build time; systemd's own mechanisms over
+   daemons of Cherry's own), the decisions, and what was dropped. Don't reopen
+   a decision in a pull request; raise it on the issue.
+3. **[CLAUDE.md](CLAUDE.md):** every commit, pull request, comment and issue
+   names the session that wrote it, with a `Claude-Session:` trailer.
+
+## The repository
+
+A `BR2_EXTERNAL` tree for Buildroot, which is a git submodule in `buildroot/`
+(empty until `make`, or `git submodule update --init --depth 1 buildroot`,
+checks it out).
+
+| Path | What it holds |
+|---|---|
+| `Makefile` | the wrapper around Buildroot: `make`, `make check`, `make qemu`, `make test`, `make sdk`, `make br-<target>`; `make help` lists them |
+| `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
+| `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
+| `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys) |
+| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
+| `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
+| `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`; each one's docstring is its manual |
+| `tests/` | the checks that `make check` runs, one file each, and `smoke.py`, the end-to-end test in QEMU |
+| `.github/workflows/` | `build.yml` (checks, build, smoke test, image releases) and `sdk.yml` (toolchain releases) |
+| `output/`, `dl/`, `.ccache/` | build output, downloads and ccache: ignored, never committed |
+
+Every script, unit, test and workflow starts with a comment that says what it
+is, what runs it and what it needs. Read that before the code.
+
+## What a change must keep
+
+- **One image, identical on every machine.** Nothing machine-specific is
+  built in. A machine takes what it finds: its TPM, its first blank disk,
+  firmware in Secure Boot setup mode. No central config, no enrollment, and
+  no control plane beyond HTTP and DHCP.
+- **The root is read-only, `/etc` included.** Users and groups are created
+  at build time with Buildroot's `<PKG>_USERS`; nothing can add one at boot.
+  Whatever a service writes goes under `/var` (`StateDirectory=`,
+  `LogsDirectory=`); `/root` is a symlink into `/var`; files the image
+  carries under `/var` are factory defaults, copied in at boot.
+- **Everything is in RAM.** The README records the sizes (Memory, OpenCode,
+  OpenChamber); update them when a change moves them, and leave out what a
+  container host doesn't need. `post-image.sh` prints the UKI's size.
+- **The `cherry` user is the agent, and it is unprivileged.** Its only
+  privileges are `package/cherry/50-cherry.rules` (machined's verbs on
+  containers, and starting `systemd-nspawn@`, `cherry-bootstrap@` and
+  `cherry-image@` units) and what those two template units do as root for
+  it, with their instances checked. Never give it a host path to read or
+  write as root, nor a unit that does; `tests/polkit.js` pins the rule to the
+  README's list. Its services listen on loopback only, under system call
+  filters that systemd enforces (it is built with seccomp).
+- **The firewall owns one table,** `inet cherry`; networkd and nspawn keep
+  `io.systemd.nat`. What comes in is the README's list, and nothing more:
+  `tests/firewall.sh` and the smoke test pin it.
+- **A TPM 2.0 is mandatory.** The machine ID and hostname come from its
+  endorsement key, in `/init`, before systemd starts. Without one, boot stops
+  at `cherry-no-tpm.target`.
+- **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
+  committed public half of keys that live on a Nitrokey HSM 2 and in the
+  `release` environment's secret. Never regenerate, edit or "fix" them;
+  `scripts/secureboot.py check` verifies them. Local builds are unsigned, and
+  a machine with Cherry's keys and Secure Boot on refuses them.
+- **Every download is pinned.** `BR2_DOWNLOAD_FORCE_CHECK_HASHES` is on:
+  every `.hash` holds real hashes, each with a comment saying where it came
+  from (upstream's checksum or signature, the npm registry's integrity field,
+  or "locally computed"), and every package names its license and license
+  files.
+- **Prebuilt binaries are the "baseline" x86_64 builds,** without AVX2, so
+  they run on any VM CPU model. `opencode` is a Bun single-file executable
+  that stripping breaks: `BR2_STRIP_EXCLUDE_FILES` lists it and
+  `post-build.sh` checks that it survived.
+- **Kernel options live in `board/x86_64/linux.fragment`,** and
+  `check-kconfig.sh` fails the build when one doesn't survive into the final
+  `.config`. List only symbols this kernel has, each under a comment saying
+  what needs it.
+- **systemd's own mechanisms** (credentials, repart, cryptsetup, machined,
+  `.nspawn` files, template units, presets) rather than daemons or formats of
+  Cherry's own.
+- **QEMU never gets pvpanic** (`scripts/run_qemu.py`): it would exit on a
+  kernel panic instead of resetting.
+
+## Verifying a change
+
+### `make check`: the checks that need no build
+
+Each check is one file under `tests/`, or a command of `scripts/secureboot.py`,
+prints one line when it passes and fails loudly otherwise. `make check` runs
+them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
+
+| Check | What it does | Needs |
+|---|---|---|
+| `package` | Buildroot's `check-package` over `Config.in`, `package/` and `configs/`: the `.mk`, `.hash` and `Config.in` rules, patches, shellcheck on the scripts (`.shellcheckrc` applies) | the submodule, shellcheck, python3-magic |
+| `flake8` | `tests/*.py` and `scripts/*.py`, 120 columns | flake8, as a module of python3 |
+| `yaml` | the workflows parse | python3-yaml |
+| `syntax` | every `#!` script under `package/` and `board/` parses in its shell; `tests/*.sh` pass shellcheck | shellcheck |
+| `units` | `systemd-analyze verify` of every unit, against a root laid out as the image (`tests/units.sh`) | systemd |
+| `scenarios` | the smoke test's scenarios are numbered 1, 2, … and its docstring lists them | |
+| `polkit` | `50-cherry.rules` allows the `cherry` user what the README says, nothing more | node |
+| `bootstrap` | `cherry-bootstrap` checks its instance and calls the tools right, with stand-ins | |
+| `image` | `cherry-image` builds from a recipe, in a busybox root under `unshare -r` | static busybox, user namespaces |
+| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl and busctl | node |
+| `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
+| `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
+| `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
+| `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
+| `var` | `cherry-var.service` claims only a blank disk, and unlocks the right partition | |
+| `version` | the image is named after the nearest `v*` tag | git |
+
+A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
+`image`, `firewall`, `ceremony`); `package`, `flake8` and `syntax` fail
+without theirs. CI installs all of them (`build.yml`, "Install check tools").
+An agent sandbox usually has python3, node, make, git, systemd and openssl,
+and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the submodule: then
+`make -k check` runs ten checks, skips three and fails three for want of
+tools. Get the submodule with `git submodule update --init --depth 1
+buildroot` and install what you can; in the pull request, say which checks
+ran.
+
+### The build and the smoke test
+
+`make` needs a Buildroot host ([README: Building](README.md#building)), about
+20 GB of disk, and one to two hours from cold, or half an hour with `main`'s
+ccache. `make test` boots the result in QEMU with OVMF and swtpm
+([README: Booting](README.md#booting)); its thirteen scenarios take about
+seven minutes under KVM, and hours without (the timeouts scale by
+`CHERRY_TEST_TIMEOUT_MULT`, 4 without KVM).
+Scenarios that need a distribution mirror probe for it first and skip when the
+guest can't reach it.
+
+CI does both on every pull request, with KVM. Most agent sandboxes can't: no
+KVM, often no QEMU, and a cold build takes hours. Don't start a full build
+unless the task needs it; rely on the pull request's `build` check, and say
+so in the description.
+
+With a configured `output/` (after `make`, or `make cherry_x86_64_defconfig`),
+one package at a time:
+
+- `make br-<pkg>-source`, `-extract`, `-build`, `-rebuild`, `-reinstall`
+- `make br-printvars VARS=<NAME>`, a Buildroot variable's value
+- `make savedefconfig` after `make menuconfig`: the defconfig must come back
+  as you meant it, with the new option where Buildroot puts it
+- `buildroot/utils/check-package -b Config.in package/<name>/*`, one package's
+  lint
+
+Reading a CI failure:
+
+- `changes` job, step "Check": the failing check's own message, above
+  `make: *** [Makefile:…: check-<name>] Error 1`.
+- `build` job, step "Build": Buildroot names the package in its last `make`
+  error (`…/build/<pkg>-<version>/.stamp_built`); `check-kconfig` and
+  `post-build` failures come at the end, after the packages.
+- `build` job, step "Smoke test": one `=== N. passed`, `=== N. skipped` or
+  `FAILED: <message>` per scenario. The run's artifact, `cherry-x86_64`, holds
+  the image and `serial.log`, the VM's console across every boot of the run:
+  the first place to look. To run the smoke test against that image without
+  building, put `cherry-x86_64.efi` in a directory and run
+  `python3 tests/smoke.py --images <dir> --state <dir>/test`.
+
+## How a change gets in
+
+- **A branch and a pull request against `main`.** `main` changes only through
+  pull requests; other branches build only through one, or by hand.
+- **CI is the `build` workflow,** a required check:
+  - the `changes` job runs `make check` first, in about a minute;
+  - the `build` job builds the image and runs the smoke test; it is skipped,
+    and counts as passed, when the pull request changes only Markdown, the
+    checks' own test files or the scripts the build never runs (the two lists
+    in `build.yml`, which must agree);
+  - the `release` job runs only for releases, from `main` or a `v*` tag.
+- **Commit messages** say what changed and why. The subject names the area,
+  then the change: `cherry-image: drop the host's /etc/hostname that
+  debootstrap copies`; `smoke: have the kernel re-read the wiped disk's
+  partition table`; `build: read the tag check's output, and keep no token
+  after checkout`. The body gives the symptom with its evidence (the CI run
+  number, the log line, the issue), the cause, what the change does, and
+  which tests cover it. End with the trailers: `Co-Authored-By:` as your
+  harness gives it, then `Claude-Session:` (CLAUDE.md).
+- **Pull request descriptions** have the same shape: why; what changes, by
+  file or unit; the tests; what ran locally and what didn't. Say plainly what
+  you couldn't run ("no KVM here; this PR's `build` check runs the smoke
+  test"). Open it ready for review, with `Claude-Session:` on a line of its
+  own at the end.
+- **Keep a branch current by merging `main` into it,** never by rewriting
+  pushed history: a merge commit, `Merge main: <what it brings>`, whose body
+  says how each conflict was resolved. Pull requests merge with a merge
+  commit too: the title, a blank line, the trailer.
+- **One subject per pull request.** A failure that isn't the pull request's
+  (a scenario fixed on `main` since) comes in by merging `main`, or as that
+  fix's commit cherry-picked and named as such, so it merges as a no-op.
+- **Everything a behavior touches moves in the same change:** the code, the
+  comments of the unit or script, the check under `tests/`, the smoke
+  scenario, the package's `Config.in` help, and the README section. A new
+  test file is also listed in `build.yml`'s two skip lists, the Makefile's
+  `CHECKS` and its comment, and the README's `make check` paragraph.
+- **Releases** are cut by hand, from `main`, by the `build` workflow given a
+  name `v<version>`; SDK releases by the `sdk` workflow, `sdk-YYYY.MM.DD.NNN`.
+  Both are in [README: Building](README.md#building). An agent doesn't cut
+  them.
+
+## Recipes
+
+### A new package
+
+1. `package/<name>/Config.in`, `<name>.mk` and `<name>.hash`, in Buildroot's
+   format: `depends on` for what the toolchain and the image must provide,
+   `select` for its dependencies, each with a comment saying why (`# bash`,
+   `# cherry-image: mv -T`); a help text that says what it is for in Cherry.
+2. One `source` line in `Config.in`, in sorted order.
+3. Enable it in the defconfig: `make menuconfig`, then `make savedefconfig`.
+4. A unit: install it from `<PKG>_INSTALL_INIT_SYSTEMD` with one line per
+   file, in exactly this form, which `tests/units.sh` parses to lay out its
+   root:
+   `$(INSTALL) -D -m 0644 $(<PKG>_PKGDIR)/<unit> $(TARGET_DIR)/usr/lib/systemd/system/<unit>`.
+   Its `ExecStart=` must name the path the package installs its script at.
+   A unit that should not run by default is disabled in
+   `board/x86_64/rootfs-overlay/usr/lib/systemd/system-preset/10-cherry.preset`.
+5. A user or group: `<PKG>_USERS`.
+6. `make check-package check-units`, then a build and `make test`, or CI.
+7. The README: a section, or a line in the one that covers it, and the sizes
+   if they moved.
+
+A prebuilt binary (`opencode`, `bun`) takes upstream's x86_64 "baseline"
+build, with its license fetched as an extra download and hashed. An npm
+package (`openchamber`) lists its dependency tarballs in `npm-modules.list`,
+which `scripts/update_packages.py` generates from npm's lockfile; the build
+needs neither node nor npm.
+
+### A kernel option
+
+Add it to `board/x86_64/linux.fragment` under a comment saying what needs it.
+`check-kconfig.sh` fails the build if the option, or an `is not set` line,
+doesn't survive into `.config`, which happens silently when a dependency is
+unmet: check the symbol's dependencies for this kernel version first.
+
+### A unit or script of the overlay
+
+`board/x86_64/rootfs-overlay/` is copied onto the root as it is. Cherry's
+units are `cherry-*.service` and `cherry-no-tpm.target`; their scripts live
+under `usr/lib/cherry/`. Order against systemd's targets explicitly (the
+firewall before `network-pre.target`, `/var` before `var.mount`), condition on
+the TPM where the README says (`cherry-var.service`:
+`ConditionPathExists=/run/cherry/identity/ek-hash`), and give each unit the
+hardening its neighbors have.
+`make check-units` verifies the result; a change in what a unit does is also a
+change to its script's test under `tests/` and to the README.
+
+### A smoke scenario
+
+- A method `s<N>_<name>` of `Smoke` in `tests/smoke.py`, numbered after the
+  last one with no gap, and its line in the module docstring under the same
+  number (`  N. …`); `make check-scenarios` compares the two.
+- Boot with `self.boot()`: the TPM interface, disks, Secure Boot, another
+  image server, the expected system state. It stops the previous VM; the
+  TPM's state lasts for the whole test, so the VM stays the same machine.
+- Drive the VM with `vm.run()`, which fails on a nonzero exit unless told
+  `check_rc=False`; assert with `check(condition, message)`, whose message
+  names what was found; report with `log()`. Timeouts scale with `MULT`.
+- A scenario that needs a mirror or the internet probes for it first and
+  returns `SKIPPED`, with the reason logged, as `s4_debootstrap` does.
+- Run as the `cherry` user (`AS_CHERRY`), inside `cherry.service`'s sandbox
+  where the agent would (`IN_CHERRY_SERVICE`), whenever the README says that
+  user can do it: the scenario is what proves the privileges are enough and
+  no more.
+- Clean up what the scenario made, so the next one starts as the README
+  describes a machine.
+
+### A new check
+
+A file under `tests/` with a header comment saying what it checks, how it
+stands in for the real thing, and what it needs; it prints one line on
+success and skips, saying so, when its tools are missing. Then a `check-<name>`
+target in the Makefile, in `CHECKS` and its comment; the file in both skip
+lists of `build.yml`; and the README's `make check` paragraph.
+
+### Bumping packages
+
+`scripts/update_packages.py` finds the newest upstream releases and rewrites
+the `.mk` versions and `.hash` files, through Buildroot's own download
+(`--check` only reports; `name=version` picks one). It needs network, git and,
+for OpenChamber, npm. Then review the diff (a `.hash` comment that claims a
+checked signature needs that check again), build, run `make test`, and update
+the README's sizes.
+
+### Changing the toolchain
+
+Edit `configs/cherry_sdk_x86_64_defconfig`, publish an SDK release
+(`sdk-YYYY.MM.DD.NNN`, through the `sdk` workflow), then point the main
+defconfig's `BR2_TOOLCHAIN_EXTERNAL_URL` and
+`patches/toolchain-external-custom/toolchain-external-custom.hash` at it. The
+two defconfigs' toolchain options must stay the same.
+
+## Style
+
+- **Shell:** `#!/bin/sh` and POSIX sh, unless the shebang says bash
+  (`rpmstrap`); `set -eu`; tabs; shellcheck clean (`.shellcheckrc` disables
+  SC2013 alone, with the reason). Scripts the image runs are in
+  `package/<name>/`, installed to `/usr/libexec` or `/usr/bin`, or in the
+  overlay's `usr/lib/cherry/`.
+- **Python:** the standard library only (`smoke.py` and `run_qemu.py` run on
+  a bare host); flake8 at 120 columns; four spaces; a module docstring that
+  is the tool's manual, which `--help` prints.
+- **JavaScript:** runs on Node without dependencies, and on Bun on the image;
+  `"use strict"`; two spaces.
+- **Makefiles and Kconfig:** Buildroot's conventions, as `check-package`
+  enforces them.
+- **Comments say why, and cite:** the upstream file and version a workaround
+  is for, the CI run a failure showed in, the README section a rule comes
+  from. A test's header says what it checks, what stands in for what, and
+  what it needs.
+- **Prose** (README, help texts, commit messages, pull requests): plain and
+  exact. Say what a thing does and why, name the files and commands, give the
+  numbers, and don't hedge or sell. Wrap Markdown at about 80 columns. The
+  README is the model; match its voice in new sections.
+
+## Where things are
+
+| Feature | Code | Checks | README |
+|---|---|---|---|
+| Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
+| Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s3, s11 | Machine identity |
+| `/var` on an encrypted disk | `usr/lib/cherry/var`, `cherry-var.service`, `usr/lib/cherry/repart.d/` | `tests/var.sh`, s13 | Disks |
+| Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
+| Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |
+| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |
+| Containers from the host's tools | `package/debootstrap/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
+| Images from recipes, the agent's tools | `package/cherry/cherry-image`, `cherry-image-setup`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json` | `tests/image.sh`, `tests/mcp.js`, s9 | Building images |
+| The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s8 | As the cherry user, Cherry service |
+| OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s7, s8 | OpenCode, OpenChamber |
+| The image's name and version | `Makefile`, `board/x86_64/post-build.sh` | `tests/version.sh`, `tests/postbuild.sh` | Building |
+| Toolchain and SDK | `configs/cherry_sdk_x86_64_defconfig`, `patches/toolchain-external-custom/`, `sdk.yml` | the `sdk` workflow's own check | Building |
+| QEMU | `scripts/run_qemu.py` | `tests/smoke.py` uses it | Booting |
+
+`s<N>` is a scenario of `tests/smoke.py`; the overlay paths are under
+`board/x86_64/rootfs-overlay/`; the units of `package/cherry/` are installed
+by `cherry.mk`.

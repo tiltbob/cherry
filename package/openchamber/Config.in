@@ -27,7 +27,6 @@ config BR2_PACKAGE_OPENCHAMBER_SERVICE
 	  with /var/lib/openchamber as its home, and
 	  openchamber.service, which runs the server as that user, on
 	  127.0.0.1:3000 only, with the OpenCode it runs on loopback
-	  too. Given the systemd credential openchamber.ui_password,
-	  the browser UI asks for that password.
+	  too, with no password on the browser UI.
 
 endif
