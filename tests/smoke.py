@@ -575,7 +575,10 @@ class Smoke:
         # source names the device, which is the cherry-var mapping.
         source = var.split(" - ")[1].split()[1]
         check(source == "/dev/mapper/cherry-var", f"/var is not on /dev/mapper/cherry-var: {var}")
-        check(vm.run("readlink -f /dev/mapper/cherry-var") == f"/dev/{dm}", f"/dev/mapper/cherry-var is not {dm}")
+        # That node is the device itself, not a link to /dev/dm-N: compare the numbers (stat prints them in hex).
+        major, minor = vm.run("stat -L -c %t:%T /dev/mapper/cherry-var").split(":")
+        check(f"{int(major, 16)}:{int(minor, 16)}" == vm.run(f"cat /sys/class/block/{dm}/dev"),
+              f"/dev/mapper/cherry-var is not {dm}")
         check(vm.run(f"cat /sys/class/block/{dm}/dm/uuid").startswith("CRYPT-LUKS2-"), "cherry-var is not LUKS2")
         check(vm.run(f"ls /sys/class/block/{dm}/slaves") == partition, f"cherry-var is not on {partition}")
         vm.run(f"grep -qx PARTNAME=cherry-var /sys/class/block/{partition}/uevent")
