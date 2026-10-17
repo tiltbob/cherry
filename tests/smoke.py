@@ -30,10 +30,11 @@
      Bun), and only the binary: no opencode user, state directory or service
   8. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
      UI and running the packaged OpenCode as that user too, both on loopback
-     only; once it was online, cherry-connect-url.service
-     showed the pairing link and its QR code on the console, as that user; the
-     user's polkit privileges cover machinectl and cherry-bootstrap@ and
-     nothing else; no openchamber user, state directory or service
+     only and under its system call filter; once it was online,
+     cherry-connect-url.service showed the pairing link and its QR code on the
+     console, as that user; the user's polkit privileges cover machinectl and
+     cherry-bootstrap@ and nothing else; no openchamber user, state directory
+     or service
   9. OpenCode reads its system configuration, /etc/opencode, and through the
      MCP server it names, as the cherry user in cherry.service's sandbox, a
      Debian image is built from a recipe (cherry-image@.service), booted with
@@ -92,11 +93,12 @@ NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 # Run a command as the cherry user, from the root shell on the console.
 AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
 # As cherry.service runs OpenCode, and the MCP servers it starts: the parts of its sandbox that could stop them.
-# Not its SystemCallFilter=: the image's systemd is built without seccomp, so that has no effect on cherry.service,
-# and a transient unit refuses it.
 IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectSystem=strict "
                      "-p ReadWritePaths=/var/lib/cherry -p PrivateTmp=yes -p PrivateDevices=yes "
-                     "-p CapabilityBoundingSet= -p RestrictNamespaces=yes")
+                     "-p CapabilityBoundingSet= -p RestrictNamespaces=yes "
+                     "-p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "
+                     "-p SystemCallFilter=@system-service -p 'SystemCallFilter=~@privileged' "
+                     "-p SystemCallErrorNumber=EPERM")
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
@@ -737,6 +739,9 @@ class Smoke:
         check(vm.run(f"readlink /proc/{pid}/exe") == "/usr/bin/bun", "the OpenChamber server does not run on Bun")
         check(vm.run(f"readlink /proc/{pid}/cwd") == "/var/lib/cherry/work",
               "the OpenChamber server does not work in /var/lib/cherry/work")
+        # Its system call filter applies (systemd built with seccomp): mode 2, a filter.
+        check(vm.run(f"awk '/^Seccomp:/ {{ print $2 }}' /proc/{pid}/status") == "2",
+              "the OpenChamber server runs without cherry.service's system call filter")
         url = "http://127.0.0.1:3000"
         health = vm.run(f"for i in $(seq 120); do wget -q -O - {url}/health && exit 0; sleep 1; done; "
                         "journalctl -b -u cherry --no-pager | tail -n 20; exit 1", timeout=240)

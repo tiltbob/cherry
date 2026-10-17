@@ -28,9 +28,10 @@ Once booted:
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Firewall:** nothing comes in unasked but ping, to the host or to its
   containers (see [Firewall](#firewall)).
-- **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
-  journald, machined/machinectl and systemd-nspawn, plus OpenSSH and
-  OpenChamber running the OpenCode agent, as the `cherry` user (see
+- **Services:** systemd 258, built with seccomp so that units' system call
+  filters apply, with networkd (DHCP), resolved, timesyncd, journald,
+  machined/machinectl and systemd-nspawn, plus OpenSSH and OpenChamber
+  running the OpenCode agent, as the `cherry` user (see
   [Cherry service](#cherry-service)), with tools to build, run and export
   container images (see [Building images](#building-images)).
 
@@ -761,7 +762,9 @@ on a machine with a TPM.
   All of it persists if `/var` is on the machine's disk, and is new at every
   boot otherwise (see [Disks](#disks)). `/var/lib/cherry`
   is the only place the service can write: it sees the rest of the system
-  read-only, with a private `/tmp`, and runs without capabilities.
+  read-only, with a private `/tmp`, and runs without capabilities, under a
+  system call filter (systemd's `@system-service` set, less `@privileged`,
+  whose calls fail with `EPERM`).
 - **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
   OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
   socket. Reach the UI through SSH port forwarding (below), once the firewall
