@@ -4,11 +4,12 @@
   1. the firmware HTTP boots the EFI binary; the root filesystem is the EROFS
      image from the initramfs, read-only; /var is a tmpfs, as the machine has
      no disk; the machine ID comes from the TPM's endorsement key (a swtpm on
-     CRB), and the hostname from the machine ID; networking and sshd work, an
-     SSH key passed as a credential is installed, no unit failed; the firewall
-     was loaded before networkd started, lets IPv6 router advertisements in,
-     and keeps sshd from answering outside the VM until a rule lets it in,
-     which restarting the firewall takes back out
+     CRB), and the hostname from the machine ID; networking and sshd work, with
+     the host key in the TPM, exocarp's, which a client from the host verifies
+     in a key exchange, an SSH key passed as a credential is installed, no unit
+     failed; the firewall was loaded before networkd started, lets IPv6 router
+     advertisements in, and keeps sshd from answering outside the VM until a
+     rule lets it in, which restarting the firewall takes back out
   2. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
@@ -16,8 +17,8 @@
      container leases its address from networkd, pings the host and reaches
      out of the VM, but sshd on the host does not answer it
   3. a second boot starts from scratch again (nothing persists), except the
-     machine's identity: the same TPM, now on TIS, gives the same machine ID
-     and hostname
+     machine's identity: the same TPM, now on TIS, gives the same machine ID,
+     hostname and SSH host key
   4. the cherry user creates a Debian container with cherry-bootstrap@.service
      (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
@@ -44,7 +45,8 @@
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no OpenChamber, no containers
+     console: no network, no sshd or host key agent, no OpenChamber, no
+     containers
   12. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
      the image's keys and the option ROM driver the firmware loaded (QEMU's
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
@@ -53,9 +55,10 @@
   13. with disks, the machine makes its blank one its /var: a LUKS2 volume
      whose key the TPM seals, holding ext4, and leaves the disk with a
      partition table alone; after a poweroff, which unmounts it cleanly, the
-     TPM unlocks it and /var kept its files and the SSH host key; another TPM
-     cannot unlock it, so that machine's /var is a tmpfs and the disk stays as
-     it was, until wipefs, as the README says, makes it blank again
+     TPM unlocks it and /var kept its files, and the SSH host key is the TPM's
+     on either boot; another TPM cannot unlock it, so that machine's /var is a
+     tmpfs, its host key is another, and the disk stays as it was, until
+     wipefs, as the README says, makes it blank again
   14. storage, through OpenCode's storage MCP server as the cherry user, with
      /var on a disk of its own, which is in use: claim refuses a disk not as
      listed, then wipes a blank hard disk, one with a partition table and an
@@ -110,6 +113,11 @@ IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectS
                      "-p SystemCallFilter=@system-service -p 'SystemCallFilter=~@privileged' "
                      "-p SystemCallErrorNumber=EPERM")
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
+# The host key's public key, which exocarp.socket writes at boot: the TPM's primary key for this template of
+# tpm2_createprimary (package/exocarp/src/exocarp.c).
+HOST_KEY_FILE = "/run/exocarp/ssh_host_ecdsa_key.pub"
+HOST_KEY_TEMPLATE = ("-C e -G ecc256:ecdsa-sha256 -g sha256 "
+                     "-a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign|noda'")
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
            + (4096).to_bytes(4, "little") + bytes(48) + b"\x55\xaa")
@@ -478,6 +486,8 @@ class Smoke:
         check(not vm.ssh_answers(), "sshd answers outside the VM, through the firewall")
         vm.run("nft add rule inet cherry input tcp dport 22 accept")
         check(vm.ssh_answers(), "sshd does not answer outside the VM once a rule lets it in")
+        seen = self.host_key_over_ssh()
+        check(seen == self.host_key.split()[:2], f"a client got the host key {seen}, not the TPM's")
         vm.run("systemctl restart cherry-firewall.service")
         check(not vm.ssh_answers(), "restarting the firewall did not take the rule for sshd back out")
 
@@ -506,6 +516,48 @@ class Smoke:
         check(rc != 0, f"an identity error was recorded: {error}")
         log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
+
+    def check_host_key(self):
+        """sshd's host key is the TPM's, held by exocarp (package/exocarp): the public key exocarp.socket wrote is
+        the TPM's primary key for exocarp's template, which creating it again shows; the agent lists it and sshd
+        runs with it; no host key is on disk. Returns the public key's line."""
+        vm = self.vm
+        rc, states = vm.run("systemctl is-active exocarp.socket exocarp.service sshd.service", check_rc=False)
+        check(states.split() == ["active"] * 3, f"exocarp.socket, exocarp.service, sshd.service are:\n{states}")
+        key = vm.run(f"cat {HOST_KEY_FILE}")
+        check(key.startswith("ecdsa-sha2-nistp256 ") and key.endswith(" exocarp"), f"not exocarp's public key: {key}")
+        check(vm.run(f"stat -c %U:%a {HOST_KEY_FILE} /run/exocarp/socket") == "exocarp:600\nroot:600",
+              "the public key is not the exocarp user's alone, or the socket not root's alone")
+        shown = vm.run(f"tpm2_createprimary -T device:/dev/tpmrm0 -Q {HOST_KEY_TEMPLATE} -c /tmp/hk.ctx -f pem "
+                       "-o /tmp/hk.pem && ssh-keygen -i -m PKCS8 -f /tmp/hk.pem; rc=$?; rm -f /tmp/hk.ctx /tmp/hk.pem; "
+                       "exit $rc")
+        check(shown.split()[:2] == key.split()[:2], f"the host key is not the TPM's primary key:\n{key}\n{shown}")
+        listed = vm.run("SSH_AUTH_SOCK=/run/exocarp/socket ssh-add -L")
+        check(listed == key, f"the agent lists another key:\n{listed}")
+        check(vm.run("ls -d /etc/ssh/ssh_host_* /var/lib/sshd 2>/dev/null; true") == "", "host keys on disk")
+        # Nothing about the key from sshd, which first tries the HostKey file as a private key (tests/exocarp.py).
+        rc, complaints = vm.run("journalctl -b -u sshd --no-pager -o cat | grep -iE 'host key|unprotected|permission'",
+                                check_rc=False)
+        check(rc == 1, f"sshd complained about the host key:\n{complaints}")
+        log(f"host key: {key}")
+        return key
+
+    def host_key_over_ssh(self):
+        """[type, key] of the host key a client on the host gets from sshd, through QEMU's port forward, once the
+        firewall lets SSH in: with the key exchange done, so sshd's agent signed with it, the client gets as far as
+        authentication, where it has no key for root."""
+        known_hosts = os.path.join(self.workdir, "known_hosts")
+        if os.path.exists(known_hosts):
+            os.remove(known_hosts)
+        check(shutil.which("ssh"), "ssh not found: apt install openssh-client")
+        cmd = ["ssh", "-p", str(self.vm.ssh_port), "-F", "/dev/null", "-o", f"UserKnownHostsFile={known_hosts}",
+               "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+               "-o", "IdentitiesOnly=yes", "-o", f"ConnectTimeout={30 * MULT:.0f}", "root@127.0.0.1", "true"]
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120 * MULT)
+        check(p.returncode == 255 and "Permission denied" in p.stdout,
+              f"ssh did not get as far as authentication (exit {p.returncode}):\n{p.stdout}")
+        with open(known_hosts) as f:
+            return f.read().split()[1:3]
 
     def check_var_on_disk(self, partition):
         """/var is the ext4 of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
@@ -538,8 +590,7 @@ class Smoke:
         self.machine_id = self.check_identity("crb")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
-        check(vm.run("systemctl is-active sshd.service") == "active", "sshd is not running")
-        vm.run("test -s /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
+        self.host_key = self.check_host_key()
         check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
               "the ssh.authorized_keys.root credential was not applied")
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
@@ -613,6 +664,7 @@ class Smoke:
         rc, _ = vm.run("test -e /var/cherry-smoke", check_rc=False)
         check(rc != 0, "/var survived a reboot")
         check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
+        check(self.check_host_key() == self.host_key, "the SSH host key changed across a reboot")
 
     def s4_debootstrap(self):
         vm = self.vm
@@ -959,8 +1011,8 @@ class Smoke:
         rc, _ = vm.run("test -e /run/cherry/identity/ek-hash", check_rc=False)
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
-        rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "cherry.service machines.target", check_rc=False)
+        rc, states = vm.run("systemctl is-active multi-user.target sshd.service exocarp.socket "
+                            "systemd-networkd.service cherry.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
@@ -1059,7 +1111,7 @@ class Smoke:
         check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M), f"no systemd-tpm2 token on /dev/vdb1:\n{luks}")
         check(len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1, f"not one key slot, the TPM's:\n{luks}")
         vm.run("echo cherry-smoke >/var/cherry-smoke")
-        host_key = vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
+        check(self.check_host_key() == self.host_key, "the SSH host key is not the TPM's with /var on a disk")
         # Powered off, not pulled: /var is unmounted and the volume closed on the way down.
         vm.send("systemctl poweroff\n")
         vm.wait_exit(300)
@@ -1072,7 +1124,7 @@ class Smoke:
         check("recovering journal" not in shown, f"/var was not unmounted cleanly at the poweroff:\n{shown}")
         self.check_var_on_disk("vdb1")
         check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
-        check(vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub") == host_key, "the SSH host key changed")
+        check(self.check_host_key() == self.host_key, "the SSH host key changed")
 
         # Another machine's TPM cannot: its /var is a tmpfs, and the disk is left as it was.
         self.boot(tpm="tpm-other", disks=[blank], expect="degraded")
@@ -1080,6 +1132,7 @@ class Smoke:
               "cherry-var.service is not the one failed unit")
         vm.run(f"{journal} | grep -q 'the TPM cannot unlock /dev/vda1'")
         check(" - tmpfs " in vm.fstype("/var"), "/var is not a tmpfs on another machine")
+        check(self.check_host_key() != self.host_key, "another TPM gave the same SSH host key")
         check(re.search(r"^\s+\d+: systemd-tpm2$", vm.run("cryptsetup luksDump /dev/vda1"), re.M),
               "the disk changed on another machine")
         # Erased as the README says, it is blank again: no partition, and nothing wipefs finds.
