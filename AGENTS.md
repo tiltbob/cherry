@@ -64,9 +64,11 @@ is, what runs it and what it needs. Read that before the code.
   container host doesn't need. `post-image.sh` prints the UKI's size.
 - **The `cherry` user is the agent, and it is unprivileged.** Its only
   privileges are `package/cherry/50-cherry.rules` (machined's verbs on
-  containers, and starting `systemd-nspawn@`, `cherry-bootstrap@` and
-  `cherry-image@` units) and what those two template units do as root for
-  it, with their instances checked. Never give it a host path to read or
+  containers, and starting `systemd-nspawn@`, `cherry-bootstrap@`,
+  `cherry-image@` and `cherry-storage@` units) and what those three template
+  units do as root for it, with their instances checked. `cherry-storage@`
+  erases the disks it claims: only a disk nothing uses, and only as it was
+  listed (its fingerprint). Never give it a host path to read or
   write as root, nor a unit that does; `tests/polkit.js` pins the rule to the
   README's list. Its services listen on loopback only, under system call
   filters that systemd enforces (it is built with seccomp).
@@ -119,12 +121,13 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `polkit` | `50-cherry.rules` allows the `cherry` user what the README says, nothing more | node |
 | `bootstrap` | `cherry-bootstrap` checks its instance and calls the tools right, with stand-ins | |
 | `image` | `cherry-image` builds from a recipe, in a busybox root under `unshare -r` | static busybox, user namespaces |
-| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl and busctl | node |
+| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl and busctl; the `storage` one, against a stand-in systemctl | node |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
 | `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
 | `var` | `cherry-var.service` claims only a blank disk, and unlocks the right partition | |
+| `storage` | `cherry-storage` claims only the disks it may, and drives LVM as it should, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
@@ -132,7 +135,7 @@ A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
 without theirs. CI installs all of them (`build.yml`, "Install check tools").
 An agent sandbox usually has python3, node, make, git, systemd and openssl,
 and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the submodule: then
-`make -k check` runs ten checks, skips three and fails three for want of
+`make -k check` runs eleven checks, skips three and fails three for want of
 tools. Get the submodule with `git submodule update --init --depth 1
 buildroot` and install what you can; in the pull request, say which checks
 ran.
@@ -142,7 +145,7 @@ ran.
 `make` needs a Buildroot host ([README: Building](README.md#building)), about
 20 GB of disk, and one to two hours from cold, or half an hour with `main`'s
 ccache. `make test` boots the result in QEMU with OVMF and swtpm
-([README: Booting](README.md#booting)); its thirteen scenarios take about
+([README: Booting](README.md#booting)); its fourteen scenarios take about
 seven minutes under KVM, and hours without (the timeouts scale by
 `CHERRY_TEST_TIMEOUT_MULT`, 4 without KVM).
 Scenarios that need a distribution mirror probe for it first and skip when the
@@ -345,6 +348,7 @@ two defconfigs' toolchain options must stay the same.
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
 | Images from recipes, the agent's tools | `package/cherry/cherry-image`, `cherry-image-setup`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json` | `tests/image.sh`, `tests/mcp.js`, s9 | Building images |
+| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s14 | Storage |
 | The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s8 | As the cherry user, Cherry service |
 | OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s7, s8 | OpenCode, OpenChamber |
 | The image's name and version | `Makefile`, `board/x86_64/post-build.sh` | `tests/version.sh`, `tests/postbuild.sh` | Building |

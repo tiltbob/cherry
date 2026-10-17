@@ -676,8 +676,10 @@ or `clean` and `set-limit` on all the images at once. `machinectl start` is a
 start of `systemd-nspawn@<name>.service`, so it may start, stop and restart
 those units, and no other but `cherry-bootstrap@.service`, which creates a
 container: it runs the bootstrap tool below as root, with the README's command
-for it, and `cherry-image@.service`, which builds images (see
-[Building images](#building-images)). The instance of `cherry-bootstrap@` is
+for it, `cherry-image@.service`, which builds images (see
+[Building images](#building-images)), and `cherry-storage@.service`, which
+claims disks and makes pools and volumes of them (see [Storage](#storage)).
+The instance of `cherry-bootstrap@` is
 the distribution, its release and the machine's name, separated by colons:
 
 ```sh
