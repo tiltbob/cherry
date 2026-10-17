@@ -375,6 +375,7 @@ PACKAGES = {
     # The same source as Buildroot's shadow package.
     "shadow-useradd": (buildroot_package("shadow"),),
     "toml11": (github_tags("ToruNiina/toml11", r"v\d+\.\d+\.\d+"),),
+    "ubuntu-keyring": (debian_snapshot("ubuntu-keyring", "ubuntu-keyring_{version}_all.deb", binary="ubuntu-keyring"),),
 }
 
 

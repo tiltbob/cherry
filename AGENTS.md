@@ -62,7 +62,11 @@ is, what runs it and what it needs. Read that before the code.
 - **Everything is in RAM.** The README records the sizes (Memory, OpenCode,
   OpenChamber); update them when a change moves them, and leave out what a
   container host doesn't need. `post-image.sh` prints the UKI's size.
-- **The `cherry` user is the agent, and it is unprivileged.** Its only
+- **The `cherry` user is the agent, and it is unprivileged.** The agent's
+  tools are the MCP servers' verbs alone: `/etc/opencode/opencode.json`
+  denies OpenCode's own (a shell, files, the web), and the `machines` verbs
+  take a name and a profile a person wrote, or a name and an image to clone,
+  never a package list, a file or a script. The user's only
   privileges are `package/cherry/50-cherry.rules` (machined's verbs on
   containers, and starting `systemd-nspawn@`, `cherry-bootstrap@`,
   `cherry-image@` and `cherry-storage@` units) and what those three template
@@ -122,7 +126,8 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `polkit` | `50-cherry.rules` allows the `cherry` user what the README says, nothing more | node |
 | `bootstrap` | `cherry-bootstrap` checks its instance and calls the tools right, with stand-ins | |
 | `image` | `cherry-image` builds from a recipe, in a busybox root under `unshare -r` | static busybox, user namespaces |
-| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl and busctl; the `storage` one, against a stand-in systemctl | node |
+| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl, busctl and ip; the `storage` one, against a stand-in systemctl | node |
+| `extension` | OpenChamber's Environments extension: its manifest, as the host inspects a package, and its service, against the `machines` stand-ins | node |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
@@ -133,14 +138,14 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
-`image`, `firewall`, `ceremony`, `exocarp`); `package`, `flake8` and `syntax`
-fail without theirs. CI installs all of them (`build.yml`, "Install check
-tools"). An agent sandbox usually has python3, node, make, git, systemd and
-openssl, and lacks shellcheck, busybox, `ip`, softhsm2, opensc, swtpm,
-libtss2-dev and the submodule: then `make -k check` runs eleven checks, skips
-four and fails three for want of tools. Get the submodule with
-`git submodule update --init --depth 1 buildroot` and install what you can;
-in the pull request, say which checks ran.
+`extension`, `image`, `firewall`, `ceremony`, `exocarp`); `package`, `flake8`
+and `syntax` fail without theirs. CI installs all of them (`build.yml`,
+"Install check tools"). An agent sandbox usually has python3, node, make,
+git, systemd and openssl, and lacks shellcheck, busybox, `ip`, softhsm2,
+opensc, swtpm, libtss2-dev and the submodule: then `make -k check` runs
+twelve checks, skips four and fails three for want of tools. Get the
+submodule with `git submodule update --init --depth 1 buildroot` and install
+what you can; in the pull request, say which checks ran.
 
 ### The build and the smoke test
 
@@ -326,7 +331,9 @@ two defconfigs' toolchain options must stay the same.
   a bare host); flake8 at 120 columns; four spaces; a module docstring that
   is the tool's manual, which `--help` prints.
 - **JavaScript:** runs on Node without dependencies, and on Bun on the image;
-  `"use strict"`; two spaces.
+  `"use strict"`; two spaces. The extension's panel runs in OpenChamber's
+  sandboxed iframe as classic scripts, with no bundler: it speaks the SDK's
+  postMessage protocol itself (`openchamber-extension/panel/main.js`).
 - **Makefiles and Kconfig:** Buildroot's conventions, as `check-package`
   enforces them.
 - **Comments say why, and cite:** the upstream file and version a workaround
@@ -349,8 +356,8 @@ two defconfigs' toolchain options must stay the same.
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |
-| Containers from the host's tools | `package/debootstrap/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
-| Images from recipes, the agent's tools | `package/cherry/cherry-image`, `cherry-image-setup`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json` | `tests/image.sh`, `tests/mcp.js`, s9 | Building images |
+| Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
+| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s9 | Building images, Environments |
 | Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s14 | Storage |
 | The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s8 | As the cherry user, Cherry service |
 | OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s7, s8 | OpenCode, OpenChamber |

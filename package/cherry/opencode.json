@@ -11,5 +11,12 @@
         "command": ["/usr/bin/bun", "/usr/lib/cherry/storage-mcp.js"]
       }
     }
+  },
+  "permission": {
+    "*": "deny",
+    "machines_*": "allow",
+    "storage_*": "allow",
+    "skill": "allow",
+    "question": "allow"
   }
 }

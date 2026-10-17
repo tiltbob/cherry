@@ -73,15 +73,15 @@ test:
 # all (`make -k check` goes on after a failure), `make check-<name>` one. CI
 # runs them before the build (.github/workflows/build.yml). They need
 # shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
-# openssl; node for the polkit rules and the MCP server (skipped without it);
-# nft, ip, busybox and user namespaces for the firewall and cherry-image,
-# softhsm2 and opensc for the key ceremony, and a C compiler, tpm2-tss's
-# development files, swtpm and OpenSSH's tools for the host key agent (each
-# skipped without them).
+# openssl; node for the polkit rules, the MCP servers and the extension
+# (skipped without it); nft, ip, busybox and user namespaces for the firewall
+# and cherry-image, softhsm2 and opensc for the key ceremony, and a C
+# compiler, tpm2-tss's development files, swtpm and OpenSSH's tools for the
+# host key agent (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
-	check-postbuild check-firewall check-secureboot check-ceremony check-var \
-	check-storage check-exocarp check-version
+	check-extension check-postbuild check-firewall check-secureboot \
+	check-ceremony check-var check-storage check-exocarp check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -126,12 +126,20 @@ check-bootstrap:
 check-image:
 	tests/image.sh
 
-# OpenCode's MCP servers: machines writes the recipe and drives cherry-image@
-# and machinectl as it should, storage starts the cherry-storage@ instances it
-# should and shows what they found (skipped without node).
+# OpenCode's MCP servers: machines copies the profile into the recipe and
+# drives cherry-image@ and machinectl as it should, storage starts the
+# cherry-storage@ instances it should and shows what they found (skipped
+# without node).
 check-mcp:
 	@if command -v node >/dev/null 2>&1; then node tests/mcp.js && node tests/storage-mcp.js; \
 	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-*-mcp.js unchecked)"; fi
+
+# OpenChamber's Environments extension: its manifest is what the host
+# installs, and its service answers the routes the panel calls (skipped
+# without node).
+check-extension:
+	@if command -v node >/dev/null 2>&1; then node tests/extension.js; \
+	else echo "extension: SKIPPED, node is not installed (package/cherry/openchamber-extension unchecked)"; fi
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:
