@@ -63,7 +63,7 @@ jobs:
     outputs:
       build: ${{ steps.diff.outputs.build }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -158,7 +158,7 @@ jobs:
           df -h /
           sudo sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; docker image prune --all --force' >/dev/null 2>&1 </dev/null &
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # git describe provides the image version
 
@@ -189,7 +189,7 @@ jobs:
 
       - name: Restore download cache
         id: dl
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
@@ -197,7 +197,7 @@ jobs:
 
       - name: Restore ccache
         id: ccache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
           key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
@@ -228,7 +228,7 @@ jobs:
 
       - name: Save download cache
         if: github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
@@ -244,7 +244,7 @@ jobs:
       # Also after a failed or cancelled build, so the next run resumes warm.
       - name: Save ccache
         if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
           key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
@@ -272,7 +272,7 @@ jobs:
           cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
           cp output/cherry_x86_64/test/serial.log artifacts/ || true
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: cherry-x86_64
@@ -293,11 +293,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: board/x86_64/secureboot
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cherry-x86_64
           path: artifacts
