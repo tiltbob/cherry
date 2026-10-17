@@ -33,8 +33,9 @@ Once booted:
   containers (see [Firewall](#firewall)).
 - **Services:** systemd 258, built with seccomp so that units' system call
   filters apply, with networkd (DHCP), resolved, timesyncd, journald,
-  machined/machinectl and systemd-nspawn, plus OpenSSH and OpenChamber
-  running the OpenCode agent, as the `cherry` user (see
+  machined/machinectl and systemd-nspawn, plus OpenSSH, whose host key is
+  the TPM's and never leaves it (see [SSH host key](#ssh-host-key)), and
+  OpenChamber running the OpenCode agent, as the `cherry` user (see
   [Cherry service](#cherry-service)), with tools to build and run container
   images, which never leave the machine (see
   [Building images](#building-images)).
@@ -119,14 +120,17 @@ stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
-key ceremony on a SoftHSM token, `cherry-var.service`'s choice of disk, and
-the image's version from the release tags. `make -k check` runs on after a
-failure; `make check-<name>` runs one. They need shellcheck, flake8,
-python3-magic, python3-yaml, systemd's `systemd-analyze`, openssl and
-util-linux's flock; node for the polkit rules, the MCP servers and the
-extension; busybox and user namespaces for `cherry-image` and the firewall,
-and nft and ip for the firewall; softhsm2 and opensc for the ceremony (each
-skipped without them).
+key ceremony on a SoftHSM token, `cherry-var.service`'s choice of disk, the
+`exocarp` host key agent against a swtpm, and the image's version from the
+release tags. `make -k check` runs on after a failure; `make check-<name>`
+runs one. They need shellcheck, flake8, python3-magic, python3-yaml,
+systemd's `systemd-analyze`, openssl and util-linux's flock; node for the
+polkit rules, the MCP servers and the extension; busybox and user namespaces
+for `cherry-image` and the firewall, and nft and ip for the firewall;
+softhsm2 and opensc for the ceremony; a C compiler, tpm2-tss's development
+files, swtpm and OpenSSH's `ssh-add` and `ssh-keygen` for the host key
+agent, with tpm2-tools and `sshd` for the whole of its check (each skipped
+without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -165,8 +169,8 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
 - writes an OVMF variable store with an HTTP boot entry for
   `http://10.0.2.2:<port>/cherry-x86_64.efi`
 - starts a software TPM, swtpm, whose state in
-  `output/cherry_x86_64/qemu/tpm` makes the VM the same machine on every run.
-  Delete it for a new machine.
+  `output/cherry_x86_64/qemu/tpm` makes the VM the same machine, with the
+  same SSH host key, on every run. Delete it for a new machine.
 - boots QEMU with the serial console on your terminal
 
 `make qemu` and `make test` need:
@@ -175,7 +179,7 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
   `pip install virt-firmware` (set `VIRT_FW_VARS` to use a specific copy)
 - for the smoke test's Secure Boot scenario, `sbsign` (`apt install
-  sbsigntool`) and openssl
+  sbsigntool`) and openssl, and for its host key check, `ssh`
 
 The TPM is attached through CRB, as firmware TPMs are. Pass `--tpm tis` to
 `scripts/run_qemu.py` for the TIS interface of discrete TPMs, or `--tpm none`
@@ -222,8 +226,8 @@ ssh -p 2222 root@localhost
      and reboots, before anything else starts (see [Secure Boot](#secure-boot))
 
 Because `/etc` is read-only:
-- SSH host keys are generated under `/var/lib/sshd`, so they change on every
-  boot unless `/var` is on a disk
+- sshd has no host key file: its host key is the TPM's, which signs for it
+  through `exocarp` (see [SSH host key](#ssh-host-key))
 - `/root` is a symlink into `/var`
 
 ## Memory
@@ -301,13 +305,56 @@ instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
 Networking, sshd and containers never start.
 
+## SSH host key
+
+sshd's host key is a key of the machine's TPM, which signs with it: the
+private key never leaves the TPM, and nothing stores it. It is the TPM's
+primary ECC NIST P-256 signing key in the endorsement hierarchy, for a fixed
+template, which the TPM derives from its endorsement seed, as it does the EK
+(see [Machine identity](#machine-identity)). So every boot gets the same key,
+`tpm2_clear` keeps it, and a machine without a disk keeps its host key across
+boots too. `tpm2_createprimary` shows the same key for the template:
+
+```sh
+tpm2_createprimary -C e -G ecc256:ecdsa-sha256 -g sha256 \
+  -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign|noda' \
+  -c /tmp/key.ctx -f pem -o /tmp/key.pem && ssh-keygen -i -m PKCS8 -f /tmp/key.pem
+```
+
+`exocarp`, Cherry's own ([`package/exocarp`](package/exocarp/src/exocarp.c)),
+is sshd's host key agent, in the ssh-agent protocol (sshd's `HostKeyAgent`):
+
+- **At boot,** `exocarp.socket` has the TPM create the key and writes its
+  public key to `/run/exocarp/ssh_host_ecdsa_key.pub`, in OpenSSH's format,
+  before sshd starts: sshd's `HostKey` is that file, and it has no other
+  (`sshd.service.d/10-exocarp.conf`).
+- **Per connection,** sshd asks the agent, on `/run/exocarp/socket`, to sign
+  the key exchange, and the TPM signs. `exocarp.service` starts at sshd's
+  first request and serves every connection in turn, as the `exocarp` user,
+  with the TPM (`/dev/tpmrm0`, the kernel's resource manager) as all it may
+  reach. A signature takes a discrete TPM about a hundred milliseconds, a
+  firmware TPM less; connections queue on it.
+- **Who can sign:** the socket is root's alone, as whoever connects can have
+  the host key sign anything. So can whoever can use the TPM, root or the
+  `tss` group; the key isn't bound to the boot state (see
+  [Security notes](#security-notes)).
+- **ECDSA NIST P-256 only:** TPMs have no Ed25519, and an RSA primary key
+  takes a discrete TPM seconds to derive. Every current client accepts
+  `ecdsa-sha2-nistp256`; one configured for Ed25519 and RSA alone needs it
+  added to its `HostKeyAlgorithms`. Clients that trusted a Cherry machine
+  before it had this, when sshd generated keys under `/var/lib/sshd`, see a
+  changed key: `ssh-keygen -R <host>` drops the old ones.
+
+`ssh-add -L`, as root with `SSH_AUTH_SOCK=/run/exocarp/socket`, lists the
+key. Without a usable TPM, neither the agent nor sshd starts.
+
 ## Disks
 
 A machine keeps `/var` on an encrypted disk of its own, and with it the
-containers, the SSH host keys and the `cherry` user's state. That disk is a
-GPT partition labelled `cherry-var`: a LUKS2 volume holding ext4, whose key
-the machine's TPM seals. The machine unlocks it at boot without a
-passphrase; elsewhere, it is unreadable.
+containers and the `cherry` user's state. That disk is a GPT partition
+labelled `cherry-var`: a LUKS2 volume holding ext4, whose key the machine's
+TPM seals. The machine unlocks it at boot without a passphrase; elsewhere, it
+is unreadable.
 
 `cherry-var.service` ([`/usr/lib/cherry/var`](board/x86_64/rootfs-overlay/usr/lib/cherry/var))
 sets it up before systemd mounts `/var`, and only on a machine with a usable
@@ -1035,7 +1082,10 @@ This is a development image:
 - The TPM unseals the key of the encrypted `/var` disk, and of the claimed
   disks, whatever the machine boots: it isn't bound to the boot state (PCRs)
   yet. Each is unreadable away from its machine, but anything that boots the
-  machine (an HTTP boot server, a USB stick) can unlock it.
+  machine (an HTTP boot server, a USB stick) can unlock it. The SSH host key
+  is the TPM's likewise: it never leaves the TPM, but whatever boots the
+  machine, and root or the `tss` group on it, can sign with it (see
+  [SSH host key](#ssh-host-key)).
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
   signed. With Secure Boot on, the kernel still loads unsigned modules: its
