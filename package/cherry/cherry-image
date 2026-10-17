@@ -163,15 +163,16 @@ check_image() {
 }
 
 # export_as <file> <command...>: the command's output, written by the cherry
-# user to $exports/.<file>.part, then renamed to <file> if the command
-# succeeded. The command runs where set -e is off: it appends to $tmp/failed
-# when it fails.
+# user to $exports/.<file>.part, sparse, then renamed to <file> if the command
+# succeeded. dd reads the pipe it is given, which that user could not open
+# again as /dev/stdin: the pipe is root's. The command runs where set -e is
+# off: it appends to $tmp/failed when it fails.
 export_as() {
 	file=$1
 	shift
 	echo "exporting $dir to $exports/$file"
 	# shellcheck disable=SC2016 # the cherry user's sh expands them
-	"$@" | as_cherry sh -c 'umask 022 && mkdir -p "$1" && cp --sparse=always /dev/stdin "$1/.$2.part"' \
+	"$@" | as_cherry sh -c 'umask 022 && mkdir -p "$1" && dd of="$1/.$2.part" bs=64K iflag=fullblock conv=sparse status=none' \
 		sh "$exports" "$file" || echo failed >>"$tmp/failed"
 	if [ -e "$tmp/failed" ]; then
 		as_cherry rm -f "$exports/.$file.part"

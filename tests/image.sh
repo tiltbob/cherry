@@ -5,10 +5,10 @@
 # The bootstrap tools make a small busybox root with a stand-in package
 # manager that logs its arguments; systemd-nspawn chroots into it in a user
 # namespace (unshare -r), with the host's /dev and the image's hostname, and
-# runs the setup there, as root; systemd-run runs
-# its command as the calling user; machinectl reports the machines in
-# $RUNNING as running; systemd-repart checks its definitions and writes a
-# stand-in raw image. The directories are all under a temporary one
+# runs the setup there, as root; systemd-run runs its command as the calling
+# user, with a pipe on stdin that it cannot open again, as the cherry user
+# cannot open root's; machinectl reports the machines in $RUNNING as running;
+# systemd-repart checks its definitions and writes a stand-in raw image. The directories are all under a temporary one
 # (CHERRY_MACHINES_DIR and the others). Needs a static busybox, unshare and
 # user namespaces, GNU tar and xz.
 set -eu
@@ -72,6 +72,9 @@ args="$*"
 while [ "$1" != -- ]; do shift; done
 shift
 echo "systemd-run ${args%% -- *} -- $*" >>"$CALLS"
+# A pipe on stdin can be read but not opened again (/dev/stdin), as the
+# cherry user cannot open root's.
+if [ -p /dev/stdin ]; then chmod 0 /proc/self/fd/0; fi
 exec "$@"
 EOF
 cat >"$tmp/bin/systemd-nspawn" <<'EOF'
