@@ -1001,8 +1001,9 @@ class Smoke:
               [(e["name"], e["image"], e["running"]) for e in listed["environments"]] == [(env, image, True)] and
               "smoke" in [p["id"] for p in listed["profiles"]],
               f"the service lists otherwise than the MCP server:\n{listed}")
+        # (A loop's status is its last iteration's: the last process is not the service.)
         pids = vm.run("for p in /proc/[0-9]*; do grep -qF cherry-environments/service/main.js $p/cmdline 2>/dev/null "
-                      "&& echo ${p#/proc/}; done")
+                      "&& echo ${p#/proc/}; done; true")
         check(pids, "the Environments service is not running")
         for pid in pids.split():
             check(vm.run(f"stat -c %U /proc/{pid}") == "cherry" and
