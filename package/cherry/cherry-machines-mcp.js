@@ -1,14 +1,14 @@
 // cherry-machines-mcp: an MCP server (stdio) that gives the OpenCode agent
 // tools for systemd-nspawn container images, as the cherry user, through what
-// that user may do (50-cherry.rules): cherry-image@.service builds and exports
-// images, machinectl starts, stops, enters and removes them, and machined's
-// bus API lists them. /etc/opencode/opencode.json starts it with Bun.
+// that user may do (50-cherry.rules): cherry-image@.service builds images,
+// machinectl starts, stops, enters and removes them, and machined's bus API
+// lists them. /etc/opencode/opencode.json starts it with Bun. Images stay on
+// this machine: there is no tool to export one.
 //
-// Tools: list, build, export, start, stop, exec, remove. build writes the
-// image's recipe, as `cherry-image build` reads it, to
-// /var/lib/cherry/images/<name>/ first. $CHERRY_IMAGES_DIR,
-// $CHERRY_EXPORTS_DIR and $CHERRY_IMAGE_LOGS replace /var/lib/cherry/images,
-// /var/lib/cherry/exports and /var/log/cherry-image (tests/mcp.js).
+// Tools: list, build, start, stop, exec, remove. build writes the image's
+// recipe, as `cherry-image build` reads it, to /var/lib/cherry/images/<name>/
+// first. $CHERRY_IMAGES_DIR and $CHERRY_IMAGE_LOGS replace
+// /var/lib/cherry/images and /var/log/cherry-image (tests/mcp.js).
 "use strict";
 const { spawn } = require("child_process");
 const crypto = require("crypto");
@@ -17,15 +17,14 @@ const path = require("path");
 const readline = require("readline");
 
 const RECIPES = process.env.CHERRY_IMAGES_DIR || "/var/lib/cherry/images";
-const EXPORTS = process.env.CHERRY_EXPORTS_DIR || "/var/lib/cherry/exports";
 const LOGS = process.env.CHERRY_IMAGE_LOGS || "/var/log/cherry-image";
 const PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const INSTRUCTIONS = `These tools build and run systemd-nspawn container images on this Cherry machine, \
 which machinectl manages in /var/lib/machines: build an image from a distribution, packages, files and a \
-setup script, start it, run commands in it, stop it, and export it as a tarball or a raw disk image for \
-other machines. Load the machine-images skill before building one.`;
+setup script, start it, run commands in it, and stop it. Images stay on this machine. Load the machine-images \
+skill before building one.`;
 
-// Names cherry-image builds and exports: valid machine names and hostnames.
+// Names cherry-image builds: valid machine names and hostnames.
 const IMAGE_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,47}$/;
 // Any image machinectl knows, as cherry-bootstrap@ names them.
 const MACHINE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
@@ -208,18 +207,12 @@ function writeRecipe(name, args) {
   return dir;
 }
 
-async function sha256(file) {
-  const hash = crypto.createHash("sha256");
-  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
-  return hash.digest("hex");
-}
-
 const NAME = { type: "string", description: "The image's name, as machinectl shows it" };
 const TOOLS = [
   {
     name: "list",
-    description: "List the container images in /var/lib/machines, the containers running, the image recipes in " +
-      `${RECIPES}, and the exports in ${EXPORTS}.`,
+    description: "List the container images in /var/lib/machines, the containers running, and the image recipes " +
+      `in ${RECIPES}.`,
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     async call() {
@@ -233,7 +226,6 @@ const TOOLS = [
           .filter((i) => i.name !== ".host"),
         running: machines.filter(([, cls]) => cls !== "host").map(([name, cls, service]) => ({ name, class: cls, service })),
         recipes: list(RECIPES),
-        exports: list(EXPORTS).map((f) => ({ path: path.join(EXPORTS, f), bytes: fs.statSync(path.join(EXPORTS, f)).size })),
       }, null, 2);
     },
   },
@@ -281,27 +273,6 @@ const TOOLS = [
         await machinectl(["remove", name], signal);
       }
       return `Built ${name} from the recipe in ${dir}. Log, ${await cherryImage(`build:${name}`, signal)}`;
-    },
-  },
-  {
-    name: "export",
-    description: `Export an image, which must not be running, as a file in ${EXPORTS}: tar, an xz-compressed tarball ` +
-      "that importctl or machinectl import-tar (or pull-tar, from a URL) turns into an image elsewhere; or raw, a GPT " +
-      "disk image with an ext4 root partition for systemd-nspawn --image= or /var/lib/machines/<name>.raw.",
-    inputSchema: {
-      type: "object",
-      properties: { name: NAME, format: { type: "string", enum: ["tar", "raw"] } },
-      required: ["name", "format"],
-      additionalProperties: false,
-    },
-    async call(args, signal) {
-      const name = imageName(args);
-      check(args.format === "tar" || args.format === "raw", `bad format ${JSON.stringify(args.format)}: tar or raw`);
-      await cherryImage(`${args.format}:${name}`, signal);
-      const file = path.join(EXPORTS, args.format === "tar" ? `${name}.tar.xz` : `${name}.raw`);
-      const use = args.format === "tar" ? `importctl import-tar ${path.basename(file)} ${name}` :
-        `systemd-nspawn --image=${path.basename(file)} --boot`;
-      return JSON.stringify({ path: file, bytes: fs.statSync(file).size, sha256: await sha256(file), use }, null, 2);
     },
   },
   {
@@ -380,7 +351,7 @@ const TOOLS = [
   {
     name: "remove",
     description: "Remove an image, which must not be running, with its nspawn settings (machinectl remove). Its " +
-      "recipe and exports stay.",
+      "recipe stays.",
     inputSchema: { type: "object", properties: { name: NAME }, required: ["name"], additionalProperties: false },
     annotations: { destructiveHint: true },
     async call(args, signal) {

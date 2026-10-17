@@ -32,8 +32,9 @@ Once booted:
   filters apply, with networkd (DHCP), resolved, timesyncd, journald,
   machined/machinectl and systemd-nspawn, plus OpenSSH and OpenChamber
   running the OpenCode agent, as the `cherry` user (see
-  [Cherry service](#cherry-service)), with tools to build, run and export
-  container images (see [Building images](#building-images)).
+  [Cherry service](#cherry-service)), with tools to build and run container
+  images, which never leave the machine (see
+  [Building images](#building-images)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -108,8 +109,8 @@ against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
-busybox root, and its exports, the OpenCode MCP server's tools against
-stand-ins for systemctl, machinectl and busctl, `post-build.sh`'s check of
+busybox root, the OpenCode MCP server's tools against stand-ins for
+systemctl, machinectl and busctl, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
@@ -550,7 +551,7 @@ or `clean` and `set-limit` on all the images at once. `machinectl start` is a
 start of `systemd-nspawn@<name>.service`, so it may start, stop and restart
 those units, and no other but `cherry-bootstrap@.service`, which creates a
 container: it runs the bootstrap tool below as root, with the README's command
-for it, and `cherry-image@.service`, which builds and exports images (see
+for it, and `cherry-image@.service`, which builds images (see
 [Building images](#building-images)). The instance of `cherry-bootstrap@` is
 the distribution, its release and the machine's name, separated by colons:
 
@@ -658,10 +659,11 @@ machinectl shell arch
 
 ### Building images
 
-`cherry-image@.service` builds container images to measure, from a recipe,
-and exports them for other machines: for the `cherry` user, and so for the
-OpenCode agent, which gets tools for it (below). Root can use it too. A recipe
-is a directory, `/var/lib/cherry/images/<name>/`:
+`cherry-image@.service` builds container images to measure, from a recipe:
+for the `cherry` user, and so for the OpenCode agent, which gets tools for it
+(below). Root can use it too. Images never leave the machine that built them:
+nothing writes one out for another machine, which builds its own from a
+recipe. A recipe is a directory, `/var/lib/cherry/images/<name>/`:
 
 | File | Holds |
 |---|---|
@@ -676,8 +678,6 @@ The instance is a verb and the image's name, separated by a colon:
 systemctl start cherry-image@build:web   # /var/lib/machines/web, from /var/lib/cherry/images/web
 machinectl start web
 machinectl poweroff web
-systemctl start cherry-image@tar:web     # /var/lib/cherry/exports/web.tar.xz
-systemctl start cherry-image@raw:web     # /var/lib/cherry/exports/web.raw
 ```
 
 - **build:** bootstraps the distribution with `cherry-bootstrap` under
@@ -691,23 +691,15 @@ systemctl start cherry-image@raw:web     # /var/lib/cherry/exports/web.raw
   clears the package caches. Then the image takes its name. A failed build
   leaves nothing behind, and a build never replaces an image: `machinectl
   remove` it first. Image names are letters, digits and `-`, up to 48.
-- **tar:** the image, which must not be running, as an xz-compressed tarball,
-  which `importctl import-tar`, or `pull-tar` from a web server, turns into an
-  image on another machine (`machinectl import-tar` on systemd older than 256).
-- **raw:** the image as a GPT disk image, made by `systemd-repart`, whose root
-  partition holds it as ext4, with a quarter more room and 256 MiB to write:
-  for `systemd-nspawn --image=`, or as `/var/lib/machines/<name>.raw`.
-- **As the cherry user:** the recipe is read, and the exports written, by
-  processes that run as `cherry` (`systemd-run`), so the builder, which runs
-  as root, reads and replaces only what that user could. Settings come only
-  from a regular file of the recipe, and for images in `/var/lib/machines`
-  systemd-nspawn ignores the privileged ones anyway (`Bind=`, `Capability=`,
-  the network settings, `Port=`).
+- **As the cherry user:** the recipe is read by processes that run as
+  `cherry` (`systemd-run`), so the builder, which runs as root, reads only
+  what that user could. Settings come only from a regular file of the recipe,
+  and for images in `/var/lib/machines` systemd-nspawn ignores the privileged
+  ones anyway (`Bind=`, `Capability=`, the network settings, `Port=`).
 - **Log:** `/var/log/cherry-image/<instance>.log`, readable by the `cherry`
   user. A failed unit is not kept among the failed units, which that user
   could not reset: the log is the record.
-- **Space:** images and exports live on `/var`, the machine's disk or RAM. A
-  raw export takes up to three times the image's size while it is written.
+- **Space:** images live on `/var`, the machine's disk or RAM.
 
 **OpenCode's tools:** `/etc/opencode`, OpenCode's system configuration
 directory, gives the agent an MCP server, `machines`
@@ -717,11 +709,10 @@ the `cherry` user with its privileges alone:
 
 | Tool | Does |
 |---|---|
-| `list` | the images, running containers, recipes and exports |
+| `list` | the images, running containers and recipes |
 | `build` | writes the recipe from its arguments (distribution, release, packages, files, `postinst`, settings) and runs `cherry-image@build:<name>`, after `machinectl remove` with `replace` |
 | `start`, `stop` | `machinectl start`, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
 | `exec` | a command in a running container, as root, through `machinectl shell`: its output and exit status |
-| `export` | `cherry-image@tar:<name>` or `@raw:<name>`: the file, its size and SHA-256 |
 | `remove` | `machinectl remove` |
 
 The system configuration outranks the user's, so the server stays configured;

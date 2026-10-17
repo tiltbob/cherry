@@ -119,8 +119,8 @@ check-polkit:
 check-bootstrap:
 	tests/bootstrap.sh
 
-# cherry-image builds an image from its recipe, and exports it, as it should
-# (skipped without a static busybox and user namespaces).
+# cherry-image builds an image from its recipe as it should (skipped without a
+# static busybox and user namespaces).
 check-image:
 	tests/image.sh
 

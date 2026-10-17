@@ -1,16 +1,15 @@
 #!/bin/sh
 # package/cherry/cherry-image builds, from the cherry user's recipe, the image
-# the README says, and exports it: run with the real cherry-bootstrap and
+# the README says, and nothing else: run with the real cherry-bootstrap and
 # cherry-image-setup, and stand-ins on PATH for what needs root or a machine.
 # The bootstrap tools make a small busybox root with a stand-in package
 # manager that logs its arguments; systemd-nspawn chroots into it in a user
 # namespace (unshare -r), with the host's /dev and the image's hostname, and
 # runs the setup there, as root; systemd-run runs its command as the calling
 # user, with a pipe on stdin that it cannot open again, as the cherry user
-# cannot open root's; machinectl reports the machines in $RUNNING as running;
-# systemd-repart checks its definitions and writes a stand-in raw image. The directories are all under a temporary one
+# cannot open root's. The directories are all under a temporary one
 # (CHERRY_MACHINES_DIR and the others). Needs a static busybox, unshare and
-# user namespaces, GNU tar and xz.
+# user namespaces, and GNU tar.
 set -eu
 cd "$(dirname "$0")/.."
 src=$PWD/package/cherry
@@ -20,19 +19,17 @@ skip() {
 	exit 0
 }
 busybox=$(command -v busybox) || skip "busybox is not installed"
-for tool in unshare tar xz; do
+for tool in unshare tar; do
 	command -v "$tool" >/dev/null || skip "$tool is not installed"
 done
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir "$tmp/bin" "$tmp/libexec" "$tmp/logs" "$tmp/machines" "$tmp/recipes" "$tmp/exports"
+mkdir "$tmp/bin" "$tmp/libexec" "$tmp/logs" "$tmp/machines" "$tmp/recipes"
 ln -s "$src/cherry-bootstrap" "$src/cherry-image-setup" "$tmp/libexec/"
-REAL_TAR=$(command -v tar) REAL_XZ=$(command -v xz)
-export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" BUSYBOX="$busybox" REAL_TAR REAL_XZ LOGS_DIRECTORY="$tmp/logs" \
-	CHERRY_MACHINES_DIR="$tmp/machines" CHERRY_IMAGES_DIR="$tmp/recipes" CHERRY_EXPORTS_DIR="$tmp/exports" \
-	CHERRY_LIBEXEC="$tmp/libexec" RUNNING=
-machines=$CHERRY_MACHINES_DIR recipes=$CHERRY_IMAGES_DIR exports=$CHERRY_EXPORTS_DIR
+export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" BUSYBOX="$busybox" LOGS_DIRECTORY="$tmp/logs" \
+	CHERRY_MACHINES_DIR="$tmp/machines" CHERRY_IMAGES_DIR="$tmp/recipes" CHERRY_LIBEXEC="$tmp/libexec"
+machines=$CHERRY_MACHINES_DIR recipes=$CHERRY_IMAGES_DIR
 
 # mktree <dir> <package manager>: a merged-/usr root with busybox, a machine
 # ID, the host's /etc/hostname (as debootstrap copies it), and a package
@@ -91,35 +88,6 @@ done
 exec unshare -r -m -u "$BUSYBOX" sh -c 'hostname "$2" && mount --rbind /dev "$0/dev" && exec chroot "$0" "$1"' \
 	"$dir" "$command" "$hostname"
 EOF
-cat >"$tmp/bin/machinectl" <<'EOF'
-#!/bin/sh
-echo "machinectl $*" >>"$CALLS"
-[ "$1" = show ] || exit 1
-case " $RUNNING " in *" $2 "*) exit 0 ;; esac
-exit 1
-EOF
-cat >"$tmp/bin/systemd-repart" <<'EOF'
-#!/bin/sh
-echo "systemd-repart $*" >>"$CALLS"
-for arg; do
-	case $arg in --definitions=*) defs=${arg#*=} ;; esac
-	image=$arg
-done
-printf '[Partition]\nType=root\nFormat=ext4\nCopyFiles=/\n' | cmp -s - "$defs/root.conf" ||
-	{ echo "systemd-repart: unexpected definitions" >&2; exit 1; }
-printf 'raw image\n' >"$image"
-EOF
-# tar and xz, failing when FAKE_FAIL names them (tar when creating).
-cat >"$tmp/bin/tar" <<'EOF'
-#!/bin/sh
-case " $* " in *" -cf "*) [ "${FAKE_FAIL:-}" != tar ] || { echo "tar: failing as told" >&2; exit 2; } ;; esac
-exec "$REAL_TAR" "$@"
-EOF
-cat >"$tmp/bin/xz" <<'EOF'
-#!/bin/sh
-[ "${FAKE_FAIL:-}" != xz ] || { echo "xz: failing as told" >&2; exit 1; }
-exec "$REAL_XZ" "$@"
-EOF
 chmod +x "$tmp/bin"/*
 
 mktree "$tmp/probe" apt-get
@@ -149,7 +117,7 @@ refused() {
 	*) die "'$1': expected '$2', got: $out" ;;
 	esac
 	[ ! -s "$CALLS" ] || die "'$1': a tool was called: $(cat "$CALLS")"
-	[ -z "$(ls -A "$machines")$(ls -A "$exports")" ] || die "'$1': something was created: $(ls -A "$machines" "$exports")"
+	[ -z "$(ls -A "$machines")" ] || die "'$1': something was created: $(ls -A "$machines")"
 }
 # failed <instance> <message>: exits non-zero with the message in its log, and leaves no image.
 failed() {
@@ -169,12 +137,15 @@ recipe() {
 
 refused web "bad instance 'web'"
 refused nope:web "bad instance 'nope:web'"
+# Images never leave the machine: no exports.
+refused tar:web "bad instance 'tar:web'"
+refused raw:web "bad instance 'raw:web'"
 refused build: "bad image name ''"
 refused build:.web "bad image name '.web'"
 refused build:-web "bad image name '-web'"
 refused build:my_web "bad image name 'my_web'"
-refused tar:a.b "bad image name 'a.b'"
-refused "raw:$(printf '%049d' 0)" "longer than 48 characters"
+refused build:a.b "bad image name 'a.b'"
+refused "build:$(printf '%049d' 0)" "longer than 48 characters"
 
 failed build:none "no recipe: $recipes/none/image.conf"
 recipe odd Distribution=debian Release=trixie Colour=red
@@ -269,36 +240,5 @@ run build:arch
 grep -qxF "pacstrap -K -c $machines/.cherry-image/arch base" "$CALLS" || die "pacstrap was not called right: $(cat "$CALLS")"
 [ "$(cat "$machines/arch/var/log/pm")" = "pacman -Syu --noconfirm --needed nginx" ] ||
 	die "pacman was called: $(cat "$machines/arch/var/log/pm")"
-
-# Exports: a tarball of the image, written by the cherry user.
-run tar:web
-[ "$rc" -eq 0 ] || die "tar:web failed: $(cat "$log")"
-xz -t "$exports/web.tar.xz" || die "web.tar.xz is not xz"
-"$REAL_TAR" -tJf "$exports/web.tar.xz" | grep -qxF ./usr/bin/hello || die "web.tar.xz lacks ./usr/bin/hello"
-grep -q "^systemd-run .*-p User=cherry -- sh -c .* sh $exports web.tar.xz$" "$CALLS" ||
-	die "web.tar.xz was not written as the cherry user: $(cat "$CALLS")"
-grep -qF "exported $exports/web.tar.xz" "$log" || die "the log lacks the exported line: $(cat "$log")"
-[ "$(ls -A "$exports")" = web.tar.xz ] || die "the export left more behind: $(ls -A "$exports")"
-
-for tool in tar xz; do
-	cp "$exports/web.tar.xz" "$tmp/before"
-	export FAKE_FAIL=$tool
-	failed tar:web "exporting web failed"
-	unset FAKE_FAIL
-	cmp -s "$tmp/before" "$exports/web.tar.xz" || die "a failing $tool replaced the export"
-	[ "$(ls -A "$exports")" = web.tar.xz ] || die "a failing $tool left a partial export: $(ls -A "$exports")"
-done
-
-RUNNING="other web"
-failed tar:web "web is running: stop it first (machinectl poweroff web)"
-RUNNING=
-failed tar:none "no image directory $machines/none"
-
-run raw:web
-[ "$rc" -eq 0 ] || die "raw:web failed: $(cat "$log")"
-grep -q "^systemd-repart --empty=create --size=[0-9]*M --seed=random --offline=yes --dry-run=no --no-pager --definitions=[^ ]* --root=$img $machines/.cherry-image/web.raw$" "$CALLS" ||
-	die "systemd-repart was not called right: $(cat "$CALLS")"
-[ "$(cat "$exports/web.raw")" = "raw image" ] || die "web.raw is not the image systemd-repart wrote"
-[ ! -e "$machines/.cherry-image/web.raw" ] || die "raw:web left its image in the staging directory"
 
 echo "image: $n cases passed"
