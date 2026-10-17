@@ -34,6 +34,7 @@ on:
       - 'tests/syntax.sh'
       - 'tests/units.sh'
       - 'tests/var.sh'
+      - 'tests/version.sh'
       - '.shellcheckrc'
   pull_request:
   merge_group:
@@ -90,7 +91,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -119,10 +120,10 @@ jobs:
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
       # flake8 and python3-magic; the others python3-yaml, systemd-analyze and
-      # openssl; the key ceremony's a SoftHSM token, OpenSC and OpenSSL's
-      # pkcs11-provider; the polkit test node, which the runner has; the
-      # firewall test nft, busybox and user namespaces, which Ubuntu's
-      # AppArmor keeps from unprivileged users unless told otherwise.
+      # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit
+      # test node, which the runner has; the firewall test nft, busybox and
+      # user namespaces, which Ubuntu's AppArmor keeps from unprivileged users
+      # unless told otherwise.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -131,7 +132,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static softhsm2 opensc pkcs11-provider
+            nftables busybox-static softhsm2 opensc
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
@@ -241,9 +242,10 @@ jobs:
           key: ${{ steps.keys.outputs.dl }}
 
       # A release names the image after itself (os-release, the boot banner):
-      # Buildroot versions the tree with a plain `git describe`, which sees
-      # only annotated tags, and GitHub makes a release's tag (on the website,
-      # or in the release job below) a lightweight one.
+      # a published one after its tag, a release by hand after its input, as
+      # its tag doesn't exist until the release job creates it. Other builds
+      # get their name from the Makefile's `git describe`, after the nearest
+      # release tag.
       - name: Build
         env:
           RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}

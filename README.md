@@ -59,6 +59,13 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make check` | fast checks that need no build (below) |
 | `make clean` | remove `output/cherry_x86_64` |
 
+The image takes its version (`/usr/lib/os-release`, the boot banner) from
+`git describe` and the nearest release tag: `v0.0.1` for a build of the
+release's commit, `v0.0.1-3-g<commit>` for one three commits later, with
+`-dirty` while tracked files have uncommitted changes, and `g<commit>` in a
+clone without the tags. `make BR2_EXTERNAL_CHERRY_VERSION=<name>` names it
+otherwise.
+
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`. Buildroot never deletes a download:
 `python3 scripts/prune_dl.py` lists what in `dl/` no configuration needs any
@@ -102,12 +109,12 @@ argument checks and tool calls, `post-build.sh`'s check of `opencode`, the
 firewall's rules, in network namespaces standing in for a host, its LAN and
 its containers, the Secure Boot keys in `board/x86_64/secureboot/` and what
 `cherry-secureboot` enrolls from them, the key ceremony on a SoftHSM token,
-and `cherry-var.service`'s choice of disk. `make -k check` runs on after a
+`cherry-var.service`'s choice of disk, and the image's version from the
+release tags. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
 python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
 the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
-softhsm2, opensc and pkcs11-provider for the ceremony (each skipped without
-them).
+softhsm2 and opensc for the ceremony (each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -407,7 +414,8 @@ enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
 **The ceremony,** once, on a computer with the Nitrokey plugged in:
 
 ```sh
-apt install opensc pkcs11-provider    # pkcs11-tool, sc-hsm-tool, OpenSSL's PKCS#11 provider
+# pkcs11-tool and sc-hsm-tool (dnf and pacman too)
+apt install opensc
 # Initialize the Nitrokey, which erases it, with a key share to back up its
 # keys with. It ships with the SO PIN 3537363231383830 and the PIN 648219:
 # change both afterwards, as Nitrokey's documentation shows.
@@ -416,23 +424,42 @@ sc-hsm-tool --create-dkek-share dkek-share.pbe
 sc-hsm-tool --import-dkek-share dkek-share.pbe
 # PK, KEK and the CA on the Nitrokey, their files in board/x86_64/secureboot/:
 scripts/secureboot.py init
+# The release environment, which will hold the release key, open to main and
+# the v* tags only (or Settings, Environments, in the repository on GitHub):
+gh api -X PUT repos/tiltbob/cherry/environments/release \
+  -F 'deployment_branch_policy[protected_branches]=false' \
+  -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name='v*' -f type=tag
 # The release key: its certificate in board/x86_64/secureboot/, the key itself
-# straight into the release environment's secret.
-scripts/secureboot.py issue --key-out - | gh secret set SECUREBOOT_KEY --env release
+# into the release environment's secret, through memory only, and only when
+# issue succeeded (in a pipe, gh would store nothing as the secret).
+key=$(scripts/secureboot.py issue --key-out -) && printf '%s\n' "$key" | gh secret set SECUREBOOT_KEY --env release
 git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
 ```
 
+- Everything on the Nitrokey goes through OpenSC's `pkcs11-tool`: it
+  generates the keys and makes their signatures, and the script puts the
+  certificates and signed updates together around them.
 - The PIN is asked once per command (or taken from `CHERRY_HSM_PIN`). With
   other tokens plugged in, pass `--token` with the Nitrokey's label as
   `pkcs11-tool -L` shows it; `--module` names another PKCS#11 module than
   OpenSC's.
+- `init` never reuses a key on the token. Should it stop partway, it removes
+  the files it wrote and prints the `pkcs11-tool` commands that delete what
+  it generated: run them, then `init` again.
+- A wrong PIN counts: the Nitrokey blocks it after three in a row
+  (`sc-hsm-tool` shows the tries left), and the SO PIN unblocks it. Both
+  commands check the PIN first, and `issue` that the token holds the CA's
+  key, before anything else.
 - **Back up** the three keys, wrapped by the key share: `sc-hsm-tool
   --wrap-key <file> --key-reference <n>` for each (`pkcs15-tool -D` lists
   their references). A second Nitrokey initialized with the same share takes
   them with `--unwrap-key`. Keep the share and the wrapped keys offline, and
   apart.
-- **The release environment** (Settings, Environments): limit its deployment
-  branches and tags to `main` and `v*`, so that only release runs see the key.
+- **The release environment** must exist before `gh secret set` can store
+  the key in it. Open to `main` and the `v*` tags only, it keeps the key
+  from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
 

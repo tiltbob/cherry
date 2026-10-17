@@ -1,11 +1,16 @@
 #!/bin/sh
 # scripts/secureboot.py makes Cherry's root of trust on a token and checks it:
 # run against a SoftHSM token standing in for the Nitrokey, all in a temporary
-# directory. init writes the six files and check verifies them; init refuses
-# to run again, over the files or over the keys on the token; issue writes
-# release.crt and its key, to a new file or stdout; check catches a tampered
-# file, a swapped one and a release certificate the CA didn't issue. Skipped
-# without softhsm2-util, pkcs11-tool (OpenSC) and OpenSSL's pkcs11-provider.
+# directory. An init stopped after a key (by a pkcs11-tool that cannot sign)
+# removes its files and prints the commands that delete what it generated, and
+# the next init refuses to run over that until they ran. issue refuses a wrong
+# PIN, a token without the CA's key, and one whose key of that name is not the
+# CA's, before it hands out a key. init writes the six files and check verifies
+# them; init refuses to run again, over the files or over the keys on the
+# token; issue writes release.crt and its key, to a new file or stdout, also
+# with its scratch space on another file system (/dev/shm, when it is one);
+# check catches a tampered file, a swapped one and a release certificate the
+# CA didn't issue. Skipped without softhsm2-util and pkcs11-tool (OpenSC).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -13,14 +18,19 @@ module=
 for m in /usr/lib/softhsm/libsofthsm2.so /usr/lib64/pkcs11/libsofthsm2.so /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so; do
 	[ -e "$m" ] && module=$m && break
 done
-if [ -z "$module" ] || ! command -v softhsm2-util >/dev/null || ! command -v pkcs11-tool >/dev/null ||
-	! PKCS11_PROVIDER_MODULE=$module openssl list -providers -provider pkcs11 >/dev/null 2>&1; then
-	echo "ceremony: SKIPPED, needs softhsm2, opensc and pkcs11-provider (scripts/secureboot.py init and issue unchecked)"
+if [ -z "$module" ] || ! command -v softhsm2-util >/dev/null || ! command -v pkcs11-tool >/dev/null; then
+	echo "ceremony: SKIPPED, needs softhsm2 and opensc (scripts/secureboot.py init and issue unchecked)"
 	exit 0
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# A temporary directory on another file system than the keys, as a tmpfs /tmp is
+# (Arch's): /dev/shm, when it is one, for the scratch space of an issue.
+other=
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$tmp")" ]; then
+	other=$(mktemp -d /dev/shm/ceremony.XXXXXX)
+fi
+trap 'rm -rf "$tmp" ${other:+"$other"}' EXIT
 mkdir "$tmp/tokens"
 printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$tmp/tokens" >"$tmp/softhsm2.conf"
 export SOFTHSM2_CONF="$tmp/softhsm2.conf" CHERRY_HSM_PIN=123456
@@ -54,9 +64,46 @@ refused() {
 	esac
 }
 
+# privkeys: the labels of the token's private keys, on one line.
+privkeys() {
+	pkcs11-tool --module "$module" --token-label "Cherry Secure Boot" --login --pin "$CHERRY_HSM_PIN" \
+		--list-objects --type privkey 2>/dev/null | sed -n 's/^ *label: *//p' | tr '\n' ' '
+}
+# run_deletes: run the pkcs11-tool commands init printed, with the PIN.
+run_deletes() {
+	printf '%s\n' "$out" | grep '^  pkcs11-tool ' >"$tmp/deletes" || die "no delete commands in: $out"
+	while read -r cmd; do
+		eval "$cmd --pin \"\$CHERRY_HSM_PIN\"" >/dev/null 2>&1 || die "failed: $cmd"
+	done <"$tmp/deletes"
+}
+
 sb check
 ok
 case $out in *"no keys"*) ;; *) die "an empty directory: $out" ;; esac
+
+# A pkcs11-tool that cannot sign, as with the token pulled out: init stops after
+# the PK's key, before its certificate.
+mkdir "$tmp/bin"
+cat >"$tmp/bin/pkcs11-tool" <<EOF
+#!/bin/sh
+for arg; do
+	[ "\$arg" != --sign ] || { echo "error: failing as told" >&2; exit 1; }
+done
+exec $(command -v pkcs11-tool) "\$@"
+EOF
+chmod +x "$tmp/bin/pkcs11-tool"
+PATH=$tmp/bin:$PATH token init
+refused "init stopped, and removed the files it wrote"
+[ "$(privkeys)" = "cherry-pk " ] || die "init stopped with keys: $(privkeys)"
+[ -z "$(ls -A "$keys")" ] || die "a stopped init left files: $(ls -A "$keys")"
+case $out in
+*"--delete-object --type privkey --id $(printf cherry-pk | od -An -tx1 | tr -d ' \n') --label cherry-pk"*) ;;
+*) die "no command deletes cherry-pk: $out" ;;
+esac
+token init
+refused "the token holds cherry-pk already"
+run_deletes
+[ -z "$(privkeys)" ] || die "the printed commands left keys: $(privkeys)"
 
 token init
 ok
@@ -79,7 +126,23 @@ refused "the token holds cherry-pk, cherry-kek, cherry-db already"
 [ ! -e "$keys/PK.auth" ] || die "init over the token's keys wrote files"
 mv "$tmp/first" "$keys"
 
-token issue --key-out "$tmp/release.key"
+# issue checks the PIN, that the token holds the CA's key, and that this is the key
+# of db.crt, before the key goes out or release.crt is written.
+CHERRY_HSM_PIN=999999 token issue --key-out "$tmp/release.key"
+refused "cannot log in to the token"
+refused "CKR_PIN_INCORRECT"
+softhsm2-util --init-token --free --label Other --so-pin 12345678 --pin "$CHERRY_HSM_PIN" >/dev/null
+sb issue --module "$module" --token Other --key-out "$tmp/release.key"
+refused "the token holds no cherry-db"
+pkcs11-tool --module "$module" --token-label Other --login --pin "$CHERRY_HSM_PIN" --keypairgen \
+	--key-type rsa:2048 --label cherry-db --id "$(printf cherry-db | od -An -tx1 | tr -d ' \n')" >/dev/null 2>&1
+sb issue --module "$module" --token Other --key-out "$tmp/release.key"
+refused "the token's cherry-db is not the key of"
+if [ -e "$tmp/release.key" ] || [ -e "$keys/release.crt" ]; then
+	die "a refused issue wrote the key or release.crt"
+fi
+
+TMPDIR=${other:-${TMPDIR:-/tmp}} token issue --key-out "$tmp/release.key"
 ok
 [ "$(stat -c %a "$tmp/release.key")" = 600 ] || die "the release key is not private to its owner"
 [ "$(openssl pkey -in "$tmp/release.key" -pubout)" = "$(openssl x509 -in "$keys/release.crt" -noout -pubkey)" ] ||
@@ -92,7 +155,8 @@ case $out in *"issued release.crt"*) ;; *) die "check did not cover release.crt:
 token issue --key-out "$tmp/release.key"
 refused "exists"
 set +e
-python3 scripts/secureboot.py --dir "$keys" issue --module "$module" --key-out - >"$tmp/stdout.key" 2>/dev/null
+python3 scripts/secureboot.py --dir "$keys" issue --module "$module" --token "Cherry Secure Boot" --key-out - \
+	>"$tmp/stdout.key" 2>/dev/null
 rc=$?
 set -e
 ok
