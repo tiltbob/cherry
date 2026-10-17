@@ -434,19 +434,24 @@ def cmd_issue(args):
         run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key])
         public_key = run(["openssl", "pkey", "-in", key, "-pubout", "-outform", "DER"])
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        cert = pem(certificate(token, label, f"Cherry Release Signing {stamp}", public_key, pem_to_der(ca),
+                               args.days, release_extensions()))
         crt = os.path.join(tmp, "release.crt")
-        write(crt, pem(certificate(token, label, f"Cherry Release Signing {stamp}", public_key, pem_to_der(ca),
-                                   args.days, release_extensions())))
+        write(crt, cert)
         # Before the key goes anywhere: the key of db.crt signed the certificate.
         if subprocess.run(["openssl", "verify", "-CAfile", ca, crt], capture_output=True).returncode != 0:
             fail(f"the token's {label} is not the key of {ca}: is it the token init used? --token picks one")
+        # release.crt, then the key: renamed into place within its own directory, as the temporary one may be on
+        # another file system (a tmpfs /tmp).
+        release = os.path.join(args.dir, "release.crt")
+        write(release + ".new", cert)
+        os.replace(release + ".new", release)
         with open(key, "rb") as f:
             key_pem = f.read()
         if args.key_out == "-":
             sys.stdout.buffer.write(key_pem)
         else:
             write(args.key_out, key_pem, 0o600, new=True)
-        os.replace(crt, os.path.join(args.dir, "release.crt"))
     check(args.dir, require_release=True)
     where = "stdout" if args.key_out == "-" else args.key_out
     note(f"wrote release.crt to {args.dir} and its private key to {where}.\n"

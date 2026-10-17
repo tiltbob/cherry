@@ -7,9 +7,10 @@
 # PIN, a token without the CA's key, and one whose key of that name is not the
 # CA's, before it hands out a key. init writes the six files and check verifies
 # them; init refuses to run again, over the files or over the keys on the
-# token; issue writes release.crt and its key, to a new file or stdout; check
-# catches a tampered file, a swapped one and a release certificate the CA
-# didn't issue. Skipped without softhsm2-util and pkcs11-tool (OpenSC).
+# token; issue writes release.crt and its key, to a new file or stdout, also
+# with its scratch space on another file system (/dev/shm, when it is one);
+# check catches a tampered file, a swapped one and a release certificate the
+# CA didn't issue. Skipped without softhsm2-util and pkcs11-tool (OpenSC).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -23,7 +24,13 @@ if [ -z "$module" ] || ! command -v softhsm2-util >/dev/null || ! command -v pkc
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# A temporary directory on another file system than the keys, as a tmpfs /tmp is
+# (Arch's): /dev/shm, when it is one, for the scratch space of an issue.
+other=
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$tmp")" ]; then
+	other=$(mktemp -d /dev/shm/ceremony.XXXXXX)
+fi
+trap 'rm -rf "$tmp" ${other:+"$other"}' EXIT
 mkdir "$tmp/tokens"
 printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$tmp/tokens" >"$tmp/softhsm2.conf"
 export SOFTHSM2_CONF="$tmp/softhsm2.conf" CHERRY_HSM_PIN=123456
@@ -135,7 +142,7 @@ if [ -e "$tmp/release.key" ] || [ -e "$keys/release.crt" ]; then
 	die "a refused issue wrote the key or release.crt"
 fi
 
-token issue --key-out "$tmp/release.key"
+TMPDIR=${other:-${TMPDIR:-/tmp}} token issue --key-out "$tmp/release.key"
 ok
 [ "$(stat -c %a "$tmp/release.key")" = 600 ] || die "the release key is not private to its owner"
 [ "$(openssl pkey -in "$tmp/release.key" -pubout)" = "$(openssl x509 -in "$keys/release.crt" -noout -pubkey)" ] ||
