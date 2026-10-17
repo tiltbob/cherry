@@ -966,10 +966,10 @@ class Smoke:
         check(re.search(r"^\s+\d+: systemd-tpm2$", vm.run("cryptsetup luksDump /dev/vda1"), re.M),
               "the disk changed on another machine")
         # Erased as the README says, it is blank again: no partition, and nothing wipefs finds.
-        vm.run("wipefs --all --force /dev/vda1 /dev/vda")
-        # With --force, wipefs leaves re-reading the partition table to udevd, which races the
-        # check below: wait for udevd, then have the kernel re-read it.
-        vm.run("udevadm settle; partprobe /dev/vda")
+        # With --force, wipefs opens the disk without O_EXCL, so it never has the kernel re-read the partition table;
+        # udev does when it sees the disk closed, unless its probe of the wiped vda1 still holds it. The README's
+        # reboot re-reads it; here, wait for udev, then re-read it.
+        vm.run("wipefs --all --force /dev/vda1 /dev/vda && udevadm settle && partprobe /dev/vda")
         check(vm.run("wipefs --no-act --noheadings /dev/vda; ls -d /sys/class/block/vda/vda* 2>/dev/null; true") == "",
               "wipefs did not leave the disk blank")
         vm.stop()
