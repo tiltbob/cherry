@@ -1,0 +1,910 @@
+#!/bin/sh
+# cherry-storage@.service: Cherry's storage, as root, for the cherry user, which
+# may start this unit (50-cherry.rules) but touches no disk itself. The
+# instance is a verb and its arguments, separated by colons:
+#
+#   list                          what the disks, pools and volumes are, as
+#                                 JSON in $LOGS_DIRECTORY/list.json
+#   claim:<disk>:<fingerprint>    wipe a disk and make it Cherry's
+#   release:<disk>:<fingerprint>  wipe a claimed disk that is in no pool
+#   create:<pool>:<disk>...       a pool of claimed disks
+#   extend:<pool>:<disk>...       more claimed disks for a pool's data
+#   cache:<pool>:<mode>:<disk>... the pool's SSD cache: these claimed disks
+#                                 (none: no cache), writethrough or writeback
+#   reduce:<pool>:<disk>          a disk out of a pool, its data moved off
+#   destroy:<pool>                a pool without volumes; its disks stay
+#                                 claimed
+#   volume-create:<pool>:<volume>:<size>
+#   volume-resize:<pool>:<volume>:<size>
+#   volume-remove:<pool>:<volume>
+#
+# cherry-storage.service runs `cherry-storage boot start` at boot and `boot
+# stop` at shutdown: it unlocks the claimed disks, activates the pools and
+# mounts their volumes, and the other way round.
+#
+# A claimed disk holds one GPT partition labelled cherry-pv (systemd-repart,
+# with /usr/lib/cherry/storage/repart.d): a LUKS2 volume whose key the TPM
+# seals, as /var's, unlocked as /dev/mapper/cherry-pv-<its partition>, holding
+# an LVM physical volume. LVM sees no other device
+# (/etc/lvm/lvm.conf). A pool is a volume group of claimed disks: data disks,
+# tagged data, and cache disks, tagged cache, the pool tagged writeback if its
+# cache is. A volume is a linear logical volume on the pool's data disks,
+# holding ext4 whose root the cherry user owns, mounted on
+# /var/lib/cherry/volumes/<pool>/<volume>; on a pool with cache disks, it is
+# cached on them (dm-cache, a cachevol), in proportion to its share of the
+# data disks. Sizes are a number and M, G or T (MiB, GiB, TiB), or all: the
+# pool's free space.
+#
+# A disk is claimed only if it is listed with that fingerprint, so as it was
+# listed: the same disk with the same partition table. Never a disk in use
+# (mounted, swap, held by device mapper or md, this machine's /var), nor a
+# removable, read-only, USB or smaller than 1 GiB one.
+#
+# The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
+# read. One operation at a time: another one fails at once. $CHERRY_SYSFS,
+# $CHERRY_UDEV, $CHERRY_MOUNTINFO, $CHERRY_SWAPS, $CHERRY_IDENTITY,
+# $CHERRY_VOLUMES, $CHERRY_STORAGE_USER and $CHERRY_STORAGE_LOCK replace /sys,
+# /run/udev/data, /proc/self/mountinfo, /proc/swaps, /run/cherry/identity,
+# /var/lib/cherry/volumes, cherry and /run/cherry-storage.lock
+# (tests/storage.py).
+set -eu
+
+block=${CHERRY_SYSFS:-/sys}/class/block
+udev=${CHERRY_UDEV:-/run/udev/data}
+mountinfo=${CHERRY_MOUNTINFO:-/proc/self/mountinfo}
+swaps=${CHERRY_SWAPS:-/proc/swaps}
+identity=${CHERRY_IDENTITY:-/run/cherry/identity}
+volumes=${CHERRY_VOLUMES:-/var/lib/cherry/volumes}
+user=${CHERRY_STORAGE_USER:-cherry}
+lock=${CHERRY_STORAGE_LOCK:-/run/cherry-storage.lock}
+definitions=/usr/lib/cherry/storage/repart.d
+# 1 GiB, in the 512-byte sectors of /sys/class/block/*/size.
+min_sectors=2097152
+# The smallest cache worth making for a volume.
+min_cache_bytes=67108864
+
+fail() {
+	echo "$1" >&2
+	exit 1
+}
+
+# --- Disks, from sysfs and udev's database ----------------------------------
+
+# The kernel names of the whole disks on a device: not partitions, nor loop,
+# zram, dm or md devices.
+disks() {
+	for dir in "$block"/*; do
+		if [ -e "$dir/device" ] && [ ! -e "$dir/partition" ]; then
+			echo "${dir##*/}"
+		fi
+	done
+}
+
+partitions() {
+	for p in "$block/$1/$1"*/partition; do
+		if [ -e "$p" ]; then
+			p=${p%/partition}
+			echo "${p##*/}"
+		fi
+	done
+}
+
+partname() {
+	sed -n 's/^PARTNAME=//p' "$block/$1/uevent"
+}
+
+# property <device> <key>: a property udev recorded for it, e.g. ID_SERIAL.
+property() {
+	sed -n "s/^E:$2=//p" "$udev/b$(cat "$block/$1/dev")" 2>/dev/null | head -n 1
+}
+
+mounted() {
+	awk -v dev="$(cat "$block/$1/dev")" '$3 == dev { found = 1 } END { exit !found }' "$mountinfo"
+}
+
+swap() {
+	awk -v dev="/dev/$1" '$1 == dev { found = 1 } END { exit !found }' "$swaps"
+}
+
+# unlocked <partition>: its cherry-pv volume is open, as cherry-pv-<partition>.
+unlocked() {
+	for holder in "$block/$1/holders"/*; do
+		if [ -e "$holder" ] && [ "$(cat "$block/${holder##*/}/dm/name" 2>/dev/null)" = "cherry-pv-$1" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+# classify <disk>: sets state, reason and part (its cherry-pv partition):
+#   free        not in use: claim may wipe it
+#   claimed     Cherry's, unlocked: /dev/mapper/cherry-pv-$part is its PV
+#   locked      a cherry-pv volume this machine's TPM does not unlock (another
+#               machine's disk, or this one's before its TPM was cleared):
+#               claim may wipe it
+#   in-use      mounted, swap, held, or this machine's /var
+#   unsuitable  removable, read-only, on USB or too small
+classify() {
+	dir=$block/$1 state='' reason='' part=''
+	if [ "$(cat "$dir/removable")" != 0 ]; then
+		state=unsuitable reason="removable"
+		return
+	fi
+	if [ "$(cat "$dir/ro")" != 0 ]; then
+		state=unsuitable reason="read-only"
+		return
+	fi
+	case $(readlink -f "$dir/device") in
+	*/usb[0-9]*)
+		state=unsuitable reason="on USB"
+		return ;;
+	esac
+	if [ "$(cat "$dir/size")" -lt "$min_sectors" ]; then
+		state=unsuitable reason="smaller than 1 GiB"
+		return
+	fi
+	parts=$(partitions "$1")
+	for p in $parts; do
+		if [ "$(partname "$p")" = cherry-var ]; then
+			state=in-use reason="this machine's /var disk (/dev/$p, cherry-var)"
+			return
+		fi
+	done
+	# shellcheck disable=SC2086 # kernel names, one word each
+	set -- "$1" $parts
+	if [ $# -eq 2 ] && [ "$(partname "$2")" = cherry-pv ]; then
+		part=$2
+		if unlocked "$part"; then
+			state=claimed
+			return
+		fi
+		if [ -z "$(ls -A "$block/$part/holders")" ]; then
+			state=locked reason="its cherry-pv volume does not unlock with this machine's TPM: another machine's disk, or this one's before its TPM was cleared"
+			return
+		fi
+	fi
+	for dev; do
+		if mounted "$dev"; then
+			state=in-use reason="/dev/$dev is mounted"
+			return
+		fi
+		if swap "$dev"; then
+			state=in-use reason="/dev/$dev is swap"
+			return
+		fi
+		# Kernel names: dm-0, md127.
+		# shellcheck disable=SC2012
+		holders=$(ls "$block/$dev/holders" | tr '\n' ' ')
+		if [ -n "$holders" ]; then
+			state=in-use reason="/dev/$dev is held by ${holders% }"
+			return
+		fi
+	done
+	state=free
+}
+
+# signatures <disk>: what wipefs finds on it, one per line: type, offset and
+# UUID (which may be empty).
+signatures() {
+	wipefs --no-act --noheadings --output=TYPE,OFFSET,UUID "/dev/$1" 2>/dev/null || echo "wipefs failed"
+}
+
+# fingerprint <disk> [<signatures>]: of the disk and what wipefs finds on it,
+# its partition table above all.
+fingerprint() {
+	if [ $# -gt 1 ]; then
+		found=$2
+	else
+		found=$(signatures "$1")
+	fi
+	{
+		cat "$block/$1/size"
+		property "$1" ID_SERIAL
+		property "$1" ID_WWN
+		property "$1" ID_MODEL
+		printf '%s\n' "$found"
+	} 2>/dev/null | sha256sum | cut -c 1-12
+}
+
+# A whole disk on a device, named as the kernel names it.
+check_disk() {
+	case $1 in
+	'' | [!a-z]* | *[!a-z0-9]*)
+		fail "bad disk name '$1'" ;;
+	esac
+	if [ ! -e "$block/$1/device" ] || [ -e "$block/$1/partition" ]; then
+		fail "no disk /dev/$1"
+	fi
+}
+
+check_fingerprint() {
+	case $2 in
+	[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+	*) fail "bad fingerprint '$2': 12 hexadecimal digits, as the disk is listed" ;;
+	esac
+	if [ "$(fingerprint "$1")" != "$2" ]; then
+		fail "/dev/$1 is not as it was listed (fingerprint $2): list the disks again"
+	fi
+}
+
+# The PV of a claimed disk, which must be in no pool, or in the given one.
+claimed_pv() {
+	check_disk "$1"
+	classify "$1"
+	if [ "$state" != claimed ]; then
+		fail "/dev/$1 is not claimed (${reason:-$state})"
+	fi
+	pv=/dev/mapper/cherry-pv-$part
+	row=$(pv_table | awk -F '|' -v pv="$pv" '$1 == pv')
+	if [ -z "$row" ]; then
+		fail "/dev/$1 holds no physical volume (a claim that failed?): release it, then claim it again"
+	fi
+	in=$(echo "$row" | cut -d '|' -f 2)
+	if [ "$in" != "${2:-}" ]; then
+		if [ -n "$in" ]; then
+			fail "/dev/$1 is in the pool $in"
+		fi
+		fail "/dev/$1 is not in the pool $2"
+	fi
+	echo "$pv"
+}
+
+# --- LVM ---------------------------------------------------------------------
+
+# The PVs, one per line: path|pool|tags|extents|allocated extents.
+pv_table() {
+	lvm pvs --noheadings --separator '|' -o pv_name,vg_name,pv_tags,pv_pe_count,pv_pe_alloc_count |
+		sed 's/^[[:space:]]*//'
+}
+
+# tagged <pool> data|cache: of the PV table on stdin, the pool's PVs with that
+# tag.
+tagged() {
+	awk -F '|' -v vg="$1" -v tag="$2" '$2 == vg && ("," $3 ",") ~ ("," tag ",")'
+}
+
+# extents total|free: of the PV table on stdin, added up.
+extents() {
+	awk -F '|' -v what="$1" '{ n += what == "free" ? $4 - $5 : $4 } END { print n + 0 }'
+}
+
+# pool_pvs <pool> data|cache: the paths of the pool's PVs with that tag.
+pool_pvs() {
+	pv_table | tagged "$1" "$2" | cut -d '|' -f 1
+}
+
+pools() {
+	lvm vgs --noheadings -o vg_name | sed 's/^[[:space:]]*//'
+}
+
+extent_size() {
+	lvm vgs --noheadings --units b --nosuffix -o vg_extent_size "$1" | sed 's/^[[:space:]]*//'
+}
+
+pool_mode() {
+	case ,$(lvm vgs --noheadings -o vg_tags "$1" | sed 's/^[[:space:]]*//'), in
+	*,writeback,*) echo writeback ;;
+	*) echo writethrough ;;
+	esac
+}
+
+# The pool's volumes, one per line: name|size in bytes|segment type|active.
+# Its cachevols are hidden, and the names of volumes have no '_' (check_name).
+volume_table() {
+	lvm lvs --noheadings --separator '|' --units b --nosuffix -o lv_name,lv_size,segtype,lv_active "$1" |
+		sed 's/^[[:space:]]*//' | awk -F '|' '$1 !~ /_/'
+}
+
+volume_names() {
+	volume_table "$1" | cut -d '|' -f 1
+}
+
+# Pool and volume names: a valid volume group or logical volume name, and a
+# directory name, without the '_' of LVM's own names. A pool named cherry
+# could have a volume named var, /dev/mapper/cherry-var.
+check_name() {
+	case $2 in
+	'' | [!A-Za-z0-9]* | *[!A-Za-z0-9-]*)
+		fail "bad $1 name '$2': letters, digits and '-', starting with a letter or digit" ;;
+	esac
+	if [ ${#2} -gt 32 ]; then
+		fail "bad $1 name '$2': longer than 32 characters"
+	fi
+	if [ "$1" = pool ] && [ "$2" = cherry ]; then
+		fail "bad pool name 'cherry': it is Cherry's own"
+	fi
+}
+
+check_pool() {
+	check_name pool "$1"
+	if ! pools | grep -qxF "$1"; then
+		fail "no pool $1"
+	fi
+}
+
+check_volume() {
+	check_pool "$1"
+	check_name volume "$2"
+	if ! volume_names "$1" | grep -qxF "$2"; then
+		fail "no volume $2 in the pool $1"
+	fi
+}
+
+check_size() {
+	case $1 in
+	all) return ;;
+	[1-9]*[MGT])
+		case ${1%?} in
+		*[!0-9]*) ;;
+		*) return ;;
+		esac ;;
+	esac
+	fail "bad size '$1': a number and M, G or T (MiB, GiB, TiB), or all"
+}
+
+mountpoint_of() {
+	echo "$volumes/$1/$2"
+}
+
+is_mounted() {
+	awk -v mp="$1" '$5 == mp { found = 1 } END { exit !found }' "$mountinfo"
+}
+
+mount_volume() {
+	mp=$(mountpoint_of "$1" "$2")
+	if is_mounted "$mp"; then
+		return 0
+	fi
+	# The cherry user's home, as cherry.service's StateDirectory= makes it, so
+	# that the service finds it its own.
+	home=${volumes%/*}
+	if [ ! -d "$home" ]; then
+		install -d -o "$user" -g "$(id -g "$user")" -m 0755 "$home"
+	fi
+	install -d -m 0755 "$volumes" "$volumes/$1" "$mp"
+	mount -t ext4 -o nodev,nosuid "/dev/$1/$2" "$mp"
+}
+
+unmount_volume() {
+	mp=$(mountpoint_of "$1" "$2")
+	if is_mounted "$mp"; then
+		umount "$mp" || fail "cannot unmount $mp: in use"
+	fi
+	rmdir "$mp" 2>/dev/null || true
+}
+
+# uncache <pool>: no volume of the pool is cached any more; a writeback cache
+# is flushed first. Also removes what a failed attach left.
+uncache() {
+	volume_table "$1" | while IFS='|' read -r name size type _; do
+		if [ "$type" = cache ]; then
+			echo "detaching the cache of $1/$name"
+			lvm lvconvert -y --uncache "$1/$name"
+		fi
+	done
+	for stray in $(lvm lvs --noheadings -o lv_name "$1" | sed -n 's/^[[:space:]]*\([A-Za-z0-9-]*_cache\)$/\1/p'); do
+		lvm lvremove -y "$1/$stray"
+	done
+}
+
+# cache_volume <pool> <volume>: cached on the pool's cache disks, if it has
+# any, with a share of them as large as its share of the data disks, or what
+# is left.
+cache_volume() {
+	pvt=$(pv_table)
+	total=$(printf '%s\n' "$pvt" | tagged "$1" cache | extents total)
+	if [ "$total" -eq 0 ]; then
+		return 0
+	fi
+	data=$(printf '%s\n' "$pvt" | tagged "$1" data | extents total)
+	free=$(printf '%s\n' "$pvt" | tagged "$1" cache | extents free)
+	extent=$(extent_size "$1")
+	size=$(volume_table "$1" | awk -F '|' -v name="$2" '$1 == name { print $2 }')
+	# shellcheck disable=SC2017 # whole extents first: bytes times extents could overflow
+	want=$((size / extent * total / data))
+	if [ "$want" -gt "$free" ]; then
+		want=$free
+	fi
+	if [ "$((want * extent))" -lt "$min_cache_bytes" ]; then
+		echo "no cache for $1/$2: its share of the pool's cache disks, or what is left of them, is under $((min_cache_bytes >> 20)) MiB"
+		return 0
+	fi
+	mode=$(pool_mode "$1")
+	echo "caching $1/$2 on $((want * extent >> 20)) MiB of the pool's cache disks, $mode"
+	# shellcheck disable=SC2046 # PV paths, one word each
+	lvm lvcreate -y -n "$2_cache" -l "$want" "$1" $(printf '%s\n' "$pvt" | tagged "$1" cache | cut -d '|' -f 1)
+	if ! lvm lvconvert -y --type cache --cachevol "$2_cache" --cachemode "$mode" "$1/$2"; then
+		lvm lvremove -y "$1/$2_cache"
+		fail "cannot cache $1/$2"
+	fi
+}
+
+recache() {
+	for name in $(volume_names "$1"); do
+		cache_volume "$1" "$name"
+	done
+}
+
+# --- Verbs -------------------------------------------------------------------
+
+list() {
+	tpm=false
+	if [ -e "$identity/ek-hash" ]; then
+		tpm=true
+	fi
+	var=$(awk '$5 == "/var" { for (i = 7; $i != "-"; i++); print $(i + 1) "|" $(i + 2) }' "$mountinfo" | tail -n 1)
+	pvs=$(lvm pvs --reportformat json --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free,pv_tags) || pvs=null
+	vgs=$(lvm vgs --reportformat json --units b --nosuffix \
+		-o vg_name,vg_size,vg_free,vg_tags,vg_extent_size,pv_count,lv_count,vg_missing_pv_count) || vgs=null
+	lvs=$(lvm lvs -a --reportformat json --units b --nosuffix \
+		-o vg_name,lv_name,lv_size,lv_attr,segtype,pool_lv,cache_mode,lv_active,devices) || lvs=null
+	out=$LOGS_DIRECTORY/list.json
+	{
+		printf '{\n"tpm": %s,\n"var": ' "$tpm"
+		if [ -n "$var" ]; then
+			printf '{"fstype": %s, "source": %s}' "$(json "${var%%|*}")" "$(json "${var#*|}")"
+		else
+			printf null
+		fi
+		printf ',\n"disks": ['
+		sep=
+		for disk in $(disks); do
+			classify "$disk"
+			dir=$block/$disk
+			printf '%s\n{"name": %s, "size": %s, "rotational": %s, "model": %s, "serial": %s, "bus": %s,' \
+				"$sep" "$(json "$disk")" "$(($(cat "$dir/size") * 512))" \
+				"$( [ "$(cat "$dir/queue/rotational" 2>/dev/null)" = 0 ] && echo false || echo true)" \
+				"$(json "$(property "$disk" ID_MODEL | sed 's/_/ /g')")" \
+				"$(json "$(property "$disk" ID_SERIAL_SHORT)")" "$(json "$(property "$disk" ID_BUS)")"
+			found=$(signatures "$disk")
+			printf ' "state": %s, "reason": %s, "fingerprint": %s, "pv": %s, "signatures": [' \
+				"$(json "$state")" "$(json "$reason")" "$(json "$(fingerprint "$disk" "$found")")" \
+				"$(json "${part:+/dev/mapper/cherry-pv-$part}")"
+			printf '%s\n' "$found" | awk -v sep= 'NF { gsub(/["\\]/, "", $1); printf "%s\"%s\"", sep, $1; sep = ", " }'
+			printf '], "partitions": ['
+			psep=
+			for p in $(partitions "$disk"); do
+				printf '%s{"name": %s, "size": %s, "label": %s, "fstype": %s}' "$psep" "$(json "$p")" \
+					"$(($(cat "$block/$p/size") * 512))" "$(json "$(partname "$p")")" \
+					"$(json "$(property "$p" ID_FS_TYPE)")"
+				psep=', '
+			done
+			printf ']}'
+			sep=,
+		done
+		printf '\n],\n"pvs": %s,\n"vgs": %s,\n"lvs": %s,\n"mounts": [' "$pvs" "$vgs" "$lvs"
+		sep=
+		awk -v dir="$volumes/" 'index($5, dir) == 1 { print $5 }' "$mountinfo" | while read -r mp; do
+			usage=$(df -B 1 --output=size,used,avail "$mp" | tail -n 1)
+			# shellcheck disable=SC2086 # three numbers
+			set -- $usage
+			printf '%s\n{"path": %s, "size": %s, "used": %s, "available": %s}' "$sep" "$(json "$mp")" "$1" "$2" "$3"
+			sep=,
+		done
+		printf '\n]\n}\n'
+	} >"$out.new"
+	mv "$out.new" "$out"
+}
+
+# A JSON string, without control characters.
+json() {
+	printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\037' | sed 's/["\\]/\\&/g')"
+}
+
+# wipe <disk>: every signature on its partitions, then on it, and the kernel
+# told it has no partitions any more. wipefs has the kernel re-read the
+# partition table itself, unless udev's probe of a partition it wiped still
+# holds that partition: udev first, then.
+wipe() {
+	echo "wiping /dev/$1"
+	for p in $(partitions "$1"); do
+		wipefs --all "/dev/$p"
+	done
+	udevadm settle --timeout=60 || true
+	wipefs --all "/dev/$1"
+	udevadm settle --timeout=60 || true
+	if [ -n "$(partitions "$1")" ]; then
+		partprobe "/dev/$1" || true
+		udevadm settle --timeout=60 || true
+	fi
+	if [ -n "$(partitions "$1")" ]; then
+		fail "/dev/$1 is wiped, but the kernel still has its partitions: it is blank once the machine reboots"
+	fi
+}
+
+claim() {
+	check_disk "$1"
+	if [ ! -e "$identity/ek-hash" ]; then
+		fail "no usable TPM: it holds the keys of claimed disks"
+	fi
+	classify "$1"
+	case $state in
+	free | locked) ;;
+	*) fail "/dev/$1 cannot be claimed: ${reason:-$state}" ;;
+	esac
+	check_fingerprint "$1" "$2"
+	wipe "$1"
+	systemd-repart --dry-run=no --empty=require --definitions="$definitions" \
+		--tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= "/dev/$1" ||
+		fail "systemd-repart could not set up /dev/$1"
+	udevadm settle --timeout=60 || true
+	# shellcheck disable=SC2046 # kernel names, one word each
+	set -- "$1" $(partitions "$1")
+	if [ $# -ne 2 ] || [ "$(partname "$2")" != cherry-pv ]; then
+		fail "no partition labelled cherry-pv on /dev/$1 after systemd-repart"
+	fi
+	# A LUKS2 volume whose key the TPM seals, as systemd-repart makes /var's,
+	# which systemd 258 does only along with a filesystem: a random key opens a
+	# first key slot, the TPM's is enrolled with it, and the first goes, so that
+	# the TPM is the key's only holder. No PCR policy, as for /var.
+	keys=$(mktemp -d)
+	head -c 64 /dev/urandom >"$keys/key"
+	if ! cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+		--key-file "$keys/key" "/dev/$2" ||
+		! systemd-cryptenroll --unlock-key-file="$keys/key" --tpm2-device=auto --tpm2-pcrs= \
+			--tpm2-public-key-pcrs= --wipe-slot=0 "/dev/$2"; then
+		rm -rf "$keys"
+		fail "cannot make /dev/$2 a LUKS2 volume that the TPM unlocks"
+	fi
+	rm -rf "$keys"
+	systemd-cryptsetup attach "cherry-pv-$2" "/dev/$2" - tpm2-device=auto,headless ||
+		fail "the TPM cannot unlock /dev/$2"
+	lvm pvcreate -y "/dev/mapper/cherry-pv-$2"
+	echo "claimed /dev/$1: /dev/$2, unlocked with the TPM as /dev/mapper/cherry-pv-$2"
+}
+
+release() {
+	check_disk "$1"
+	classify "$1"
+	if [ "$state" != claimed ]; then
+		fail "/dev/$1 is not claimed (${reason:-$state})"
+	fi
+	check_fingerprint "$1" "$2"
+	pv=/dev/mapper/cherry-pv-$part
+	row=$(pv_table | awk -F '|' -v pv="$pv" '$1 == pv')
+	in=$(echo "$row" | cut -d '|' -f 2)
+	if [ -n "$in" ]; then
+		fail "/dev/$1 is in the pool $in"
+	fi
+	if [ -n "$row" ]; then
+		lvm pvremove -y "$pv"
+	fi
+	systemd-cryptsetup detach "cherry-pv-$part"
+	wipe "$1"
+	echo "released /dev/$1: it is blank"
+}
+
+# claimed_pvs <pool> <disk>...: their PVs, one per line, all claimed and in no
+# pool, or in that pool if one is given.
+claimed_pvs() {
+	pool=$1
+	shift
+	[ $# -gt 0 ] || fail "no disks given"
+	for disk; do
+		claimed_pv "$disk" "$pool"
+	done
+}
+
+create() {
+	pool=$1
+	shift
+	check_name pool "$pool"
+	if pools | grep -qxF "$pool"; then
+		fail "the pool $pool exists already"
+	fi
+	pvs=$(claimed_pvs '' "$@")
+	# shellcheck disable=SC2086 # PV paths, one word each
+	lvm vgcreate --setautoactivation n "$pool" $pvs
+	# shellcheck disable=SC2086
+	lvm pvchange --addtag data $pvs
+	echo "created the pool $pool"
+}
+
+extend() {
+	pool=$1
+	shift
+	check_pool "$pool"
+	pvs=$(claimed_pvs '' "$@")
+	# shellcheck disable=SC2086 # PV paths, one word each
+	lvm vgextend "$pool" $pvs
+	# shellcheck disable=SC2086
+	lvm pvchange --addtag data $pvs
+	echo "extended the pool $pool"
+}
+
+# set_cache <pool> <mode> <pv>...: the pool's cache disks are now these, in
+# that mode. Every volume's cache is detached, then made anew on them.
+set_cache() {
+	pool=$1 mode=$2
+	shift 2
+	old=$(pool_pvs "$pool" cache)
+	uncache "$pool"
+	for pv in $old; do
+		case " $* " in
+		*" $pv "*) ;;
+		*) lvm vgreduce "$pool" "$pv" ;;
+		esac
+	done
+	for pv; do
+		if ! printf '%s\n' "$old" | grep -qxF "$pv"; then
+			lvm vgextend "$pool" "$pv"
+			lvm pvchange --addtag cache "$pv"
+		fi
+	done
+	if [ "$(pool_mode "$pool")" = writeback ]; then
+		lvm vgchange --deltag writeback "$pool"
+	fi
+	if [ $# -gt 0 ] && [ "$mode" = writeback ]; then
+		lvm vgchange --addtag writeback "$pool"
+	fi
+	recache "$pool"
+}
+
+# cache <pool> <mode> <disk>...: the disks may be the pool's cache disks
+# already, or claimed and in no pool.
+cache() {
+	pool=$1 mode=$2
+	shift 2
+	check_pool "$pool"
+	case $mode in
+	writethrough | writeback) ;;
+	*) fail "bad cache mode '$mode': writethrough or writeback" ;;
+	esac
+	old=$(pool_pvs "$pool" cache)
+	new=
+	for disk; do
+		check_disk "$disk"
+		classify "$disk"
+		if [ "$state" = claimed ] && printf '%s\n' "$old" | grep -qxF "/dev/mapper/cherry-pv-$part"; then
+			new="$new /dev/mapper/cherry-pv-$part"
+		else
+			new="$new $(claimed_pv "$disk")"
+		fi
+	done
+	# shellcheck disable=SC2086 # PV paths, one word each
+	set_cache "$pool" "$mode" $new
+	if [ -n "$new" ]; then
+		echo "the pool $pool is cached on$new, $mode"
+	else
+		echo "the pool $pool has no cache"
+	fi
+}
+
+reduce() {
+	pool=$1
+	check_pool "$pool"
+	pv=$(claimed_pv "$2" "$pool")
+	if pool_pvs "$pool" cache | grep -qxF "$pv"; then
+		# shellcheck disable=SC2046 # PV paths, one word each
+		set_cache "$pool" "$(pool_mode "$pool")" $(pool_pvs "$pool" cache | grep -vxF "$pv")
+		echo "removed /dev/$2 from the pool $pool: it is still claimed"
+		return
+	fi
+	others=$(pool_pvs "$pool" data | grep -vxF "$pv" || true)
+	if [ -z "$others" ]; then
+		fail "/dev/$2 is the last data disk of the pool $pool: destroy the pool instead"
+	fi
+	pvt=$(pv_table)
+	used=$(printf '%s\n' "$pvt" | awk -F '|' -v pv="$pv" '$1 == pv { print $5 }')
+	if [ "$used" -gt 0 ]; then
+		free=$(printf '%s\n' "$pvt" | tagged "$pool" data | grep -vF "$pv|" | extents free)
+		if [ "$free" -lt "$used" ]; then
+			extent=$(extent_size "$pool")
+			fail "the pool $pool's other data disks have $((free * extent >> 20)) MiB free, and /dev/$2 holds $((used * extent >> 20)) MiB: make room first"
+		fi
+		# pvmove moves no cached volume: their caches go first, and come back
+		# after.
+		uncache "$pool"
+		echo "moving the data off /dev/$2"
+		# shellcheck disable=SC2086 # PV paths, one word each
+		if ! lvm pvmove "$pv" $others; then
+			recache "$pool"
+			fail "cannot move the data off /dev/$2"
+		fi
+		recache "$pool"
+	fi
+	lvm vgreduce "$pool" "$pv"
+	echo "removed /dev/$2 from the pool $pool: it is still claimed"
+}
+
+destroy() {
+	check_pool "$1"
+	names=$(volume_names "$1" | tr '\n' ' ')
+	if [ -n "$names" ]; then
+		fail "the pool $1 still has volumes: ${names% }: remove them first"
+	fi
+	lvm vgremove -y -f "$1"
+	rmdir "$volumes/$1" 2>/dev/null || true
+	echo "destroyed the pool $1: its disks are still claimed"
+}
+
+volume_create() {
+	check_pool "$1"
+	check_name volume "$2"
+	check_size "$3"
+	if volume_names "$1" | grep -qxF "$2"; then
+		fail "the pool $1 has a volume $2 already"
+	fi
+	# shellcheck disable=SC2046 # PV paths, one word each
+	set -- "$1" "$2" "$3" $(pool_pvs "$1" data)
+	if [ "$3" = all ]; then
+		size="-l 100%PVS"
+	else
+		size="-L $3"
+	fi
+	pool=$1 name=$2
+	shift 3
+	# shellcheck disable=SC2086 # the size, two words
+	lvm lvcreate -y -n "$name" $size "$pool" "$@"
+	if ! mkfs.ext4 -q -m 0 -E "root_owner=$(id -u "$user"):$(id -g "$user"),nodiscard" "/dev/$pool/$name"; then
+		lvm lvremove -y "$pool/$name"
+		fail "cannot make the filesystem of $pool/$name"
+	fi
+	mount_volume "$pool" "$name"
+	echo "created the volume $pool/$name, mounted on $(mountpoint_of "$pool" "$name")"
+	cache_volume "$pool" "$name"
+}
+
+volume_resize() {
+	check_volume "$1" "$2"
+	check_size "$3"
+	pool=$1 name=$2
+	before=$(volume_table "$pool" | awk -F '|' -v name="$name" '$1 == name { print $2 }')
+	if [ "$3" = all ]; then
+		size="-l +100%PVS"
+	else
+		size="-L $3"
+	fi
+	shift 3
+	cached=$(volume_table "$pool" | awk -F '|' -v name="$name" '$1 == name { print $3 }')
+	if [ "$cached" = cache ]; then
+		echo "detaching the cache of $pool/$name"
+		lvm lvconvert -y --uncache "$pool/$name"
+	fi
+	# shellcheck disable=SC2046,SC2086 # the size, two words; PV paths
+	if ! lvm lvextend $size "$pool/$name" $(pool_pvs "$pool" data); then
+		cache_volume "$pool" "$name"
+		fail "cannot grow $pool/$name: volumes only grow, as far as the pool's data disks have room"
+	fi
+	if ! resize2fs "/dev/$pool/$name"; then
+		cache_volume "$pool" "$name"
+		fail "cannot grow the filesystem of $pool/$name"
+	fi
+	cache_volume "$pool" "$name"
+	after=$(volume_table "$pool" | awk -F '|' -v name="$name" '$1 == name { print $2 }')
+	echo "grew the volume $pool/$name from $((before >> 20)) MiB to $((after >> 20)) MiB"
+}
+
+volume_remove() {
+	check_volume "$1" "$2"
+	unmount_volume "$1" "$2"
+	lvm lvremove -y "$1/$2"
+	rmdir "$volumes/$1" 2>/dev/null || true
+	echo "removed the volume $1/$2"
+}
+
+# At boot: every claimed disk unlocked, every pool activated, every volume
+# checked and mounted. What fails is reported, and the rest goes on.
+boot_start() {
+	rc=0
+	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
+	for disk in $(disks); do
+		for p in $(partitions "$disk"); do
+			if [ "$(partname "$p")" = cherry-pv ] && ! unlocked "$p"; then
+				systemd-cryptsetup attach "cherry-pv-$p" "/dev/$p" - tpm2-device=auto,headless ||
+					echo "the TPM cannot unlock /dev/$p: another machine's disk?"
+			fi
+		done
+	done
+	udevadm settle --timeout=60 || true
+	for pool in $(pools); do
+		if ! lvm vgchange -ay "$pool"; then
+			echo "the pool $pool is missing disks: not all its volumes are there"
+			rc=1
+		fi
+		table=$(volume_table "$pool")
+		for name in $(printf '%s\n' "$table" | cut -d '|' -f 1); do
+			if is_mounted "$(mountpoint_of "$pool" "$name")"; then
+				continue
+			fi
+			if [ "$(printf '%s\n' "$table" | awk -F '|' -v name="$name" '$1 == name { print $4 }')" != active ]; then
+				echo "$pool/$name is not active: not mounted"
+				rc=1
+				continue
+			fi
+			# As systemd-fsck: 1 is errors corrected, 4 and above errors left.
+			e2rc=0
+			e2fsck -p "/dev/$pool/$name" || e2rc=$?
+			if [ "$e2rc" -ge 4 ]; then
+				echo "e2fsck found errors it cannot repair on $pool/$name (exit status $e2rc): not mounted"
+				rc=1
+			elif ! (mount_volume "$pool" "$name"); then
+				echo "cannot mount $pool/$name"
+				rc=1
+			fi
+		done
+	done
+	return "$rc"
+}
+
+boot_stop() {
+	awk -v dir="$volumes/" 'index($5, dir) == 1 { print $5 }' "$mountinfo" | while read -r mp; do
+		umount "$mp" || echo "cannot unmount $mp"
+	done
+	for pool in $(pools); do
+		lvm vgchange -an "$pool" || true
+	done
+	for name in "$block"/dm-*/dm/name; do
+		if [ -e "$name" ]; then
+			case $(cat "$name") in
+			cherry-pv-*) systemd-cryptsetup detach "$(cat "$name")" || true ;;
+			esac
+		fi
+	done
+}
+
+if [ $# -eq 2 ] && [ "$1" = boot ]; then
+	exec 9>"$lock"
+	flock 9
+	case $2 in
+	start) boot_start ;;
+	stop) boot_stop ;;
+	*) fail "bad boot verb '$2': start or stop" ;;
+	esac
+	exit
+fi
+if [ $# -ne 1 ]; then
+	fail "usage: cherry-storage <verb>[:<argument>...], or cherry-storage boot start|stop"
+fi
+
+instance=$1
+IFS=:
+set -f
+# shellcheck disable=SC2086 # the instance's fields
+set -- $instance
+set +f
+unset IFS
+verb=${1:-}
+[ $# -eq 0 ] || shift
+
+# nargs <least> <most>: how many arguments the verb takes (most empty: any).
+nargs() {
+	if [ $# -lt 3 ] || [ "$3" -lt "$1" ] || { [ -n "$2" ] && [ "$3" -gt "$2" ]; }; then
+		fail "bad instance '$instance'"
+	fi
+}
+case $verb in
+list) nargs 0 0 $# ;;
+claim | release) nargs 2 2 $# ;;
+create | extend) nargs 2 '' $# ;;
+cache) nargs 2 '' $# ;;
+reduce) nargs 2 2 $# ;;
+destroy) nargs 1 1 $# ;;
+volume-create | volume-resize) nargs 3 3 $# ;;
+volume-remove) nargs 2 2 $# ;;
+*) fail "bad instance '$instance': unknown verb '$verb'" ;;
+esac
+
+case $instance in
+*[!A-Za-z0-9:-]*) fail "bad instance '$instance': letters, digits, ':' and '-'" ;;
+esac
+log=$LOGS_DIRECTORY/$instance.log
+echo "$instance, log in $log"
+exec >"$log" 2>&1 </dev/null
+if [ "$verb" != list ]; then
+	exec 9>"$lock"
+	flock -n 9 || fail "another storage operation is running: try again once it is done"
+fi
+case $verb in
+list) list ;;
+claim) claim "$@" ;;
+release) release "$@" ;;
+create) create "$@" ;;
+extend) extend "$@" ;;
+cache) cache "$@" ;;
+reduce) reduce "$@" ;;
+destroy) destroy "$@" ;;
+volume-create) volume_create "$@" ;;
+volume-resize) volume_resize "$@" ;;
+volume-remove) volume_remove "$@" ;;
+esac

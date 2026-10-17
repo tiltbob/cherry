@@ -8,17 +8,16 @@
 // Tools: list, build, start, stop, exec, remove. build writes the image's
 // recipe, as `cherry-image build` reads it, to /var/lib/cherry/images/<name>/
 // first. $CHERRY_IMAGES_DIR and $CHERRY_IMAGE_LOGS replace
-// /var/lib/cherry/images and /var/log/cherry-image (tests/mcp.js).
+// /var/lib/cherry/images and /var/log/cherry-image (tests/mcp.js). The
+// protocol is mcp-stdio.js's, next to it.
 "use strict";
-const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const readline = require("readline");
+const { ToolError, check, run, sleep, startUnit, serve } = require("./mcp-stdio.js");
 
 const RECIPES = process.env.CHERRY_IMAGES_DIR || "/var/lib/cherry/images";
 const LOGS = process.env.CHERRY_IMAGE_LOGS || "/var/log/cherry-image";
-const PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const INSTRUCTIONS = `These tools build and run systemd-nspawn container images on this Cherry machine, \
 which machinectl manages in /var/lib/machines: build an image from a distribution, packages, files and a \
 setup script, start it, run commands in it, and stop it. Images stay on this machine. Load the machine-images \
@@ -32,12 +31,6 @@ const WORD = /^(?!-)[A-Za-z0-9_.-]*$/;
 const PACKAGE = /^[^\s#-]\S*$/;
 const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Za-z0-9]|[=>78cDEHM])/g;
 
-class ToolError extends Error {}
-
-function check(condition, message) {
-  if (!condition) throw new ToolError(message);
-}
-
 function imageName(args) {
   check(typeof args.name === "string" && IMAGE_NAME.test(args.name),
     `bad image name ${JSON.stringify(args.name)}: up to 48 letters, digits and '-', starting with a letter or digit`);
@@ -49,60 +42,9 @@ function machineName(args) {
   return args.name;
 }
 
-// run(command, args, options): {code, out, err}, never rejected for a failing
-// command. options.timeout in seconds kills it (code null); options.signal
-// (an AbortSignal) too; options.keepStdin leaves stdin open until it exits.
-function run(command, args, options = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    const keep = (s, chunk) => (s + chunk).slice(-1 << 20);
-    child.stdout.on("data", (chunk) => { out = keep(out, chunk); });
-    child.stderr.on("data", (chunk) => { err = keep(err, chunk); });
-    if (!options.keepStdin) child.stdin.end();
-    child.stdin.on("error", () => {});
-    let killed = false;
-    const kill = () => { killed = true; child.kill("SIGTERM"); };
-    const timer = options.timeout ? setTimeout(kill, options.timeout * 1000) : null;
-    if (options.signal) options.signal.addEventListener("abort", kill, { once: true });
-    let done = false;
-    const finish = (code) => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      if (options.signal) options.signal.removeEventListener("abort", kill);
-      for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
-      resolve({ code, out, err });
-    };
-    child.on("error", (e) => { err += String(e); finish(null); });
-    // Once killed, what it started may still hold its output open: done anyway.
-    child.on("exit", (code) => { if (killed) finish(null); });
-    child.on("close", (code) => finish(code));
-  });
-}
-
-const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
-
-function tail(text, lines) {
-  return text.split("\n").slice(-lines).join("\n").trim();
-}
-
-function readLog(instance, lines) {
-  const file = path.join(LOGS, `${instance}.log`);
-  try {
-    return `${file}:\n${tail(fs.readFileSync(file, "utf8"), lines)}`;
-  } catch {
-    return `no log in ${file}`;
-  }
-}
-
 // cherry-image@<instance>.service: started, waited for; its log's tail.
-async function cherryImage(instance, signal) {
-  const unit = `cherry-image@${instance}.service`;
-  const r = await run("systemctl", ["start", "--no-ask-password", unit], { signal });
-  if (r.code !== 0) throw new ToolError(`${unit} failed. Log, ${readLog(instance, 60)}\n${r.err.trim()}`);
-  return readLog(instance, 15);
+function cherryImage(instance, signal) {
+  return startUnit("cherry-image", instance, LOGS, signal);
 }
 
 // The reply of a machined Manager method, as busctl --json=short gives it.
@@ -362,64 +304,4 @@ const TOOLS = [
   },
 ];
 
-function reply(id, result) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
-}
-
-function fail(id, code, message) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
-}
-
-const calls = new Map();
-
-async function callTool(id, params) {
-  const tool = TOOLS.find((t) => t.name === params?.name);
-  if (!tool) return fail(id, -32602, `unknown tool ${JSON.stringify(params?.name)}`);
-  const abort = new AbortController();
-  calls.set(id, abort);
-  try {
-    const text = await tool.call(params.arguments ?? {}, abort.signal);
-    reply(id, { content: [{ type: "text", text }], isError: false });
-  } catch (e) {
-    reply(id, { content: [{ type: "text", text: e instanceof ToolError ? e.message : String(e.stack || e) }], isError: true });
-  } finally {
-    calls.delete(id);
-  }
-}
-
-function handle(message) {
-  const { id, method, params } = message;
-  if (id === undefined) {
-    if (method === "notifications/cancelled") calls.get(params?.requestId)?.abort();
-    return;
-  }
-  switch (method) {
-    case "initialize":
-      return reply(id, {
-        protocolVersion: PROTOCOLS.includes(params?.protocolVersion) ? params.protocolVersion : PROTOCOLS[0],
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cherry-machines", version: "1" },
-        instructions: INSTRUCTIONS,
-      });
-    case "ping":
-      return reply(id, {});
-    case "tools/list":
-      return reply(id, { tools: TOOLS.map(({ name, description, inputSchema, annotations }) =>
-        ({ name, description, inputSchema, ...(annotations && { annotations }) })) });
-    case "tools/call":
-      return callTool(id, params);
-    default:
-      return fail(id, -32601, `unknown method ${method}`);
-  }
-}
-
-readline.createInterface({ input: process.stdin }).on("line", (line) => {
-  if (!line.trim()) return;
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    return fail(null, -32700, "parse error");
-  }
-  for (const m of Array.isArray(message) ? message : [message]) handle(m);
-});
+serve({ name: "cherry-machines", instructions: INSTRUCTIONS, tools: TOOLS });

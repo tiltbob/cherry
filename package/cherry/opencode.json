@@ -5,6 +5,10 @@
       "machines": {
         "type": "local",
         "command": ["/usr/bin/bun", "/usr/lib/cherry/machines-mcp.js"]
+      },
+      "storage": {
+        "type": "local",
+        "command": ["/usr/bin/bun", "/usr/lib/cherry/storage-mcp.js"]
       }
     }
   }

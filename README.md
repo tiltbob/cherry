@@ -25,6 +25,9 @@ Once booted:
   where containers persist. A machine without one gets one on its first
   blank disk; one without a blank disk keeps `/var` in a tmpfs of up to half
   the RAM, so nothing persists (see [Disks](#disks)).
+- **Storage:** the agent claims the machine's other disks, which erases them,
+  and makes LVM pools of them, with SSDs as hard disks' cache, and volumes,
+  each disk a LUKS2 volume the TPM unlocks too (see [Storage](#storage)).
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Firewall:** nothing comes in unasked but ping, to the host or to its
   containers (see [Firewall](#firewall)).
@@ -109,18 +112,19 @@ against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
-busybox root, the OpenCode MCP server's tools against stand-ins for
-systemctl, machinectl and busctl, `post-build.sh`'s check of
+busybox root, the OpenCode MCP servers' tools against stand-ins for systemctl,
+machinectl and busctl, `cherry-storage`'s claims and LVM calls against
+stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
 key ceremony on a SoftHSM token, `cherry-var.service`'s choice of disk, and
 the image's version from the release tags. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
-python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
-the polkit rules and the MCP server; busybox and user namespaces for
-`cherry-image` and the firewall, and nft and ip for the firewall; softhsm2 and
-opensc for the ceremony (each skipped without them).
+python3-magic, python3-yaml, systemd's `systemd-analyze`, openssl and
+util-linux's flock; node for the polkit rules and the MCP servers; busybox and
+user namespaces for `cherry-image` and the firewall, and nft and ip for the
+firewall; softhsm2 and opensc for the ceremony (each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -355,6 +359,127 @@ run, which the VM then keeps along with its TPM:
 python3 scripts/run_qemu.py --disk 8G
 ```
 
+## Storage
+
+Besides `/var`'s, a machine's disks can hold storage pools for the `cherry`
+user and its agent: LVM volume groups of the disks it claimed, with volumes
+in them, mounted under `/var/lib/cherry/volumes`.
+`cherry-storage@.service` ([`/usr/libexec/cherry-storage`](package/cherry/cherry-storage))
+does it all as root, for the `cherry` user, which may start it (polkit) but
+touches no disk itself; the OpenCode agent gets tools for it (below).
+
+- **Claiming a disk** erases it: `wipefs` on its partitions, then on the
+  disk. `systemd-repart` then makes all of it one GPT partition labelled
+  `cherry-pv` ([`50-pv.conf`](package/cherry/storage-pv.conf)), a LUKS2 volume
+  whose key the TPM seals, as `/var`'s: `cryptsetup` makes it with a random
+  key, `systemd-cryptenroll` enrolls the TPM with that key, then wipes that
+  key's slot, so the TPM is the only holder of the key (systemd-repart's
+  `Encrypt=` would put a filesystem in it). It is unlocked as
+  `/dev/mapper/cherry-pv-<partition>` and made an LVM physical volume.
+  - **As listed:** `list` gives each disk a fingerprint, of its size, serial,
+    model and partition table, and a claim names it, so it never takes a disk
+    that a reboot renamed, or that changed since.
+  - **Not in use:** never a disk that is mounted, swap, held by device mapper
+    or md, or `/var`'s, nor a removable, read-only, USB or smaller than 1 GiB
+    one.
+  - **Another machine's:** a disk with a `cherry-pv` volume this TPM cannot
+    unlock can be claimed, which erases it too.
+- **LVM sees only those volumes** (Cherry's [`/etc/lvm/lvm.conf`](package/cherry/lvm.conf)):
+  LVM on any other disk is never activated, and a disk holding it can be
+  claimed, as nothing uses it.
+- **A pool** is a volume group of claimed disks:
+  - **data disks** hold its volumes, one after the other, with no redundancy;
+  - **cache disks**, SSDs, cache every volume (dm-cache, a cachevol): each
+    volume is cached on a share of them as large as its share of the data
+    disks, writethrough unless the pool is writeback.
+- **Volumes are thick, linear LVs,** not thin ones: the image has no
+  thin-provisioning-tools, so a thin pool's metadata could be neither checked
+  nor repaired. For the same reason, no cache's metadata is checked when it is
+  activated, which a writethrough cache can afford: the data disks under it
+  hold all the data.
+- **A volume** holds ext4 owned by the `cherry` user, mounted `nodev,nosuid`
+  on `/var/lib/cherry/volumes/<pool>/<volume>`, which `cherry.service` sees
+  writable. Volumes grow, online (`resize2fs`), but don't shrink.
+- **Taking a data disk out** of a pool moves its data to the pool's other data
+  disks first (`pvmove`), with the volumes' caches detached meanwhile.
+- **At boot,** before `cherry.service`, `cherry-storage.service`:
+  - unlocks every `cherry-pv` partition with the TPM;
+  - activates each pool, which nothing else does: their volume groups are
+    made without autoactivation;
+  - checks each volume's filesystem (`e2fsck -p`) and mounts it.
+
+  At shutdown, once `cherry.service` has stopped, it unmounts the volumes,
+  deactivates the pools and closes the disks' volumes. A disk the TPM cannot
+  unlock, or a volume with errors `e2fsck -p` left, is reported and left
+  alone, and the rest goes on.
+- **One operation at a time:** another one fails at once. Each logs to
+  `/var/log/cherry-storage/<instance>.log`, which the `cherry` user can read.
+
+The instance is a verb and its arguments, separated by colons:
+
+| Instance | Does |
+|---|---|
+| `list` | the disks, pools and volumes, as JSON in `/var/log/cherry-storage/list.json` |
+| `claim:<disk>:<fingerprint>` | erases the disk and makes it Cherry's |
+| `release:<disk>:<fingerprint>` | erases a claimed disk that is in no pool, and leaves it blank |
+| `create:<pool>:<disk>...` | a pool, of these claimed disks as its data disks |
+| `extend:<pool>:<disk>...` | more data disks for the pool |
+| `cache:<pool>:<mode>:<disk>...` | the pool's cache disks are now these (none: no cache), `writethrough` or `writeback`; every volume's cache is made anew |
+| `reduce:<pool>:<disk>` | takes the disk out of the pool; it stays claimed |
+| `destroy:<pool>` | destroys a pool that has no volumes; its disks stay claimed |
+| `volume-create:<pool>:<volume>:<size>` | a volume of `<n>M`, `G` or `T` (MiB, GiB, TiB), or `all` of the pool's free space |
+| `volume-resize:<pool>:<volume>:<size>` | grows the volume |
+| `volume-remove:<pool>:<volume>` | unmounts and removes the volume |
+
+```sh
+systemctl start cherry-storage@list && cat /var/log/cherry-storage/list.json
+systemctl start cherry-storage@claim:vdb:<fingerprint>
+systemctl start cherry-storage@claim:nvme0n1:<fingerprint>
+systemctl start cherry-storage@create:tank:vdb
+systemctl start cherry-storage@cache:tank:writethrough:nvme0n1
+systemctl start cherry-storage@volume-create:tank:data:100G
+```
+
+**OpenCode's tools:** `/etc/opencode` gives the agent a second MCP server,
+`storage` (`/usr/lib/cherry/storage-mcp.js`, run on Bun), and skills for it:
+`storage`, how it all works and the tools' rules; `configure-storage`, to set
+a machine's storage up; and `manage-storage`, to change it (grow a pool,
+replace a disk, volumes). When asked to configure a machine's storage, the
+agent follows `configure-storage`:
+
+1. It lists the disks and asks the user which to claim.
+2. It proposes LVM from the chosen disks' kinds, as the kernel reports them:
+   - all SSDs, or all hard disks: one pool of all of them;
+   - both: one pool of the hard disks, with the SSDs as its cache.
+3. It claims the disks and makes the pool once the user agrees.
+
+The tools, run as the `cherry` user with its privileges alone:
+
+| Tool | Does |
+|---|---|
+| `list` | the disks (kind, state, fingerprint, what is on them), pools and volumes |
+| `claim`, `release` | `claim:` and `release:`, disk by disk |
+| `create_pool` | `create:`, then `cache:` for the SSDs given as its cache |
+| `add_disks`, `set_cache`, `remove_disk`, `destroy_pool` | `extend:`, `cache:`, `reduce:`, `destroy:` |
+| `create_volume`, `resize_volume`, `remove_volume` | `volume-create:`, `volume-resize:`, `volume-remove:` |
+
+As for the `machines` server, deny its tools in the user's configuration
+(action `storage_*`) to keep the agent from them.
+
+Not yet: binding a volume into a container (systemd-nspawn ignores `Bind=` in
+an image's own settings, and `machinectl bind` isn't allowed, see
+[Security notes](#security-notes)), redundancy (RAID), and recovering a pool
+whose cache disk died, which takes `lvconvert --uncache --force` by hand.
+
+`make qemu` storage: `--hdd SIZE` and `--ssd SIZE`, each repeatable, attach
+more disks, blank and kept along with the TPM, on virtio-blk, which the VM
+sees as hard disks (`vda`, ... after `--disk`), and NVMe, as SSDs
+(`nvme0n1`, ...):
+
+```sh
+python3 scripts/run_qemu.py --disk 4G --hdd 8G --hdd 8G --ssd 2G
+```
+
 ## Firewall
 
 `cherry-firewall.service` loads Cherry's nftables rules,
@@ -551,8 +676,10 @@ or `clean` and `set-limit` on all the images at once. `machinectl start` is a
 start of `systemd-nspawn@<name>.service`, so it may start, stop and restart
 those units, and no other but `cherry-bootstrap@.service`, which creates a
 container: it runs the bootstrap tool below as root, with the README's command
-for it, and `cherry-image@.service`, which builds images (see
-[Building images](#building-images)). The instance of `cherry-bootstrap@` is
+for it, `cherry-image@.service`, which builds images (see
+[Building images](#building-images)), and `cherry-storage@.service`, which
+claims disks and makes pools and volumes of them (see [Storage](#storage)).
+The instance of `cherry-bootstrap@` is
 the distribution, its release and the machine's name, separated by colons:
 
 ```sh
@@ -738,8 +865,9 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   Automatic updates are off: a new version comes with a new image.
 - **Tools:** the bash tool runs `bash`, the grep tool the image's ripgrep, and
   git is on the image for its snapshots and worktrees. The `cherry` package
-  adds tools for container images, an MCP server and a skill in
-  `/etc/opencode` (see [Building images](#building-images)).
+  adds tools for container images and for storage, MCP servers and skills in
+  `/etc/opencode` (see [Building images](#building-images) and
+  [Storage](#storage)).
 - **Providers:** none are configured; nothing on the machine holds a key.
   Connect one at runtime, in OpenChamber. The credential lands under
   `/var/lib/cherry`: on the machine's encrypted disk if it has one, and
@@ -780,11 +908,12 @@ on a machine with a TPM.
   `/var/lib/cherry` (OpenChamber's in `.config/openchamber`), and the agent
   works in `/var/lib/cherry/work` unless a project picks another directory.
   All of it persists if `/var` is on the machine's disk, and is new at every
-  boot otherwise (see [Disks](#disks)). `/var/lib/cherry`
-  is the only place the service can write: it sees the rest of the system
-  read-only, with a private `/tmp`, and runs without capabilities, under a
-  system call filter (systemd's `@system-service` set, less `@privileged`,
-  whose calls fail with `EPERM`).
+  boot otherwise (see [Disks](#disks)); the volumes of its storage pools,
+  mounted under `/var/lib/cherry/volumes`, persist either way (see
+  [Storage](#storage)). `/var/lib/cherry` is the only place the service can
+  write: it sees the rest of the system read-only, with a private `/tmp`, and
+  runs without capabilities, under a system call filter (systemd's
+  `@system-service` set, less `@privileged`, whose calls fail with `EPERM`).
 - **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
   OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
   socket. Reach the UI through SSH port forwarding (below), once the firewall
@@ -831,10 +960,14 @@ This is a development image:
   (`machinectl copy-to`, `copy-from`, `bind`): systemd-machined does those as
   root, on host paths the caller picks, so they would give it the host (any
   file to read, root's `/var/roothome/.ssh/authorized_keys` to write).
-- The TPM unseals the key of the encrypted `/var` disk whatever the machine
-  boots: it isn't bound to the boot state (PCRs) yet. The disk is unreadable
-  away from its machine, but anything that boots the machine (an HTTP boot
-  server, a USB stick) can unlock it.
+- The `cherry` user claims disks through polkit (see [Storage](#storage)),
+  which erases them: any disk nothing uses, as `cherry-storage` runs as root
+  for it, with checked arguments. A process running as that user, the agent
+  or a terminal of OpenChamber's, can erase such a disk, or a pool's volume.
+- The TPM unseals the key of the encrypted `/var` disk, and of the claimed
+  disks, whatever the machine boots: it isn't bound to the boot state (PCRs)
+  yet. Each is unreadable away from its machine, but anything that boots the
+  machine (an HTTP boot server, a USB stick) can unlock it.
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
   signed. With Secure Boot on, the kernel still loads unsigned modules: its

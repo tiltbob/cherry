@@ -1,0 +1,25 @@
+[Unit]
+# The storage pools of the disks the cherry user claimed (cherry-storage@):
+# at boot, the TPM unlocks each claimed disk, each pool is activated and each
+# of its volumes checked and mounted on /var/lib/cherry/volumes/<pool>/<volume>;
+# at shutdown, the other way round.
+Description=Cherry Storage Pools
+Documentation=https://github.com/tiltbob/cherry#storage
+# Only with a usable TPM (see /init), which holds the disks' keys.
+ConditionPathExists=/run/cherry/identity/ek-hash
+# The disks as udev set them up at boot (sysinit.target), the TPM, and /var,
+# where the volumes are mounted. Before the agent, which uses them: at
+# shutdown, it is gone before they are unmounted.
+After=tpm2.target systemd-tpm2-setup-early.service cherry-var.service
+Before=cherry.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/cherry-storage boot start
+ExecStop=-/usr/libexec/cherry-storage boot stop
+# Checking the volumes' filesystems can take a while after a crash.
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target
