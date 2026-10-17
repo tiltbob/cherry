@@ -1,12 +1,10 @@
 #!/bin/sh
-# cherry-image@.service: build container images in /var/lib/machines, and
-# export them, as root, for the cherry user, which may start this unit but
-# neither write there nor run systemd-nspawn itself. The instance is a verb and
-# an image name, separated by a colon:
+# cherry-image@.service: build container images in /var/lib/machines, as
+# root, for the cherry user, which may start this unit but neither write there
+# nor run systemd-nspawn itself. The instance is a verb and an image name,
+# separated by a colon:
 #
 #   systemctl start cherry-image@build:web   # build web from its recipe
-#   systemctl start cherry-image@tar:web     # export it as web.tar.xz
-#   systemctl start cherry-image@raw:web     # export it as web.raw
 #   machinectl start web
 #
 # build: the recipe is the cherry user's /var/lib/cherry/images/<name>/:
@@ -22,31 +20,27 @@
 # /etc/machine-id and clears the package caches. The finished image takes its
 # name in /var/lib/machines; a failed build leaves nothing behind.
 #
-# tar and raw: the image, which must not be running, as the cherry user's
-# /var/lib/cherry/exports/<name>.tar.xz, for importctl or machinectl
-# import-tar and pull-tar, or <name>.raw, a GPT disk image with an ext4 root
-# partition, for systemd-nspawn --image= or as /var/lib/machines/<name>.raw.
+# Images never leave the machine that built them: there is nothing here to
+# write one out for another machine.
 #
-# The recipe is read, and the exports written, by processes that run as the
-# cherry user (systemd-run), so this reads and replaces only what that user
-# could. The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry
-# user can read. $CHERRY_MACHINES_DIR, $CHERRY_IMAGES_DIR, $CHERRY_EXPORTS_DIR
-# and $CHERRY_LIBEXEC replace /var/lib/machines, /var/lib/cherry/images,
-# /var/lib/cherry/exports and /usr/libexec (tests/image.sh).
+# The recipe is read by processes that run as the cherry user (systemd-run),
+# so this reads only what that user could. The output goes to
+# $LOGS_DIRECTORY/<instance>.log, which the cherry user can read.
+# $CHERRY_MACHINES_DIR, $CHERRY_IMAGES_DIR and $CHERRY_LIBEXEC replace
+# /var/lib/machines, /var/lib/cherry/images and /usr/libexec (tests/image.sh).
 set -eu
 
 machines=${CHERRY_MACHINES_DIR:-/var/lib/machines}
 recipes=${CHERRY_IMAGES_DIR:-/var/lib/cherry/images}
-exports=${CHERRY_EXPORTS_DIR:-/var/lib/cherry/exports}
 libexec=${CHERRY_LIBEXEC:-/usr/libexec}
 instance=$1
 verb=${instance%%:*}
 name=${instance#*:}
 
 case $verb in
-build | tar | raw) ;;
+build) ;;
 *)
-	echo "bad instance '$instance': build:<name>, tar:<name> or raw:<name>" >&2
+	echo "bad instance '$instance': build:<name>" >&2
 	exit 1 ;;
 esac
 # A valid machine name and hostname, also with cherry-image- before it.
@@ -72,11 +66,9 @@ tmp=$(mktemp -d)
 staging=$machines/.cherry-image
 dir=$machines/$name
 tree=
-image=
 cleanup() {
 	rm -rf "$tmp"
 	if [ -n "$tree" ]; then rm -rf "$tree"; fi
-	if [ -n "$image" ]; then rm -f "$image"; fi
 }
 trap cleanup EXIT
 
@@ -144,84 +136,4 @@ build() {
 	echo "built $dir ($(du -sh "$dir" | cut -f 1)): machinectl start $name"
 }
 
-# The image is a directory, not running, and owned by the user this runs as
-# (root): its UIDs are those of the machine that will run it, not shifted
-# into a user namespace's range.
-check_image() {
-	if [ ! -d "$dir" ] || [ -L "$dir" ]; then
-		echo "no image directory $dir"
-		exit 1
-	fi
-	if machinectl show "$name" >/dev/null 2>&1; then
-		echo "$name is running: stop it first (machinectl poweroff $name)"
-		exit 1
-	fi
-	if [ "$(stat -c %u "$dir")" != "$(id -u)" ]; then
-		echo "$dir is owned by UID $(stat -c %u "$dir"), not $(id -u): its UIDs are shifted"
-		exit 1
-	fi
-}
-
-# export_as <file> <command...>: the command's output, written by the cherry
-# user to $exports/.<file>.part, sparse, then renamed to <file> if the command
-# succeeded. dd reads the pipe it is given, which that user could not open
-# again as /dev/stdin: the pipe is root's. The command runs where set -e is
-# off: it appends to $tmp/failed when it fails.
-export_as() {
-	file=$1
-	shift
-	echo "exporting $dir to $exports/$file"
-	# shellcheck disable=SC2016 # the cherry user's sh expands them
-	"$@" | as_cherry sh -c 'umask 022 && mkdir -p "$1" && dd of="$1/.$2.part" bs=64K iflag=fullblock conv=sparse status=none' \
-		sh "$exports" "$file" || echo failed >>"$tmp/failed"
-	if [ -e "$tmp/failed" ]; then
-		as_cherry rm -f "$exports/.$file.part"
-		echo "exporting $name failed"
-		exit 1
-	fi
-	as_cherry mv -f "$exports/.$file.part" "$exports/$file"
-	echo "exported $exports/$file ($(du -h --apparent-size "$exports/$file" | cut -f 1))"
-}
-
-tarball() {
-	{
-		tar --numeric-owner --xattrs --xattrs-include='*' --sparse --one-file-system -C "$dir" -cf - . ||
-			echo failed >>"$tmp/failed"
-	} | xz -T0 --memlimit-compress=25% || echo failed >>"$tmp/failed"
-}
-
-# A GPT disk image whose root partition holds the tree as ext4, with a quarter
-# more room and 256 MiB for the container to write, in $image.
-make_raw() {
-	mkdir "$tmp/repart.d"
-	cat >"$tmp/repart.d/root.conf" <<EOF
-[Partition]
-Type=root
-Format=ext4
-CopyFiles=/
-EOF
-	used=$(du -sx --block-size=1M "$dir" | cut -f 1)
-	size=$((used + used / 4 + 256))
-	mkdir -p "$staging"
-	chmod 0700 "$staging"
-	image=$staging/$name.raw
-	rm -f "$image"
-	echo "writing a raw image of $size MiB"
-	systemd-repart --empty=create --size="${size}M" --seed=random --offline=yes --dry-run=no --no-pager \
-		--definitions="$tmp/repart.d" --root="$dir" "$image"
-}
-
-read_raw() {
-	cat "$image" || echo failed >>"$tmp/failed"
-}
-
-case $verb in
-build) build ;;
-tar)
-	check_image
-	export_as "$name.tar.xz" tarball ;;
-raw)
-	check_image
-	make_raw
-	export_as "$name.raw" read_raw ;;
-esac
+build

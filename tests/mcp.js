@@ -3,13 +3,12 @@
 // recipe that cherry-image reads, and drives cherry-image@.service and
 // machinectl as the README says: run with stand-ins for systemctl, machinectl
 // and busctl on PATH, which log their arguments and keep the machine's state
-// (images, running containers) in files, and the recipe, export and log
-// directories in a temporary one. Needs node, sh and coreutils' timeout; the
-// server runs on node too, or on $MCP_RUNTIME (e.g. bun, as on the image).
+// (images, running containers) in files, and the recipe and log directories
+// in a temporary one. Needs node, sh and coreutils' timeout; the server runs
+// on node too, or on $MCP_RUNTIME (e.g. bun, as on the image).
 "use strict";
 const assert = require("assert");
 const { spawn } = require("child_process");
-const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -17,24 +16,20 @@ const readline = require("readline");
 
 const server = path.join(__dirname, "..", "package", "cherry", "cherry-machines-mcp.js");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cherry-mcp-"));
-const dirs = Object.fromEntries(["bin", "recipes", "exports", "logs", "state"].map((d) => [d, path.join(tmp, d)]));
+const dirs = Object.fromEntries(["bin", "recipes", "logs", "state"].map((d) => [d, path.join(tmp, d)]));
 Object.values(dirs).forEach((d) => fs.mkdirSync(d));
 const calls = path.join(tmp, "calls");
 
 // The machine's state, in files of $STATE with a name per line: images,
 // running containers, and dead ones (running, but never letting a shell in).
 const STANDINS = {
-  // cherry-image@<verb>:<name>.service: a log, the export, and a failure for $FAIL_UNIT.
+  // cherry-image@<verb>:<name>.service: a log, and a failure for $FAIL_UNIT.
   systemctl: `
 echo "systemctl $*" >>"$CALLS"
 unit=$3 instance=\${3#cherry-image@}; instance=\${instance%.service}
 printf 'line %s\\n' $(seq 1 100) >"$LOGS/$instance.log"
 echo "end of $instance" >>"$LOGS/$instance.log"
-[ "$unit" != "$FAIL_UNIT" ] || { echo "Job for $unit failed." >&2; exit 1; }
-case $instance in
-tar:*) printf 'tarball of %s\\n' "\${instance#*:}" >"$EXPORTS/\${instance#*:}.tar.xz" ;;
-raw:*) printf 'raw image of %s\\n' "\${instance#*:}" >"$EXPORTS/\${instance#*:}.raw" ;;
-esac`,
+[ "$unit" != "$FAIL_UNIT" ] || { echo "Job for $unit failed." >&2; exit 1; }`,
   // shell runs the command here, through a stand-in pty: CRLF line ends, an
   // escape sequence first, and nothing at all once stdin is at EOF, as
   // systemd's pty forwarder ends then.
@@ -83,8 +78,7 @@ class Client {
   constructor() {
     this.child = spawn(process.env.MCP_RUNTIME || process.execPath, [server], {
       env: { ...process.env, PATH: `${dirs.bin}:${process.env.PATH}`, CALLS: calls, STATE: dirs.state, LOGS: dirs.logs,
-        EXPORTS: dirs.exports, CHERRY_IMAGES_DIR: dirs.recipes, CHERRY_EXPORTS_DIR: dirs.exports,
-        CHERRY_IMAGE_LOGS: dirs.logs },
+        CHERRY_IMAGES_DIR: dirs.recipes, CHERRY_IMAGE_LOGS: dirs.logs },
       stdio: ["pipe", "pipe", "inherit"],
     });
     this.id = 0;
@@ -143,7 +137,7 @@ async function main() {
 
   await test("tools/list", async () => {
     const { tools } = (await c.request("tools/list")).result;
-    assert.deepStrictEqual(tools.map((t) => t.name), ["list", "build", "export", "start", "stop", "exec", "remove"]);
+    assert.deepStrictEqual(tools.map((t) => t.name), ["list", "build", "start", "stop", "exec", "remove"]);
     for (const t of tools) {
       assert.strictEqual(t.inputSchema.type, "object", t.name);
       assert(t.description.length > 40, t.name);
@@ -246,19 +240,12 @@ async function main() {
     assert(!called().some((l) => l.startsWith("systemctl")), "built over a running image");
   });
 
-  await test("export", async () => {
-    for (const [format, file] of [["tar", "web.tar.xz"], ["raw", "web.raw"]]) {
-      reset();
-      const r = await c.call("export", { name: "web", format });
-      assert(!r.isError, r.text);
-      const result = JSON.parse(r.text);
-      const data = fs.readFileSync(path.join(dirs.exports, file));
-      assert.deepStrictEqual(result, { path: path.join(dirs.exports, file), bytes: data.length,
-        sha256: crypto.createHash("sha256").update(data).digest("hex"), use: result.use });
-      assert.match(result.use, format === "tar" ? /^importctl import-tar web\.tar\.xz web$/ : /--image=web\.raw/);
-      assert.deepStrictEqual(called(), [`systemctl start --no-ask-password cherry-image@${format}:web.service`]);
-    }
-    assert((await c.call("export", { name: "web", format: "zip" })).isError);
+  // Images never leave the machine: no tool writes one out.
+  await test("no export", async () => {
+    reset();
+    const m = await c.request("tools/call", { name: "export", arguments: { name: "web", format: "tar" } });
+    assert.strictEqual(m.error?.code, -32602, JSON.stringify(m));
+    assert.deepStrictEqual(called(), []);
   });
 
   await test("list", async () => {
@@ -270,7 +257,7 @@ async function main() {
     ]);
     assert.deepStrictEqual(r.running, [{ name: "web", class: "container", service: "nspawn" }]);
     assert(r.recipes.includes("web") && r.recipes.includes("a1"), JSON.stringify(r.recipes));
-    assert.deepStrictEqual(r.exports.map((e) => path.basename(e.path)), ["web.raw", "web.tar.xz"]);
+    assert.deepStrictEqual(Object.keys(r), ["images", "running", "recipes"]);
   });
 
   await test("start, exec, stop", async () => {

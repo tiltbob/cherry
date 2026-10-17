@@ -1,6 +1,6 @@
 ---
 name: Machine images
-description: Build, test and export systemd-nspawn container images that machinectl runs, with the machines tools
+description: Build and test systemd-nspawn container images that machinectl runs, with the machines tools
 ---
 
 # Machine images
@@ -11,11 +11,10 @@ there or run systemd-nspawn yourself; the `machines` tools do it for you:
 
 | Tool | Does |
 |---|---|
-| `list` | images, running containers, recipes, exports |
+| `list` | images, running containers, recipes |
 | `build` | builds an image from a recipe (minutes) |
 | `start` / `stop` | boots / shuts down a container of an image |
 | `exec` | runs a shell command in a running container, as root |
-| `export` | writes an image to a file, `tar` or `raw` |
 | `remove` | removes an image |
 
 ## Workflow
@@ -26,8 +25,11 @@ there or run systemd-nspawn yourself; the `machines` tools do it for you:
    program answers, the files are there.
 3. Wrong? Fix the recipe and `build` again with `replace: true` (`stop` it
    first). Change images through the recipe rather than by hand in a running
-   container, so the image can be rebuilt and exported as it is.
-4. `stop` it, and `export` it if it is meant for other machines.
+   container, so the image can be rebuilt as it is.
+4. `stop` it when it is done.
+
+Images stay on this machine: there is no tool to write one out for another
+machine, which builds its own from a recipe.
 
 ## Recipe
 
@@ -90,26 +92,10 @@ systemd-networkd, whose `80-container-host0.network` asks for DHCP:
 Then `start` `web` and `exec` `curl -s localhost` (with `curl` among the
 packages), or `systemctl is-active nginx`.
 
-## Exports
-
-`export` writes to `/var/lib/cherry/exports/`:
-
-- `tar`: `<name>.tar.xz`. On another machine with systemd-importd:
-  `importctl import-tar <name>.tar.xz <name>`, or `importctl pull-tar
-  <URL>` from a web server (`machinectl import-tar`/`pull-tar` on older
-  systemd). Then `machinectl start <name>`.
-- `raw`: `<name>.raw`, a GPT disk image with an ext4 root partition:
-  `systemd-nspawn --image=<name>.raw --boot`, or put it in
-  `/var/lib/machines/` as is.
-
-The image's `.nspawn` settings stay on this machine; copy them to
-`/etc/systemd/nspawn/<name>.nspawn` on the other one if it needs them.
-
 ## Limits
 
-- `/var` holds the images and exports: on the machine's encrypted disk if it
-  has one, otherwise in RAM, gone at the next boot. A Debian base takes
-  about 240 MB; mind the RAM.
-- Export only a stopped container: `export` refuses a running one.
+- `/var` holds the images: on the machine's encrypted disk if it has one,
+  otherwise in RAM, gone at the next boot. A Debian base takes about 240 MB;
+  mind the RAM.
 - Building runs the distribution's package manager from its mirrors, so
   the machine needs to reach them.

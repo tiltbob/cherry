@@ -80,8 +80,8 @@ notHandled.push(["cherry", MANAGE_IMAGES, {}]);
 // machinectl start/stop/restart: systemd-nspawn@ units.
 for (const verb of ["start", "stop", "restart"]) yes.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
 for (const verb of ["reload", "kill", "try-restart", "reload-or-restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
-// Creating a container: starting cherry-bootstrap@, nothing else; building or exporting an image: starting
-// cherry-image@, nothing else.
+// Creating a container: starting cherry-bootstrap@, nothing else; building an image: starting cherry-image@,
+// nothing else.
 for (const unit of [BOOTSTRAP, IMAGE]) {
   yes.push(["cherry", MANAGE_UNITS, { unit, verb: "start" }]);
   for (const verb of ["stop", "restart", "kill"]) notHandled.push(["cherry", MANAGE_UNITS, { unit, verb }]);

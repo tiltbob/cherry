@@ -2,8 +2,8 @@
 // agent as, manages containers with machinectl: start, poweroff, reboot,
 // terminate, kill, remove, clone, rename, read-only, set-limit (of an image),
 // shell and login (not the host's own shell, login or pty), creates them with
-// cherry-bootstrap@.service, and builds and exports images with
-// cherry-image@.service. machined's manage-machines and manage-images actions
+// cherry-bootstrap@.service, and builds images with cherry-image@.service.
+// machined's manage-machines and manage-images actions
 // cover more than that, so they are allowed by the verb detail machined
 // passes for each call (systemd 258's src/machine/*-dbus.c and
 // *-varlink.c): not copy (machinectl copy-to, copy-from) or bind, which
