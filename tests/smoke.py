@@ -967,6 +967,9 @@ class Smoke:
               "the disk changed on another machine")
         # Erased as the README says, it is blank again: no partition, and nothing wipefs finds.
         vm.run("wipefs --all --force /dev/vda1 /dev/vda")
+        # With --force, wipefs leaves re-reading the partition table to udevd, which races the
+        # check below: wait for udevd, then have the kernel re-read it.
+        vm.run("udevadm settle; partprobe /dev/vda")
         check(vm.run("wipefs --no-act --noheadings /dev/vda; ls -d /sys/class/block/vda/vda* 2>/dev/null; true") == "",
               "wipefs did not leave the disk blank")
         vm.stop()
