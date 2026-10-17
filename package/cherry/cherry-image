@@ -1,0 +1,226 @@
+#!/bin/sh
+# cherry-image@.service: build container images in /var/lib/machines, and
+# export them, as root, for the cherry user, which may start this unit but
+# neither write there nor run systemd-nspawn itself. The instance is a verb and
+# an image name, separated by a colon:
+#
+#   systemctl start cherry-image@build:web   # build web from its recipe
+#   systemctl start cherry-image@tar:web     # export it as web.tar.xz
+#   systemctl start cherry-image@raw:web     # export it as web.raw
+#   machinectl start web
+#
+# build: the recipe is the cherry user's /var/lib/cherry/images/<name>/:
+#   image.conf    Distribution= and Release=, as cherry-bootstrap@ takes them
+#                 (debian, an rpmstrap profile, or arch with no release), and
+#                 Packages=, more packages for the image's package manager
+#   extra/        a tree copied onto the image's root, owned by root
+#   postinst      a script run last in the image, as its root
+#   image.nspawn  the image's settings, as /var/lib/machines/<name>.nspawn
+# cherry-bootstrap creates the image under /var/lib/machines/.cherry-image/,
+# then cherry-image-setup runs in it, under systemd-nspawn with a user
+# namespace: it installs the packages, copies extra/, runs postinst, empties
+# /etc/machine-id and clears the package caches. The finished image takes its
+# name in /var/lib/machines; a failed build leaves nothing behind.
+#
+# tar and raw: the image, which must not be running, as the cherry user's
+# /var/lib/cherry/exports/<name>.tar.xz, for importctl or machinectl
+# import-tar and pull-tar, or <name>.raw, a GPT disk image with an ext4 root
+# partition, for systemd-nspawn --image= or as /var/lib/machines/<name>.raw.
+#
+# The recipe is read, and the exports written, by processes that run as the
+# cherry user (systemd-run), so this reads and replaces only what that user
+# could. The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry
+# user can read. $CHERRY_MACHINES_DIR, $CHERRY_IMAGES_DIR, $CHERRY_EXPORTS_DIR
+# and $CHERRY_LIBEXEC replace /var/lib/machines, /var/lib/cherry/images,
+# /var/lib/cherry/exports and /usr/libexec (tests/image.sh).
+set -eu
+
+machines=${CHERRY_MACHINES_DIR:-/var/lib/machines}
+recipes=${CHERRY_IMAGES_DIR:-/var/lib/cherry/images}
+exports=${CHERRY_EXPORTS_DIR:-/var/lib/cherry/exports}
+libexec=${CHERRY_LIBEXEC:-/usr/libexec}
+instance=$1
+verb=${instance%%:*}
+name=${instance#*:}
+
+case $verb in
+build | tar | raw) ;;
+*)
+	echo "bad instance '$instance': build:<name>, tar:<name> or raw:<name>" >&2
+	exit 1 ;;
+esac
+# A valid machine name and hostname, also with cherry-image- before it.
+case $name in
+'' | [!A-Za-z0-9]* | *[!A-Za-z0-9-]*)
+	echo "bad image name '$name': letters, digits and '-', starting with a letter or digit" >&2
+	exit 1 ;;
+esac
+if [ ${#name} -gt 48 ]; then
+	echo "bad image name '$name': longer than 48 characters" >&2
+	exit 1
+fi
+
+log=$LOGS_DIRECTORY/$instance.log
+echo "$verb $name, log in $log"
+exec >"$log" 2>&1 </dev/null
+
+as_cherry() {
+	systemd-run --quiet --pipe --wait --collect -p User=cherry -- "$@"
+}
+
+tmp=$(mktemp -d)
+staging=$machines/.cherry-image
+dir=$machines/$name
+tree=
+image=
+cleanup() {
+	rm -rf "$tmp"
+	if [ -n "$tree" ]; then rm -rf "$tree"; fi
+	if [ -n "$image" ]; then rm -f "$image"; fi
+}
+trap cleanup EXIT
+
+build() {
+	if [ -e "$dir" ] || [ -e "$dir.raw" ]; then
+		echo "$dir exists: remove it first (machinectl remove $name)"
+		exit 1
+	fi
+	if ! as_cherry cat "$recipes/$name/image.conf" >"$tmp/image.conf"; then
+		echo "no recipe: $recipes/$name/image.conf"
+		exit 1
+	fi
+	distro='' release='' packages=''
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+		'' | '#'*) ;;
+		Distribution=*) distro=${line#*=} ;;
+		Release=*) release=${line#*=} ;;
+		Packages=*) packages="$packages ${line#*=}" ;;
+		*)
+			echo "image.conf: unknown setting: $line"
+			exit 1 ;;
+		esac
+	done <"$tmp/image.conf"
+
+	# cherry-bootstrap checks the distribution and the release.
+	mkdir -p "$staging"
+	chmod 0700 "$staging"
+	tree=$staging/$name
+	rm -rf "$tree"
+	CHERRY_MACHINES_DIR=$staging LOGS_DIRECTORY='' "$libexec/cherry-bootstrap" "$distro:$release:$name"
+
+	# The recipe, as the cherry user reads it, into a new directory. GNU tar
+	# extracts a symbolic link that points outside it last, so nothing is
+	# written through one.
+	mkdir -m 0700 "$tree/.cherry-image" "$tree/.cherry-image/recipe"
+	if ! as_cherry tar -C "$recipes/$name" -cf - . >"$tree/.cherry-image/recipe.tar"; then
+		echo "cannot read the recipe $recipes/$name"
+		exit 1
+	fi
+	tar -C "$tree/.cherry-image/recipe" --no-same-owner -xf "$tree/.cherry-image/recipe.tar"
+	rm "$tree/.cherry-image/recipe.tar"
+	printf '%s\n' "$packages" >"$tree/.cherry-image/packages"
+	cp "$libexec/cherry-image-setup" "$tree/.cherry-image/setup"
+	# Taken now: once the image ran, its root may have made it a link to
+	# anything on the host.
+	settings=$tree/.cherry-image/recipe/image.nspawn
+	if [ -f "$settings" ] && [ ! -L "$settings" ]; then
+		cp "$settings" "$tmp/settings"
+	fi
+
+	echo "setting up $name in systemd-nspawn"
+	systemd-nspawn --quiet --pipe --register=no --settings=no -U \
+		--machine="cherry-image-$name" --hostname="$name" \
+		--directory="$tree" /.cherry-image/setup
+	# A link left in its place is removed, not followed.
+	rm -rf "$tree/.cherry-image"
+
+	mv -T "$tree" "$dir"
+	tree=
+	rm -f "$machines/$name.nspawn"
+	if [ -e "$tmp/settings" ]; then
+		install -m 0644 "$tmp/settings" "$machines/$name.nspawn"
+	fi
+	echo "built $dir ($(du -sh "$dir" | cut -f 1)): machinectl start $name"
+}
+
+# The image is a directory, not running, and owned by the user this runs as
+# (root): its UIDs are those of the machine that will run it, not shifted
+# into a user namespace's range.
+check_image() {
+	if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+		echo "no image directory $dir"
+		exit 1
+	fi
+	if machinectl show "$name" >/dev/null 2>&1; then
+		echo "$name is running: stop it first (machinectl poweroff $name)"
+		exit 1
+	fi
+	if [ "$(stat -c %u "$dir")" != "$(id -u)" ]; then
+		echo "$dir is owned by UID $(stat -c %u "$dir"), not $(id -u): its UIDs are shifted"
+		exit 1
+	fi
+}
+
+# export_as <file> <command...>: the command's output, written by the cherry
+# user to $exports/.<file>.part, then renamed to <file> if the command
+# succeeded. The command runs where set -e is off: it appends to $tmp/failed
+# when it fails.
+export_as() {
+	file=$1
+	shift
+	echo "exporting $dir to $exports/$file"
+	# shellcheck disable=SC2016 # the cherry user's sh expands them
+	"$@" | as_cherry sh -c 'umask 022 && mkdir -p "$1" && cp --sparse=always /dev/stdin "$1/.$2.part"' \
+		sh "$exports" "$file" || echo failed >>"$tmp/failed"
+	if [ -e "$tmp/failed" ]; then
+		as_cherry rm -f "$exports/.$file.part"
+		echo "exporting $name failed"
+		exit 1
+	fi
+	as_cherry mv -f "$exports/.$file.part" "$exports/$file"
+	echo "exported $exports/$file ($(du -h --apparent-size "$exports/$file" | cut -f 1))"
+}
+
+tarball() {
+	{
+		tar --numeric-owner --xattrs --xattrs-include='*' --sparse --one-file-system -C "$dir" -cf - . ||
+			echo failed >>"$tmp/failed"
+	} | xz -T0 --memlimit-compress=25% || echo failed >>"$tmp/failed"
+}
+
+# A GPT disk image whose root partition holds the tree as ext4, with a quarter
+# more room and 256 MiB for the container to write, in $image.
+make_raw() {
+	mkdir "$tmp/repart.d"
+	cat >"$tmp/repart.d/root.conf" <<EOF
+[Partition]
+Type=root
+Format=ext4
+CopyFiles=/
+EOF
+	used=$(du -sx --block-size=1M "$dir" | cut -f 1)
+	size=$((used + used / 4 + 256))
+	mkdir -p "$staging"
+	chmod 0700 "$staging"
+	image=$staging/$name.raw
+	rm -f "$image"
+	echo "writing a raw image of $size MiB"
+	systemd-repart --empty=create --size="${size}M" --seed=random --offline=yes --dry-run=no --no-pager \
+		--definitions="$tmp/repart.d" --root="$dir" "$image"
+}
+
+read_raw() {
+	cat "$image" || echo failed >>"$tmp/failed"
+}
+
+case $verb in
+build) build ;;
+tar)
+	check_image
+	export_as "$name.tar.xz" tarball ;;
+raw)
+	check_image
+	make_raw
+	export_as "$name.raw" read_raw ;;
+esac

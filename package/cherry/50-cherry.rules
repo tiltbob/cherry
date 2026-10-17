@@ -1,9 +1,10 @@
 // The cherry user, which cherry.service runs OpenChamber and the OpenCode
 // agent as, manages containers with machinectl: start, poweroff, terminate,
 // kill, remove, clone, shell and login (not the host's own shell, login or
-// pty), and creates them with cherry-bootstrap@.service. machinectl start
-// goes to systemd, not machined: it starts systemd-nspawn@<name>.service, so
-// those units it may start, stop and restart; cherry-bootstrap@ units it may
+// pty), creates them with cherry-bootstrap@.service, and builds and exports
+// images with cherry-image@.service. machinectl start goes to systemd, not
+// machined: it starts systemd-nspawn@<name>.service, so those units it may
+// start, stop and restart; cherry-bootstrap@ and cherry-image@ units it may
 // start; no other unit. Everyone else keeps polkit's defaults.
 polkit.addRule(function(action, subject) {
     if (subject.user != "cherry")
@@ -21,6 +22,8 @@ polkit.addRule(function(action, subject) {
             (verb == "start" || verb == "stop" || verb == "restart"))
             return polkit.Result.YES;
         if (unit.indexOf("cherry-bootstrap@") == 0 && verb == "start")
+            return polkit.Result.YES;
+        if (unit.indexOf("cherry-image@") == 0 && verb == "start")
             return polkit.Result.YES;
     }
     return polkit.Result.NOT_HANDLED;

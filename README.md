@@ -31,7 +31,8 @@ Once booted:
 - **Services:** systemd 258 with networkd (DHCP), resolved, timesyncd,
   journald, machined/machinectl and systemd-nspawn, plus OpenSSH and
   OpenChamber running the OpenCode agent, as the `cherry` user (see
-  [Cherry service](#cherry-service)).
+  [Cherry service](#cherry-service)), with tools to build, run and export
+  container images (see [Building images](#building-images)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -98,16 +99,19 @@ on the scripts), flake8 over `tests/` and `scripts/`, the workflows as YAML,
 against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
-argument checks and tool calls, `post-build.sh`'s check of `opencode`, the
-firewall's rules, in network namespaces standing in for a host, its LAN and
-its containers, the Secure Boot keys in `board/x86_64/secureboot/` and what
-`cherry-secureboot` enrolls from them, the key ceremony on a SoftHSM token,
-and `cherry-var.service`'s choice of disk. `make -k check` runs on after a
-failure; `make check-<name>` runs one. They need shellcheck, flake8,
-python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
-the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
-softhsm2, opensc and pkcs11-provider for the ceremony (each skipped without
-them).
+argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
+busybox root, and its exports, the OpenCode MCP server's tools against
+stand-ins for systemctl, machinectl and busctl, `post-build.sh`'s check of
+`opencode`, the firewall's rules, in network namespaces standing in for a
+host, its LAN and its containers, the Secure Boot keys in
+`board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
+key ceremony on a SoftHSM token, and `cherry-var.service`'s choice of disk.
+`make -k check` runs on after a failure; `make check-<name>` runs one. They
+need shellcheck, flake8, python3-magic, python3-yaml, systemd's
+`systemd-analyze` and openssl; node for the polkit rules and the MCP server;
+busybox and user namespaces for `cherry-image` and the firewall, and nft and
+ip for the firewall; softhsm2, opensc and pkcs11-provider for the ceremony
+(each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -515,8 +519,9 @@ own shell or login (`machinectl shell .host`). `machinectl start` is a start
 of `systemd-nspawn@<name>.service`, so it may start, stop and restart those
 units, and no other but `cherry-bootstrap@.service`, which creates a
 container: it runs the bootstrap tool below as root, with the README's command
-for it. The instance is the distribution, its release and the machine's name,
-separated by colons:
+for it, and `cherry-image@.service`, which builds and exports images (see
+[Building images](#building-images)). The instance of `cherry-bootstrap@` is
+the distribution, its release and the machine's name, separated by colons:
 
 ```sh
 systemctl start cherry-bootstrap@debian:trixie:mybox    # debootstrap
@@ -620,6 +625,76 @@ machinectl shell arch
   to Arch's `systemd-network` user and stop the host's systemd-networkd from
   writing its state.
 
+### Building images
+
+`cherry-image@.service` builds container images to measure, from a recipe,
+and exports them for other machines: for the `cherry` user, and so for the
+OpenCode agent, which gets tools for it (below). Root can use it too. A recipe
+is a directory, `/var/lib/cherry/images/<name>/`:
+
+| File | Holds |
+|---|---|
+| `image.conf` | `Distribution=` and `Release=`, as `cherry-bootstrap@` takes them, and `Packages=`, more packages for the image's own apt-get, dnf or pacman |
+| `extra/` | a tree copied onto the image's root, owned by root |
+| `postinst` | a script run last in the image, as its root, with network |
+| `image.nspawn` | the image's settings, installed as `/var/lib/machines/<name>.nspawn` |
+
+The instance is a verb and the image's name, separated by a colon:
+
+```sh
+systemctl start cherry-image@build:web   # /var/lib/machines/web, from /var/lib/cherry/images/web
+machinectl start web
+machinectl poweroff web
+systemctl start cherry-image@tar:web     # /var/lib/cherry/exports/web.tar.xz
+systemctl start cherry-image@raw:web     # /var/lib/cherry/exports/web.raw
+```
+
+- **build:** bootstraps the distribution with `cherry-bootstrap` under
+  `/var/lib/machines/.cherry-image/`, then does the rest in the image, under
+  `systemd-nspawn` with a user namespace, so that the recipe's script is root
+  only in there: installs the packages, copies `extra/` (into the image's own
+  directories, links such as `/bin -> usr/bin` included), runs `postinst`,
+  empties `/etc/machine-id`, so that each container of the image gets its own,
+  and clears the package caches. Then the image takes its name. A failed build
+  leaves nothing behind, and a build never replaces an image: `machinectl
+  remove` it first. Image names are letters, digits and `-`, up to 48.
+- **tar:** the image, which must not be running, as an xz-compressed tarball,
+  which `importctl import-tar`, or `pull-tar` from a web server, turns into an
+  image on another machine (`machinectl import-tar` on systemd older than 256).
+- **raw:** the image as a GPT disk image, made by `systemd-repart`, whose root
+  partition holds it as ext4, with a quarter more room and 256 MiB to write:
+  for `systemd-nspawn --image=`, or as `/var/lib/machines/<name>.raw`.
+- **As the cherry user:** the recipe is read, and the exports written, by
+  processes that run as `cherry` (`systemd-run`), so the builder, which runs
+  as root, reads and replaces only what that user could. Settings come only
+  from a regular file of the recipe, and for images in `/var/lib/machines`
+  systemd-nspawn ignores the privileged ones anyway (`Bind=`, `Capability=`,
+  the network settings, `Port=`).
+- **Log:** `/var/log/cherry-image/<instance>.log`, readable by the `cherry`
+  user. A failed unit is not kept among the failed units, which that user
+  could not reset: the log is the record.
+- **Space:** images and exports live on `/var`, the machine's disk or RAM. A
+  raw export takes up to three times the image's size while it is written.
+
+**OpenCode's tools:** `/etc/opencode`, OpenCode's system configuration
+directory, gives the agent an MCP server, `machines`
+(`/usr/lib/cherry/machines-mcp.js`, run on Bun), and a skill,
+`machine-images`, with the recipe format and the workflow. The tools, run as
+the `cherry` user with its privileges alone:
+
+| Tool | Does |
+|---|---|
+| `list` | the images, running containers, recipes and exports |
+| `build` | writes the recipe from its arguments (distribution, release, packages, files, `postinst`, settings) and runs `cherry-image@build:<name>`, after `machinectl remove` with `replace` |
+| `start`, `stop` | `machinectl start`, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
+| `exec` | a command in a running container, as root, through `machinectl shell`: its output and exit status |
+| `export` | `cherry-image@tar:<name>` or `@raw:<name>`: the file, its size and SHA-256 |
+| `remove` | `machinectl remove` |
+
+The system configuration outranks the user's, so the server stays configured;
+to keep the agent from it, deny its tools in the user's configuration
+(`permissions`, action `machines_*`).
+
 ## OpenCode
 
 Every Cherry machine has [OpenCode](https://opencode.ai), the AI coding agent,
@@ -638,7 +713,9 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   about 98 MB in the image, and the idle server uses about 170 MB of RAM.
   Automatic updates are off: a new version comes with a new image.
 - **Tools:** the bash tool runs `bash`, the grep tool the image's ripgrep, and
-  git is on the image for its snapshots and worktrees.
+  git is on the image for its snapshots and worktrees. The `cherry` package
+  adds tools for container images, an MCP server and a skill in
+  `/etc/opencode` (see [Building images](#building-images)).
 - **Providers:** none are configured; nothing on the machine holds a key.
   Connect one at runtime, in OpenChamber. The credential lands under
   `/var/lib/cherry`: on the machine's encrypted disk if it has one, and
@@ -720,7 +797,9 @@ This is a development image:
 - The `cherry` user creates, starts, enters and removes containers through
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
-  checked arguments.
+  checked arguments. So do image builds (see
+  [Building images](#building-images)), whose package installs and scripts
+  run as root in the image, in a user namespace.
 - The TPM unseals the key of the encrypted `/var` disk whatever the machine
   boots: it isn't bound to the boot state (PCRs) yet. The disk is unreadable
   away from its machine, but anything that boots the machine (an HTTP boot

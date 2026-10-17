@@ -32,6 +32,7 @@ const MACHINE1 = "org.freedesktop.machine1.";
 const MANAGE_UNITS = "org.freedesktop.systemd1.manage-units";
 const NSPAWN = "systemd-nspawn@box.service";
 const BOOTSTRAP = "cherry-bootstrap@debian:trixie:box.service";
+const IMAGE = "cherry-image@build:box.service";
 const yes = [];
 const notHandled = [];
 
@@ -41,12 +42,16 @@ for (const a of ["host-login", "host-shell", "host-open-pty"]) notHandled.push([
 // machinectl start/stop/restart: systemd-nspawn@ units.
 for (const verb of ["start", "stop", "restart"]) yes.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
 for (const verb of ["reload", "kill", "try-restart", "reload-or-restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
-// Creating a container: starting cherry-bootstrap@, nothing else.
-yes.push(["cherry", MANAGE_UNITS, { unit: BOOTSTRAP, verb: "start" }]);
-for (const verb of ["stop", "restart", "kill"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: BOOTSTRAP, verb }]);
+// Creating a container: starting cherry-bootstrap@, nothing else; building or exporting an image: starting
+// cherry-image@, nothing else.
+for (const unit of [BOOTSTRAP, IMAGE]) {
+  yes.push(["cherry", MANAGE_UNITS, { unit, verb: "start" }]);
+  for (const verb of ["stop", "restart", "kill"]) notHandled.push(["cherry", MANAGE_UNITS, { unit, verb }]);
+}
 // No other unit, however it is named.
 for (const unit of ["sshd.service", "cherry.service", "cherry-connect-url.service", "systemd-nspawn.service",
-                    "xsystemd-nspawn@box.service", "systemd-nspawnd@box.service", "cherry-bootstrap.service"]) {
+                    "xsystemd-nspawn@box.service", "systemd-nspawnd@box.service", "cherry-bootstrap.service",
+                    "cherry-image.service", "xcherry-image@build:box.service"]) {
   notHandled.push(["cherry", MANAGE_UNITS, { unit, verb: "start" }]);
 }
 notHandled.push(["cherry", MANAGE_UNITS, {}]);

@@ -10,8 +10,9 @@
 #   machinectl start mybox
 #
 # The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
-# read. A failed bootstrap leaves no tree behind. $CHERRY_MACHINES_DIR replaces
-# /var/lib/machines (tests/bootstrap.sh).
+# read; without LOGS_DIRECTORY, to stdout (cherry-image, which logs it itself).
+# A failed bootstrap leaves no tree behind. $CHERRY_MACHINES_DIR replaces
+# /var/lib/machines (cherry-image, tests/bootstrap.sh).
 set -eu
 
 machines=${CHERRY_MACHINES_DIR:-/var/lib/machines}
@@ -42,9 +43,13 @@ if [ -e "$dir" ]; then
 	exit 1
 fi
 
-log=$LOGS_DIRECTORY/$instance.log
-echo "bootstrapping $dir, log in $log"
-exec >"$log" 2>&1
+if [ -n "${LOGS_DIRECTORY:-}" ]; then
+	log=$LOGS_DIRECTORY/$instance.log
+	echo "bootstrapping $dir, log in $log"
+	exec >"$log" 2>&1
+else
+	echo "bootstrapping $dir"
+fi
 trap 'rm -rf "$dir"' EXIT
 
 case $distro in
@@ -60,4 +65,4 @@ arch)
 esac
 
 trap - EXIT
-echo "done: machinectl start $name"
+[ -z "${LOGS_DIRECTORY:-}" ] || echo "done: machinectl start $name"
