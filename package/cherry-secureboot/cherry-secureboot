@@ -45,7 +45,8 @@ owner=10013137e72b3c46b42a63e438edf4d7
 cert_sha256=2616c4c14c509240aca941f936934328
 cert_type_pkcs7=9dd2af4adf68ee498aa9347d375665a7
 
-tmp=$(mktemp -d)
+# In the unit's RuntimeDirectory: /tmp is not mounted yet this early.
+tmp=$(mktemp -d "${RUNTIME_DIRECTORY:-${TMPDIR:-/tmp}}/cherry-secureboot.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
 # show <message>: on every console (firmware screens and serial-over-LAN

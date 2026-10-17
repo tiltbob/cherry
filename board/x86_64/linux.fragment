@@ -106,6 +106,10 @@ CONFIG_HW_RANDOM_VIRTIO=y
 CONFIG_TCG_TPM=y
 CONFIG_TCG_TIS=y
 CONFIG_TCG_CRB=y
+# securityfs, where the firmware's TPM event log shows (/sys/kernel/security/
+# tpm0/binary_bios_measurements): cherry-secureboot finds the option ROMs to
+# enroll in it. TCG_TPM only implies it, and x86_64_defconfig leaves it off.
+CONFIG_SECURITYFS=y
 
 # Compressed swap in RAM (cherry-zram-swap.service). Everything, the root
 # filesystem and /var included, is in RAM; under memory pressure, the kernel
