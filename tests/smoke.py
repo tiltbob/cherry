@@ -1262,7 +1262,8 @@ class Smoke:
 
         def check_volume():
             mount = vm.fstype(mp)
-            dev = vm.run("cat /sys/class/block/$(basename $(readlink -f /dev/tank/data))/dev")
+            dev = vm.run("lvs --noheadings --separator : -o lv_kernel_major,lv_kernel_minor tank/data 2>/dev/null")
+            dev = dev.strip()
             options = set(mount.split()[5].split(","))
             check(mount.split()[2] == dev and " - ext4 " in mount and {"nodev", "nosuid"} <= options,
                   f"{mp} is not tank/data's ext4 ({dev}), nodev and nosuid: {mount}")
