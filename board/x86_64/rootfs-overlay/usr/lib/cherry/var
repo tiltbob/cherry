@@ -2,9 +2,10 @@
 # cherry-var.service: put /var on the machine's encrypted disk, if it has one.
 #
 # That disk is a GPT partition labelled cherry-var: a LUKS2 volume whose key
-# the TPM seals, holding ext4. This unlocks it with the TPM as
-# /dev/mapper/cherry-var and mounts it on /var, before var.mount, which then
-# finds /var mounted and keeps it. Without one, var.mount mounts its tmpfs.
+# the TPM seals, holding btrfs (or ext4, as older images made it). This
+# unlocks it with the TPM as /dev/mapper/cherry-var and mounts it on /var,
+# before var.mount, which then finds /var mounted and keeps it. Without one,
+# var.mount mounts its tmpfs.
 #
 # A machine without a cherry-var partition gets one on its first blank disk,
 # in the order of the kernel's names: a whole disk on which wipefs finds no
@@ -108,19 +109,31 @@ part=/dev/$1
 systemd-cryptsetup attach "$volume" "$part" - tpm2-device=auto,headless ||
 	fail "the TPM cannot unlock $part"
 
-# What a crash left (a watchdog reset is one), repaired as systemd-fsck would:
-# 1 is errors corrected, 4 and above errors left.
-rc=0
-e2fsck -p "/dev/mapper/$volume" || rc=$?
-if [ "$rc" -ge 4 ]; then
+# What the volume holds, as wipefs reads it: btrfs, as made here, or ext4, as
+# the images before btrfs made it, which keeps working as it is. ext4 gets
+# the check that what a crash left calls for (a watchdog reset is one), as
+# systemd-fsck would run it: 1 is errors corrected, 4 and above errors left.
+# btrfs is mounted as it is, as systemd-fsck leaves it too; its check is for
+# a volume that will not mount (README).
+fstype=$(wipefs --no-act --noheadings --output=TYPE "/dev/mapper/$volume") || fstype=
+case $fstype in
+btrfs) ;;
+ext4)
+	rc=0
+	e2fsck -p "/dev/mapper/$volume" || rc=$?
+	if [ "$rc" -ge 4 ]; then
+		systemd-cryptsetup detach "$volume"
+		fail "e2fsck found errors it cannot repair on $part (exit status $rc)"
+	fi ;;
+*)
 	systemd-cryptsetup detach "$volume"
-	fail "e2fsck found errors it cannot repair on $part (exit status $rc)"
-fi
+	fail "$part holds ${fstype:-nothing wipefs knows}, not btrfs or ext4" ;;
+esac
 
 # As var.mount mounts the tmpfs: nodev, but not nosuid, which would break
 # setuid binaries in containers.
-if ! mount -t ext4 -o nodev "/dev/mapper/$volume" /var; then
+if ! mount -t "$fstype" -o nodev "/dev/mapper/$volume" /var; then
 	systemd-cryptsetup detach "$volume"
 	fail "cannot mount /dev/mapper/$volume ($part) on /var"
 fi
-echo "/var is on $part, unlocked with the TPM"
+echo "/var is on $part ($fstype), unlocked with the TPM"

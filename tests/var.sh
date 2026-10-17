@@ -3,7 +3,8 @@
 # others alone: run against a stand-in sysfs (CHERRY_SYSFS) and mount table
 # (CHERRY_MOUNTINFO) in a temporary directory, with stand-in udevadm, wipefs,
 # systemd-repart, systemd-cryptsetup, e2fsck and mount on PATH. wipefs prints
-# the signatures in signatures/<disk>, or fails on signatures/<disk>.error.
+# the signatures in signatures/<disk> (the unlocked volume's in
+# signatures/cherry-var), or fails on signatures/<disk>.error.
 # The others record their calls; systemd-repart adds the cherry-var partition
 # <disk>1 to the sysfs, systemd-cryptsetup, systemd-repart and mount fail when
 # FAKE_FAIL names them, and e2fsck exits with FAKE_E2FSCK.
@@ -23,6 +24,7 @@ cat >"$tmp/bin/wipefs" <<'EOF'
 #!/bin/sh
 for dev; do :; done
 dev=${dev#/dev/}
+dev=${dev#mapper/}
 [ ! -e "$SIGNATURES/$dev.error" ] || { echo "wipefs: $dev: failing as told" >&2; exit 1; }
 cat "$SIGNATURES/$dev" 2>/dev/null || true
 EOF
@@ -107,10 +109,15 @@ die() {
 	echo "var: $*" >&2
 	exit 1
 }
+# holds <type>: what the unlocked volume holds.
+holds() {
+	echo "$1" >"$SIGNATURES/cherry-var"
+}
 fresh() {
 	rm -rf "$CHERRY_SYSFS" "${SIGNATURES:?}"/*
 	mkdir -p "$block"
 	: >"$CHERRY_MOUNTINFO"
+	holds btrfs
 }
 run() {
 	: >"$CALLS"
@@ -132,7 +139,8 @@ $4"
 
 unlock="systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto,headless"
 check="e2fsck -p /dev/mapper/cherry-var"
-mount="mount -t ext4 -o nodev /dev/mapper/cherry-var /var"
+mount="mount -t btrfs -o nodev /dev/mapper/cherry-var /var"
+mount_ext4="mount -t ext4 -o nodev /dev/mapper/cherry-var /var"
 detach="systemd-cryptsetup detach cherry-var"
 repart="systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/repart.d"
 repart="$repart --tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= /dev/vda"
@@ -154,15 +162,13 @@ run
 expect "first boot" 0 "making the blank disk /dev/vda this machine's encrypted disk for /var" \
 	"$repart
 $unlock
-$check
 $mount"
-printf '%s\n' "$out" | grep -qxF "/var is on /dev/vda1, unlocked with the TPM" || die "first boot: $out"
+printf '%s\n' "$out" | grep -qxF "/var is on /dev/vda1 (btrfs), unlocked with the TPM" || die "first boot: $out"
 [ ! -e "$block/vdb1" ] || die "first boot: vdb was set up too"
 
 # The next boot unlocks the partition it made, and claims nothing.
 run
-expect "next boot" 0 "/var is on /dev/vda1, unlocked with the TPM" "$unlock
-$check
+expect "next boot" 0 "/var is on /dev/vda1 (btrfs), unlocked with the TPM" "$unlock
 $mount"
 
 # A partition that the TPM cannot unlock: nothing else is touched.
@@ -172,12 +178,18 @@ unset FAKE_FAIL
 expect "locked" 1 "the TPM cannot unlock /dev/vda1; /var is a tmpfs" "$unlock"
 [ ! -e "$block/vdb1" ] || die "locked: vdb was set up"
 
-# e2fsck: errors corrected are fine, errors left are not.
+# An older image's ext4 keeps working, checked first: errors corrected are
+# fine, errors left are not.
+holds ext4
+run
+expect "ext4" 0 "/var is on /dev/vda1 (ext4), unlocked with the TPM" "$unlock
+$check
+$mount_ext4"
 export FAKE_E2FSCK=1
 run
-expect "e2fsck corrected" 0 "/var is on /dev/vda1, unlocked with the TPM" "$unlock
+expect "e2fsck corrected" 0 "/var is on /dev/vda1 (ext4), unlocked with the TPM" "$unlock
 $check
-$mount"
+$mount_ext4"
 export FAKE_E2FSCK=4
 run
 unset FAKE_E2FSCK
@@ -186,11 +198,21 @@ expect "e2fsck failed" 1 "e2fsck found errors it cannot repair on /dev/vda1 (exi
 $check
 $detach"
 
+# Anything else is left as it is.
+holds xfs
+run
+expect "xfs" 1 "/dev/vda1 holds xfs, not btrfs or ext4; /var is a tmpfs" "$unlock
+$detach"
+holds ""
+run
+expect "unknown" 1 "/dev/vda1 holds nothing wipefs knows, not btrfs or ext4; /var is a tmpfs" "$unlock
+$detach"
+holds btrfs
+
 export FAKE_FAIL=mount
 run
 unset FAKE_FAIL
 expect "mount failed" 1 "cannot mount /dev/mapper/cherry-var (/dev/vda1) on /var; /var is a tmpfs" "$unlock
-$check
 $mount
 $detach"
 

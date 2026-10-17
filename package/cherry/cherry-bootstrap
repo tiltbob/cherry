@@ -12,8 +12,11 @@
 #
 # The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
 # read; without LOGS_DIRECTORY, to stdout (cherry-image, which logs it itself).
-# A failed bootstrap leaves no tree behind. $CHERRY_MACHINES_DIR replaces
-# /var/lib/machines (cherry-image, tests/bootstrap.sh).
+# A failed bootstrap leaves no tree behind. On btrfs (/var on the machine's
+# disk), the tree is a subvolume: machinectl clone then snapshots it, so an
+# environment takes space only for what it changes, and machinectl remove
+# drops it at once. $CHERRY_MACHINES_DIR replaces /var/lib/machines
+# (cherry-image, tests/bootstrap.sh).
 set -eu
 
 machines=${CHERRY_MACHINES_DIR:-/var/lib/machines}
@@ -52,6 +55,11 @@ else
 	echo "bootstrapping $dir"
 fi
 trap 'rm -rf "$dir"' EXIT
+# A subvolume on btrfs (rm -rf removes an empty one too); elsewhere, the tool
+# makes the directory.
+if [ "$(stat -f -c %T "$machines")" = btrfs ]; then
+	btrfs subvolume create "$dir"
+fi
 
 case $distro in
 debian)
