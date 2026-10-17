@@ -769,8 +769,8 @@ serves the browser UI.
   `/var/lib/openchamber` and `openchamber.service`. Cherry leaves that off and
   runs it as the `cherry` user instead (see [Cherry service](#cherry-service)).
   `/usr/libexec/openchamber-serve` is the launcher for either unit:
-  OpenChamber's server in the foreground on port 3000, with the browser UI's
-  password from the unit's credential, if any.
+  OpenChamber's server in the foreground on port 3000, with no password on the
+  browser UI.
 - **Left out:** local speech recognition and synthesis (sherpa-onnx, 32 MiB,
   plus models downloaded at run time), and tunnels (no cloudflared or ngrok on
   the image). Update checks are off and `openchamber update` says so, as the
@@ -800,9 +800,8 @@ on a machine with a TPM.
   lets SSH in, or from another device through the relay of a pairing link.
   `/health` reports OpenChamber's version, `/api/opencode/compatibility` the
   OpenCode it runs.
-- **Password:** none on the browser UI, unless the machine was given one as
-  the systemd credential `openchamber.ui_password`: for `make qemu`,
-  `python3 scripts/run_qemu.py --credential openchamber.ui_password=...`.
+- **Password:** none, on the browser UI or its API (see
+  [Security notes](#security-notes)).
 - **Restart:** always, after a crash as after a clean exit, such as
   `openchamber stop` or `restart` from a shell.
 - **Pairing link on the console:** once the server is online,
@@ -826,9 +825,11 @@ This is a development image:
 - `root` has no password on the console (Buildroot's default).
 - The firewall lets nothing in unasked but ping (see [Firewall](#firewall)).
   SSH, once let in, accepts keys only.
-- OpenChamber's browser UI has no password unless the machine was given one
-  as a credential: any local user can use it, and so run commands as the
-  `cherry` user. It is on loopback only, as is the OpenCode behind it.
+- OpenChamber's browser UI has no password: any local user can use it, and so
+  run commands as the `cherry` user. It is on loopback only, as is the
+  OpenCode behind it. The device-pairing relay forwards its requests from
+  loopback too, so OpenChamber takes them as a local user's: whatever the
+  relay lets through has the same access.
 - The `cherry` user creates, starts, enters and removes containers through
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
