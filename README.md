@@ -106,8 +106,7 @@ and `cherry-var.service`'s choice of disk. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
 python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
 the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
-softhsm2, opensc and pkcs11-provider for the ceremony (each skipped without
-them).
+softhsm2 and opensc for the ceremony (each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -407,8 +406,8 @@ enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
 **The ceremony,** once, on a computer with the Nitrokey plugged in:
 
 ```sh
-# pkcs11-tool, sc-hsm-tool, and OpenSSL's PKCS#11 provider (dnf and pacman too)
-apt install opensc pkcs11-provider
+# pkcs11-tool and sc-hsm-tool (dnf and pacman too)
+apt install opensc
 # Initialize the Nitrokey, which erases it, with a key share to back up its
 # keys with. It ships with the SO PIN 3537363231383830 and the PIN 648219:
 # change both afterwards, as Nitrokey's documentation shows.
@@ -425,11 +424,15 @@ gh api -X PUT repos/tiltbob/cherry/environments/release \
 gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name=main -f type=branch
 gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name='v*' -f type=tag
 # The release key: its certificate in board/x86_64/secureboot/, the key itself
-# straight into the release environment's secret.
-scripts/secureboot.py issue --key-out - | gh secret set SECUREBOOT_KEY --env release
+# into the release environment's secret, through memory only, and only when
+# issue succeeded (in a pipe, gh would store nothing as the secret).
+key=$(scripts/secureboot.py issue --key-out -) && printf '%s\n' "$key" | gh secret set SECUREBOOT_KEY --env release
 git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
 ```
 
+- Everything on the Nitrokey goes through OpenSC's `pkcs11-tool`: it
+  generates the keys and makes their signatures, and the script puts the
+  certificates and signed updates together around them.
 - The PIN is asked once per command (or taken from `CHERRY_HSM_PIN`). With
   other tokens plugged in, pass `--token` with the Nitrokey's label as
   `pkcs11-tool -L` shows it; `--module` names another PKCS#11 module than

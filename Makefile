@@ -63,8 +63,8 @@ test:
 # runs them before the build (.github/workflows/build.yml). They need
 # shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
 # openssl; node for the polkit rules (skipped without it); nft, ip, busybox
-# and user namespaces for the firewall, and softhsm2, opensc and
-# pkcs11-provider for the key ceremony (each skipped without them).
+# and user namespaces for the firewall, and softhsm2 and opensc for the key
+# ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall \
 	check-secureboot check-ceremony check-var
@@ -123,7 +123,7 @@ check-secureboot:
 	tests/secureboot.sh
 
 # scripts/secureboot.py makes the keys on a token: a SoftHSM one (skipped
-# without softhsm2, opensc and pkcs11-provider).
+# without softhsm2 and opensc).
 check-ceremony:
 	tests/ceremony.sh
 
