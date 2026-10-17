@@ -12,18 +12,38 @@
         "icon": "server",
         "entry": "panel/index.html"
       },
-      "background": { "entry": "panel/background.html" },
-      "page": { "entry": "panel/index.html", "title": "Environments" },
+      "background": {
+        "entry": "panel/background.html"
+      },
+      "page": {
+        "entry": "panel/index.html",
+        "title": "Environments"
+      },
       "commands": [
-        { "name": "env", "description": "list, create <profile> <name>, start/stop/status/log/remove <name>" }
+        {
+          "name": "env",
+          "description": "build <profile>, create <image|profile> <name>, start/stop/status/remove <name>"
+        }
       ],
       "tools": [
-        { "match": "machines_*", "name": "Environments", "icon": "server", "title": "{input.name}", "subtitle": "{input.profile}" }
+        {
+          "match": "machines_*",
+          "name": "Environments",
+          "icon": "server",
+          "title": "{input.name}",
+          "subtitle": "{input.profile}{input.image}"
+        }
       ],
       "service": {
         "entry": "service/main.js",
         "runtime": "host",
-        "permissions": { "exec": ["machinectl", "systemctl", "busctl"] }
+        "permissions": {
+          "exec": [
+            "machinectl",
+            "systemctl",
+            "busctl"
+          ]
+        }
       }
     }
   }

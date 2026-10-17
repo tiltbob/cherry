@@ -1,23 +1,34 @@
-// cherry environments: what the cherry user may do with container
-// environments on this machine, as one module for the two front ends that
-// expose it: the OpenCode MCP server (cherry-machines-mcp.js) and the
+// cherry environments: what the cherry user may do with the container images
+// and environments of this machine, as one module for the two front ends
+// that expose it: the OpenCode MCP server (cherry-machines-mcp.js) and the
 // OpenChamber extension's service (openchamber-extension/service/main.js).
 // Everything goes through what that user may do (50-cherry.rules):
-// cherry-image@.service builds images, machinectl starts, stops, enters and
-// removes them, and machined's bus API lists them. Images stay on this
-// machine: nothing here writes one out. Running commands and starting units
-// is mcp-stdio.js's, next to it.
+// cherry-image@.service builds images, machinectl clones, starts, stops,
+// enters and removes them, and machined's bus API lists them. Images stay on
+// this machine: nothing here writes one out. Running commands and starting
+// units is mcp-stdio.js's, next to it.
 //
-// An environment is an image in /var/lib/machines built from a profile: a
-// recipe as `cherry-image build` reads it (image.conf, extra/, postinst,
-// image.nspawn), plus profile.conf with Title= and Description=, in
-// /usr/lib/cherry/profiles/<id>/ (the image's) or /var/lib/cherry/profiles/<id>/
-// (the machine's own, which win). create copies the profile to
-// /var/lib/cherry/images/<name>/ and builds it. Nothing here takes a package
-// list, a file or a script: those are a profile's, written by a person.
+// Two kinds of thing, both directories machinectl knows in /var/lib/machines:
 //
-// $CHERRY_IMAGES_DIR, $CHERRY_IMAGE_LOGS and $CHERRY_PROFILE_DIRS (colon
-// separated) replace the paths above (tests/mcp.js, tests/extension.js).
+// - An image is built from a profile: a recipe as `cherry-image build` reads
+//   it (image.conf, extra/, postinst, image.nspawn), plus profile.conf with
+//   Title= and Description=, in /usr/lib/cherry/profiles/<id>/ (the image's)
+//   or /var/lib/cherry/profiles/<id>/ (the machine's own, which win). build
+//   copies the profile to /var/lib/cherry/images/<name>/, the recipe, and
+//   builds it; the recipe is what marks a machine as an image. An image is
+//   never started: it is what environments are made from.
+// - An environment is a clone of an image (machinectl clone: a copy, with the
+//   image's nspawn settings), started, stopped and removed on its own, with
+//   its own changes. /var/lib/cherry/environments/<name>/environment.conf
+//   records the image it came from; that record is what marks a machine as an
+//   environment. A machine with neither, made by hand with cherry-bootstrap,
+//   is listed as "other": it can be cloned, started and stopped, but not
+//   built or rebuilt.
+//
+// Nothing here takes a package list, a file or a script: those are a
+// profile's, written by a person. $CHERRY_IMAGES_DIR, $CHERRY_IMAGE_LOGS,
+// $CHERRY_ENVIRONMENTS_DIR and $CHERRY_PROFILE_DIRS (colon separated) replace
+// the paths above (tests/mcp.js, tests/extension.js).
 "use strict";
 const crypto = require("crypto");
 const fs = require("fs");
@@ -26,10 +37,12 @@ const { ToolError, check, run, sleep, tail, startUnit } = require("./mcp-stdio.j
 
 const RECIPES = process.env.CHERRY_IMAGES_DIR || "/var/lib/cherry/images";
 const LOGS = process.env.CHERRY_IMAGE_LOGS || "/var/log/cherry-image";
+const ENVIRONMENTS = process.env.CHERRY_ENVIRONMENTS_DIR || "/var/lib/cherry/environments";
 const PROFILE_DIRS = (process.env.CHERRY_PROFILE_DIRS || "/var/lib/cherry/profiles:/usr/lib/cherry/profiles")
   .split(":").filter(Boolean);
 
-// Names cherry-image builds: valid machine names and hostnames.
+// Names cherry-image builds, and environments take: valid machine names and
+// hostnames.
 const NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,47}$/;
 // Any image machinectl knows, as cherry-bootstrap@ names them.
 const MACHINE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
@@ -39,7 +52,7 @@ const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A
 
 function imageName(name) {
   check(typeof name === "string" && NAME.test(name),
-    `bad image name ${JSON.stringify(name)}: up to 48 letters, digits and '-', starting with a letter or digit`);
+    `bad name ${JSON.stringify(name)}: up to 48 letters, digits and '-', starting with a letter or digit`);
   return name;
 }
 
@@ -73,6 +86,16 @@ async function machined(method, args = []) {
   return JSON.parse(r.out).data;
 }
 
+// Every machine machinectl knows, but the host.
+async function knownMachines() {
+  const [images] = await machined("ListImages");
+  const unknown = (n) => (n >= 2 ** 63 ? null : n);
+  return images
+    .filter(([name]) => name !== ".host")
+    .map(([name, type, readOnly, , mtime, usage]) =>
+      ({ name, type, readOnly, modified: mtime ? new Date(mtime / 1000).toISOString() : null, bytes: unknown(usage) }));
+}
+
 async function runningMachines() {
   const [machines] = await machined("ListMachines");
   return machines.filter(([, cls]) => cls !== "host").map(([name, cls, service]) => ({ name, class: cls, service }));
@@ -82,7 +105,7 @@ async function running(name) {
   return (await runningMachines()).some((m) => m.name === name);
 }
 
-async function hasImage(name) {
+async function known(name) {
   return (await run("machinectl", ["show-image", name])).code === 0;
 }
 
@@ -113,8 +136,9 @@ async function shell(name, command, timeout, signal) {
   return { exit, output: out.slice(0, at).replace(/\n+$/, "") };
 }
 
-// Key=value lines, as image.conf and profile.conf hold them; null without
-// the file. Packages= lines add up, as cherry-image reads them.
+// Key=value lines, as image.conf, profile.conf and environment.conf hold
+// them; null without the file. Packages= lines add up, as cherry-image reads
+// them.
 function readConf(file) {
   let text;
   try {
@@ -133,6 +157,8 @@ function readConf(file) {
   }
   return conf;
 }
+
+// ---- Profiles ----
 
 function describeProfile(id, dir) {
   const image = readConf(path.join(dir, "image.conf"));
@@ -178,11 +204,47 @@ function profile(id) {
 
 const publicProfile = ({ dir, ...p }) => p;
 
-// The profile an image was built from, from the recipe create left: null
-// for an image made some other way.
+// ---- What marks an image, and an environment ----
+
+// The profile an image was built from, from the recipe build left: null for
+// a machine that is no image of ours.
 function recipeProfile(name) {
   const meta = readConf(path.join(RECIPES, name, "profile.conf"));
   return meta && meta.Profile ? { id: meta.Profile, title: meta.Title || meta.Profile } : null;
+}
+
+// An environment's record: the image it was cloned from; null for a machine
+// that is no environment.
+function record(name) {
+  const conf = readConf(path.join(ENVIRONMENTS, name, "environment.conf"));
+  return conf && conf.Image ? { image: conf.Image, created: conf.Created || null } : null;
+}
+
+function writeRecord(name, image) {
+  const dir = path.join(ENVIRONMENTS, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "environment.conf"), `Image=${image}\nCreated=${new Date().toISOString()}\n`);
+}
+
+function dropRecord(name) {
+  fs.rmSync(path.join(ENVIRONMENTS, name), { recursive: true, force: true });
+}
+
+// The environments cloned from an image, by their records.
+function environmentsOf(image) {
+  let names;
+  try {
+    names = fs.readdirSync(ENVIRONMENTS);
+  } catch {
+    return [];
+  }
+  return names.filter((name) => MACHINE_NAME.test(name) && record(name)?.image === image).sort();
+}
+
+function kindOf(name) {
+  if (recipeProfile(name)) return "image";
+  if (record(name)) return "environment";
+  return "other";
 }
 
 // cp -a, without following symbolic links, and with the modes kept.
@@ -220,43 +282,97 @@ function writeRecipe(name, p) {
   return dir;
 }
 
-// The images, the containers running, and the profiles.
+// ---- The verbs ----
+
+// The images, with the environments made from each; the environments, with
+// their image and whether they run; the other machines; the containers
+// running; the profiles.
 async function list() {
-  const [images] = await machined("ListImages");
-  const machines = await runningMachines();
-  const up = new Set(machines.map((m) => m.name));
-  const unknown = (n) => (n >= 2 ** 63 ? null : n);
+  const machines = await knownMachines();
+  const up = new Set((await runningMachines()).map((m) => m.name));
+  const images = [];
+  const environments = [];
+  const other = [];
+  for (const m of machines) {
+    const entry = { ...m, running: up.has(m.name) };
+    const kind = kindOf(m.name);
+    if (kind === "image") images.push({ ...entry, profile: recipeProfile(m.name), environments: environmentsOf(m.name) });
+    else if (kind === "environment") environments.push({ ...entry, ...record(m.name) });
+    else other.push(entry);
+  }
   return {
-    images: images
-      .filter(([name]) => name !== ".host")
-      .map(([name, type, readOnly, , mtime, usage]) => ({
-        name,
-        type,
-        readOnly,
-        modified: mtime ? new Date(mtime / 1000).toISOString() : null,
-        bytes: unknown(usage),
-        running: up.has(name),
-        profile: recipeProfile(name),
-      })),
-    running: machines,
+    images,
+    environments,
+    other,
+    running: [...up].sort().map((name) => ({ name, kind: kindOf(name) })),
     profiles: profiles().map(publicProfile),
   };
 }
 
 // Build an image from a profile: minutes. With replace, an image of that
-// name goes first (it must not be running).
-async function create(name, id, { replace = false, signal } = {}) {
+// name goes first, which must have no environments left.
+async function build(name, id, { replace = false, signal } = {}) {
   imageName(name);
   const p = profile(id);
-  if (replace && (await hasImage(name))) await machinectl(["remove", name], signal);
+  check(!record(name), `${name} is an environment, not an image`);
+  if (replace && (await known(name))) {
+    const envs = environmentsOf(name);
+    check(envs.length === 0, `${name} still has environments (${envs.join(", ")}): remove them first`);
+    await machinectl(["remove", name], signal);
+  }
   const dir = writeRecipe(name, p);
   const built = await startUnit("cherry-image", `build:${name}`, LOGS, signal);
   return { name, profile: p.id, dir, log: built };
 }
 
-// Boot an image as a container and wait until a shell gets in.
+// Remove an image that has no environments left. Its recipe stays.
+async function removeImage(name, { signal } = {}) {
+  machineName(name);
+  check(kindOf(name) !== "environment", `${name} is an environment: remove removes it`);
+  const envs = environmentsOf(name);
+  check(envs.length === 0, `${name} still has environments (${envs.join(", ")}): remove them first`);
+  await machinectl(["remove", name], signal);
+  return `${name} removed`;
+}
+
+// What an environment is made from: an image by name, which must be there,
+// or a profile, whose image is named after it and may still have to be
+// built. Checked, with nothing done: {image, profile?, build} where build
+// says the image is not there yet.
+async function source({ image, profile: id } = {}) {
+  check((image === undefined) !== (id === undefined), "give an image or a profile, not both");
+  let p = null;
+  if (id !== undefined) {
+    p = profile(id);
+    image = p.id;
+  } else {
+    machineName(image);
+  }
+  const there = await known(image);
+  check(there || p, `no image ${JSON.stringify(image)}`);
+  check(kindOf(image) !== "environment", `${image} is an environment, not an image`);
+  if (there) {
+    check(!(await running(image)), `${image} is running: an image is not started, and a running machine is not cloned`);
+  }
+  return { image, profile: p ? p.id : undefined, build: !there };
+}
+
+// Make an environment: a clone of an image, by name, or of the image built
+// from a profile, named after it and built first when there is none yet.
+async function create(name, from = {}, { signal } = {}) {
+  imageName(name);
+  const s = await source(from);
+  check(!(await known(name)), `${name} exists already`);
+  const built = s.build ? await build(s.image, s.profile, { signal }) : null;
+  await machinectl(["clone", s.image, name], signal);
+  writeRecord(name, s.image);
+  return { name, image: s.image, built };
+}
+
+// Boot an environment as a container and wait until a shell gets in.
 async function start(name, { timeout = 120, signal } = {}) {
   machineName(name);
+  check(kindOf(name) !== "image", `${name} is an image: create an environment from it, and start that`);
   if (!(await running(name))) await machinectl(["start", name], signal);
   const deadline = Date.now() + timeout * 1000;
   let last;
@@ -286,15 +402,18 @@ async function stop(name, { timeout = 60, signal } = {}) {
   throw new ToolError(`${name} is still running`);
 }
 
-// Remove an image, which must not be running. Its recipe stays.
+// Remove an environment (or another machine that is no image), which must
+// not be running, with its settings and its record.
 async function remove(name, { signal } = {}) {
   machineName(name);
+  check(kindOf(name) !== "image", `${name} is an image: remove_image removes it, once it has no environments`);
   await machinectl(["remove", name], signal);
+  dropRecord(name);
   return `${name} removed`;
 }
 
-// What a running container reports, through fixed commands: systemd's state,
-// the address of its veth link, and its failed units.
+// What a machine reports, through fixed commands: systemd's state, the
+// address of its veth link, and its failed units.
 const STATUS_SCRIPT = [
   "printf 'system=%s\\n' \"$(systemctl is-system-running 2>/dev/null)\"",
   "printf 'address=%s\\n' \"$(ip -4 -o addr show host0 2>/dev/null | sed -n 's/.*inet \\([0-9.][0-9.]*\\/[0-9]*\\).*/\\1/p' | head -n 1)\"",
@@ -303,7 +422,10 @@ const STATUS_SCRIPT = [
 
 async function status(name, { signal } = {}) {
   machineName(name);
-  const result = { name, image: await hasImage(name), running: await running(name), profile: recipeProfile(name) };
+  const kind = kindOf(name);
+  const result = { name, kind, exists: await known(name), running: await running(name) };
+  if (kind === "image") result.profile = recipeProfile(name);
+  if (kind === "environment") Object.assign(result, record(name));
   if (!result.running) return result;
   const r = await shell(name, STATUS_SCRIPT, 30, signal);
   if (r.exit === null) return { ...result, error: r.error };
@@ -320,7 +442,7 @@ async function status(name, { signal } = {}) {
 }
 
 module.exports = {
-  ToolError, NAME, MACHINE_NAME, PROFILE_ID, RECIPES, LOGS, PROFILE_DIRS,
-  imageName, machineName, profileId, profiles, profile, publicProfile,
-  list, create, start, stop, status, log, remove,
+  ToolError, NAME, MACHINE_NAME, PROFILE_ID, RECIPES, LOGS, ENVIRONMENTS, PROFILE_DIRS,
+  imageName, machineName, profileId, profiles, profile, publicProfile, kindOf, exists: known, source,
+  list, build, removeImage, log, create, start, stop, status, remove,
 };

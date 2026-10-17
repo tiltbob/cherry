@@ -1,24 +1,27 @@
-// The Environments extension's service: the environments API on loopback,
-// run by OpenChamber (as the cherry user, in cherry.service's sandbox) when
-// the panel first asks, on the port and with the bearer token it gives
-// (OPENCHAMBER_SERVICE_PORT, OPENCHAMBER_SERVICE_TOKEN). The panel reaches it
-// only through OpenChamber's proxy. The verbs are /usr/lib/cherry/environments.js,
-// shared with the OpenCode MCP server ($CHERRY_ENVIRONMENTS replaces the
-// path: tests/extension.js).
+// The Environments extension's service: the images and environments API on
+// loopback, run by OpenChamber (as the cherry user, in cherry.service's
+// sandbox) when the panel first asks, on the port and with the bearer token
+// it gives (OPENCHAMBER_SERVICE_PORT, OPENCHAMBER_SERVICE_TOKEN). The panel
+// reaches it only through OpenChamber's proxy. The verbs are
+// /usr/lib/cherry/environments.js, shared with the OpenCode MCP server
+// ($CHERRY_ENVIRONMENTS replaces the path: tests/extension.js).
 //
 // Routes, JSON in and out, each with Authorization: Bearer <token>:
 //   GET    /health
-//   GET    /environments               images, containers running, profiles, jobs
-//   POST   /environments               {name, profile, replace?}: a build, 202
-//   GET    /environments/<name>        status, with the last job on it
-//   GET    /environments/<name>/log    ?lines=N: the build log's end
+//   GET    /environments               images, environments, other machines, profiles, jobs
+//   POST   /images                     {name, profile, replace?}: a build, 202
+//   GET    /images/<name>/log          ?lines=N: the build log's end
+//   DELETE /images/<name>              an image with no environments left
+//   POST   /environments               {name, image} or {name, profile}: a clone, 202
+//   GET    /environments/<name>        status of any machine, with the last job on it
 //   POST   /environments/<name>/start  {timeout?}: 202
 //   POST   /environments/<name>/stop   {timeout?}: 202
 //   DELETE /environments/<name>
-// A build runs for minutes and a start or stop for up to two, longer than
-// the proxy waits: those answer at once with a job, which GET /environments
-// and GET /environments/<name> report until it is done (state running, done
-// or failed, with its message or error). One job at a time per name.
+// A build runs for minutes, a clone for seconds to a minute, and a start or
+// stop for up to two: longer than the proxy waits, so those answer at once
+// with a job, which GET /environments and GET /environments/<name> report
+// until it is done (state running, done or failed, with its message or
+// error). One job at a time per name.
 "use strict";
 const crypto = require("crypto");
 const http = require("http");
@@ -39,7 +42,7 @@ class HttpError extends Error {
   }
 }
 
-// The last job on each name: {name, verb, profile?, state, started, finished, message, error}.
+// The last job on each name: {name, verb, profile?, image?, state, started, finished, message, error}.
 const jobs = new Map();
 
 function authorized(req) {
@@ -105,16 +108,44 @@ function startJob(name, verb, extra, work) {
 async function handle(req, url) {
   const parts = url.pathname.split("/").filter(Boolean);
   if (req.method === "GET" && url.pathname === "/health") return [200, { ok: true }];
+
+  if (parts[0] === "images") {
+    if (parts.length === 1 && req.method === "POST") {
+      const body = parseBody(await readBody(req));
+      const name = env.imageName(body.name);
+      const profile = env.profile(body.profile).id;
+      const replace = body.replace === true;
+      return [202, startJob(name, "build", { profile }, async () => (await env.build(name, profile, { replace })).log)];
+    }
+    if (parts.length === 2 && req.method === "DELETE") {
+      const message = await env.removeImage(parts[1]);
+      jobs.delete(parts[1]);
+      return [200, { message }];
+    }
+    if (parts.length === 3 && parts[2] === "log" && req.method === "GET") {
+      const lines = Math.floor(seconds(url.searchParams.get("lines"), 60, 1000));
+      return [200, env.log(parts[1], lines)];
+    }
+    throw new HttpError(404, "not found");
+  }
+
   if (parts[0] !== "environments") throw new HttpError(404, "not found");
   if (parts.length === 1) {
     if (req.method === "GET") return [200, { ...(await env.list()), jobs: [...jobs.values()] }];
     if (req.method === "POST") {
       const body = parseBody(await readBody(req));
       const name = env.imageName(body.name);
-      const profile = env.profile(body.profile).id;
-      const replace = body.replace === true;
-      const job = startJob(name, "create", { profile }, async () => (await env.create(name, profile, { replace })).log);
-      return [202, job];
+      const from = {};
+      if (body.image !== undefined) from.image = body.image;
+      if (body.profile !== undefined) from.profile = body.profile;
+      // Checked before the job, so a wrong source or a taken name is an
+      // answer now, not a failed job later.
+      const s = await env.source(from);
+      if (await env.exists(name)) throw new HttpError(409, `${name} exists already`);
+      return [202, startJob(name, "create", from, async () => {
+        const r = await env.create(name, from);
+        return `${name} created from the image ${r.image}${r.built ? ", built first" : ""}`;
+      })];
     }
     throw new HttpError(405, "method not allowed");
   }
@@ -133,18 +164,12 @@ async function handle(req, url) {
     }
     throw new HttpError(405, "method not allowed");
   }
-  if (parts.length === 3) {
+  if (parts.length === 3 && (parts[2] === "start" || parts[2] === "stop") && req.method === "POST") {
     const action = parts[2];
-    if (action === "log" && req.method === "GET") {
-      const lines = Math.floor(seconds(url.searchParams.get("lines"), 60, 1000));
-      return [200, env.log(name, lines)];
-    }
-    if ((action === "start" || action === "stop") && req.method === "POST") {
-      env.machineName(name);
-      const body = parseBody(await readBody(req));
-      const timeout = seconds(body.timeout, action === "start" ? 120 : 60, 600);
-      return [202, startJob(name, action, {}, () => env[action](name, { timeout }))];
-    }
+    env.machineName(name);
+    const body = parseBody(await readBody(req));
+    const timeout = seconds(body.timeout, action === "start" ? 120 : 60, 600);
+    return [202, startJob(name, action, {}, () => env[action](name, { timeout }))];
   }
   throw new HttpError(404, "not found");
 }

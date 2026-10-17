@@ -36,11 +36,13 @@ config BR2_PACKAGE_CHERRY
 	  script run in it under systemd-nspawn). Images stay on the
 	  machine that built them.
 
-	  On those, environments: images built from the profiles in
-	  /usr/lib/cherry/profiles (recipes written by a person, one
-	  per distribution) and /var/lib/cherry/profiles. OpenChamber
-	  gets a built-in extension for them, Environments: a panel,
-	  the /env command and a service with the verbs.
+	  On those, images and environments: an image is built from a
+	  profile in /usr/lib/cherry/profiles (recipes written by a
+	  person, one per distribution) or /var/lib/cherry/profiles,
+	  and never started; an environment is a clone of an image
+	  (machinectl clone), started, stopped and removed on its own.
+	  OpenChamber gets a built-in extension for them, Environments:
+	  a panel, the /env command and a service with the verbs.
 
 	  It manages storage too: cherry-storage@.service, which runs as
 	  root, claims disks for it, which erases them and makes each a

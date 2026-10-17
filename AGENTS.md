@@ -65,8 +65,8 @@ is, what runs it and what it needs. Read that before the code.
 - **The `cherry` user is the agent, and it is unprivileged.** The agent's
   tools are the MCP servers' verbs alone: `/etc/opencode/opencode.json`
   denies OpenCode's own (a shell, files, the web), and the `machines` verbs
-  take a name and a profile a person wrote, never a package list, a file or
-  a script. The user's only
+  take a name and a profile a person wrote, or a name and an image to clone,
+  never a package list, a file or a script. The user's only
   privileges are `package/cherry/50-cherry.rules` (machined's verbs on
   containers, and starting `systemd-nspawn@`, `cherry-bootstrap@`,
   `cherry-image@` and `cherry-storage@` units) and what those three template

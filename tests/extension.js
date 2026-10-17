@@ -21,7 +21,7 @@ const { standins } = require("./machines-standins.js");
 const root = path.join(__dirname, "..", "package", "cherry");
 const extension = path.join(root, "openchamber-extension");
 const world = standins("cherry-extension-");
-const { dirs, reset } = world;
+const { dirs, reset, markImage, markEnvironment } = world;
 
 let failures = 0;
 let cases = 0;
@@ -129,6 +129,13 @@ async function main() {
     });
   }
 
+  // The job on a name, once it is no longer running: the machine's status with it.
+  const settled = (name, verb) => until(async () => {
+    const s = await request("GET", `/environments/${name}`);
+    const job = s.body.job;
+    return job && job.state !== "running" && (!verb || job.verb === verb) ? s.body : null;
+  }, 15);
+
   await test("health, behind the token", async () => {
     await until(async () => (await request("GET", "/health").catch(() => null))?.status === 200, 15);
     assert.strictEqual((await request("GET", "/health", { auth: null })).status, 401);
@@ -140,116 +147,155 @@ async function main() {
   await test("the routes that are not there", async () => {
     assert.strictEqual((await request("GET", "/nope")).status, 404);
     assert.strictEqual((await request("GET", "/environments/web/nope")).status, 404);
+    assert.strictEqual((await request("GET", "/images")).status, 404);
+    assert.strictEqual((await request("GET", "/images/web")).status, 404);
     assert.strictEqual((await request("PUT", "/environments")).status, 405);
     assert.strictEqual((await request("PUT", "/environments/web")).status, 405);
-    assert.strictEqual((await request("POST", "/environments/web/log")).status, 404);
+    assert.strictEqual((await request("POST", "/images/web/log")).status, 404);
   });
 
-  await test("list: images, containers, profiles and jobs", async () => {
-    reset({ images: ["web"], running: ["web"] });
+  await test("list: images, environments, other machines, profiles and jobs", async () => {
+    reset({ images: ["base", "yarp", "handmade"], running: ["yarp"] });
+    markImage("base", "web");
+    markEnvironment("yarp", "base");
     const r = await request("GET", "/environments");
     assert.strictEqual(r.status, 200);
-    assert.deepStrictEqual(Object.keys(r.body), ["images", "running", "profiles", "jobs"]);
-    assert.deepStrictEqual(r.body.images.map((i) => [i.name, i.running]), [["web", true]]);
+    assert.deepStrictEqual(Object.keys(r.body), ["images", "environments", "other", "running", "profiles", "jobs"]);
+    assert.deepStrictEqual(r.body.images.map((i) => [i.name, i.profile.id, i.environments]), [["base", "web", ["yarp"]]]);
+    assert.deepStrictEqual(r.body.environments.map((e) => [e.name, e.image, e.running]), [["yarp", "base", true]]);
+    assert.deepStrictEqual(r.body.other.map((o) => o.name), ["handmade"]);
     assert.deepStrictEqual(r.body.profiles.map((p) => p.id), ["plain", "web"]);
     assert.deepStrictEqual(r.body.jobs, []);
   });
 
-  await test("create: refused with a reason, or a job to follow", async () => {
+  await test("build: refused with a reason, or a job to follow", async () => {
     reset();
     for (const [body, status, message] of [
       ["not json", 400, /JSON object/],
       [{ name: "web" }, 400, /bad profile/],
-      [{ name: "my_web", profile: "web" }, 400, /bad image name/],
+      [{ name: "my_web", profile: "web" }, 400, /bad name/],
       [{ name: "web", profile: "nope" }, 400, /no profile "nope"/],
     ]) {
-      const r = await request("POST", "/environments", { body });
+      const r = await request("POST", "/images", { body });
       assert.strictEqual(r.status, status, JSON.stringify([body, r]));
       assert.match(r.body.error, message);
     }
     assert(!fs.existsSync(path.join(dirs.recipes, "web")) && !fs.existsSync(path.join(dirs.recipes, "my_web")));
     assert.deepStrictEqual(world.called(), []);
 
-    const r = await request("POST", "/environments", { body: { name: "web", profile: "web" } });
+    const r = await request("POST", "/images", { body: { name: "web", profile: "web" } });
     assert.strictEqual(r.status, 202, JSON.stringify(r));
-    assert.strictEqual(r.body.name, "web");
-    assert.strictEqual(r.body.profile, "web");
-    assert.strictEqual(r.body.verb, "create");
-    const done = await until(async () => {
-      const s = await request("GET", "/environments/web");
-      return s.body.job && s.body.job.state !== "running" ? s.body : null;
-    });
+    assert.deepStrictEqual([r.body.name, r.body.profile, r.body.verb, r.body.state], ["web", "web", "build", "running"]);
+    const done = await settled("web", "build");
     assert.strictEqual(done.job.state, "done", JSON.stringify(done.job));
     assert.match(done.job.message, /end of build:web/);
-    assert.strictEqual(done.image, true);
-    assert.strictEqual(done.running, false);
-    assert.deepStrictEqual(done.profile, { id: "web", title: "Web (local)" });
+    assert.deepStrictEqual([done.kind, done.exists, done.running, done.profile], ["image", true, false, { id: "web", title: "Web (local)" }]);
     assert.strictEqual(fs.readFileSync(path.join(dirs.recipes, "web", "profile.conf"), "utf8"), "Title=Web (local)\nProfile=web\n");
     assert(world.called().includes("systemctl start --no-ask-password cherry-image@build:web.service"));
     const list = await request("GET", "/environments");
-    assert.deepStrictEqual(list.body.jobs.map((j) => [j.name, j.verb, j.state]), [["web", "create", "done"]]);
+    assert.deepStrictEqual(list.body.jobs.map((j) => [j.name, j.verb, j.state]), [["web", "build", "done"]]);
+    const log = await request("GET", "/images/web/log", { query: { lines: "2" } });
+    assert.deepStrictEqual(log.body, { file: path.join(dirs.logs, "build:web.log"), text: "line 100\nend of build:web" });
+    assert.strictEqual((await request("GET", "/images/never/log")).body.text, null);
+    assert.strictEqual((await request("GET", "/images/bad_name/log")).status, 400);
   });
 
   await test("one job at a time per name, and a failed one says why", async () => {
     reset({}, { SLOW_UNIT: "cherry-image@build:slow.service" });
-    const first = await request("POST", "/environments", { body: { name: "slow", profile: "plain" } });
+    const first = await request("POST", "/images", { body: { name: "slow", profile: "plain" } });
     assert.strictEqual(first.status, 202);
-    const again = await request("POST", "/environments", { body: { name: "slow", profile: "plain" } });
+    const again = await request("POST", "/images", { body: { name: "slow", profile: "plain" } });
     assert.strictEqual(again.status, 409);
-    assert.match(again.body.error, /create is still running/);
-    const other = await request("POST", "/environments", { body: { name: "other", profile: "plain" } });
+    assert.match(again.body.error, /build is still running/);
+    const other = await request("POST", "/images", { body: { name: "other", profile: "plain" } });
     assert.strictEqual(other.status, 202, "another name is not held up");
-    await until(async () => (await request("GET", "/environments/slow")).body.job.state === "done", 15);
+    await settled("slow", "build");
 
     reset({}, { FAIL_UNIT: "cherry-image@build:broken.service" });
-    const broken = await request("POST", "/environments", { body: { name: "broken", profile: "web" } });
+    const broken = await request("POST", "/images", { body: { name: "broken", profile: "web" } });
     assert.strictEqual(broken.status, 202);
-    const failed = await until(async () => {
-      const s = await request("GET", "/environments/broken");
-      return s.body.job.state === "failed" ? s.body : null;
-    });
+    const failed = await settled("broken", "build");
+    assert.strictEqual(failed.job.state, "failed");
     assert.match(failed.job.error, /cherry-image@build:broken\.service failed/);
     assert.match(failed.job.error, /end of build:broken/);
-    assert.strictEqual(failed.image, false);
-    const log = await request("GET", "/environments/broken/log", { query: { lines: "2" } });
-    assert.deepStrictEqual(log.body, { file: path.join(dirs.logs, "build:broken.log"), text: "line 100\nend of build:broken" });
-    assert.strictEqual((await request("GET", "/environments/never/log")).body.text, null);
-    assert.strictEqual((await request("GET", "/environments/bad_name/log")).status, 400);
+    assert.strictEqual(failed.exists, false);
   });
 
-  await test("start, status, stop, remove", async () => {
+  await test("create: a clone of an image, or of a profile's image built first", async () => {
     reset({ images: ["web"] });
-    const start = await request("POST", "/environments/web/start", { body: {} });
+    markImage("web");
+    for (const [body, status, message] of [
+      [{ name: "yarp" }, 400, /give an image or a profile, not both/],
+      [{ name: "yarp", image: "web", profile: "web" }, 400, /give an image or a profile, not both/],
+      [{ name: "yarp", image: "ghost" }, 400, /no image "ghost"/],
+      [{ name: "yarp", profile: "nope" }, 400, /no profile "nope"/],
+      [{ name: "bad name", image: "web" }, 400, /bad name/],
+    ]) {
+      const r = await request("POST", "/environments", { body });
+      assert.strictEqual(r.status, status, JSON.stringify([body, r]));
+      assert.match(r.body.error, message);
+    }
+    assert(!world.called().some((l) => l.includes("clone")), world.called().join("\n"));
+
+    const r = await request("POST", "/environments", { body: { name: "yarp", image: "web" } });
+    assert.strictEqual(r.status, 202, JSON.stringify(r));
+    assert.deepStrictEqual([r.body.verb, r.body.image], ["create", "web"]);
+    const done = await settled("yarp", "create");
+    assert.strictEqual(done.job.message, "yarp created from the image web");
+    assert.deepStrictEqual([done.kind, done.exists, done.running, done.image], ["environment", true, false, "web"]);
+    assert(world.called().includes("machinectl --no-ask-password clone web yarp"));
+    assert.strictEqual((await request("POST", "/environments", { body: { name: "yarp", image: "web" } })).status, 409,
+      "a done job on the name does not hold it up, but the name is taken");
+
+    reset();
+    const built = await request("POST", "/environments", { body: { name: "fresh", profile: "plain" } });
+    assert.strictEqual(built.status, 202);
+    assert.deepStrictEqual([built.body.verb, built.body.profile], ["create", "plain"]);
+    const fresh = await settled("fresh", "create");
+    assert.strictEqual(fresh.job.message, "fresh created from the image plain, built first");
+    assert.deepStrictEqual(world.called().filter((l) => !l.includes("show-image") && !l.startsWith("busctl")), [
+      "systemctl start --no-ask-password cherry-image@build:plain.service",
+      "machinectl --no-ask-password clone plain fresh",
+    ]);
+    const list = await request("GET", "/environments");
+    assert.deepStrictEqual(list.body.images.map((i) => [i.name, i.environments]), [["plain", ["fresh"]]]);
+  });
+
+  await test("start, status, stop, remove, remove image", async () => {
+    reset({ images: ["web", "yarp"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const image = await request("POST", "/environments/web/start", { body: {} });
+    assert.strictEqual(image.status, 202);
+    const refused = await settled("web", "start");
+    assert.strictEqual(refused.job.state, "failed");
+    assert.match(refused.job.error, /web is an image/);
+
+    const start = await request("POST", "/environments/yarp/start", { body: {} });
     assert.strictEqual(start.status, 202, JSON.stringify(start));
-    assert.strictEqual(start.body.verb, "start");
-    const up = await until(async () => {
-      const s = await request("GET", "/environments/web");
-      return s.body.job.state === "done" ? s.body : null;
-    });
-    assert.strictEqual(up.job.message, "web is running");
-    assert.strictEqual(up.running, true);
-    assert.strictEqual(up.system, "running");
-    assert.strictEqual(up.address, "10.0.0.5/28");
-    assert.deepStrictEqual(up.failed, ["bad.service"]);
+    const up = await settled("yarp", "start");
+    assert.strictEqual(up.job.message, "yarp is running");
+    assert.deepStrictEqual([up.kind, up.image, up.running, up.system, up.address, up.failed],
+      ["environment", "web", true, "running", "10.0.0.5/28", ["bad.service"]]);
 
-    assert.strictEqual((await request("DELETE", "/environments/web")).status, 400, "a running image is not removed");
-    assert.strictEqual((await request("POST", "/environments/web/start", { body: { timeout: -1 } })).status, 400);
+    assert.strictEqual((await request("DELETE", "/environments/yarp")).status, 400, "a running environment is not removed");
+    assert.strictEqual((await request("DELETE", "/images/web")).status, 400, "an image with environments is not removed");
+    assert.strictEqual((await request("POST", "/environments/yarp/start", { body: { timeout: -1 } })).status, 400);
 
-    const stop = await request("POST", "/environments/web/stop", { body: { timeout: 5 } });
+    const stop = await request("POST", "/environments/yarp/stop", { body: { timeout: 5 } });
     assert.strictEqual(stop.status, 202);
-    const down = await until(async () => {
-      const s = await request("GET", "/environments/web");
-      return s.body.job.verb === "stop" && s.body.job.state === "done" ? s.body : null;
-    });
-    assert.strictEqual(down.job.message, "web is stopped");
+    const down = await settled("yarp", "stop");
+    assert.strictEqual(down.job.message, "yarp is stopped");
     assert.strictEqual(down.running, false);
 
-    const removed = await request("DELETE", "/environments/web");
-    assert.deepStrictEqual(removed, { status: 200, body: { message: "web removed" } });
-    const gone = await request("GET", "/environments/web");
-    assert.strictEqual(gone.body.image, false);
-    assert.strictEqual(gone.body.job, null, "the job went with the image");
-    assert.strictEqual((await request("DELETE", "/environments/web")).status, 400);
+    assert.strictEqual((await request("DELETE", "/environments/web")).status, 400, "remove does not take an image");
+    const removed = await request("DELETE", "/environments/yarp");
+    assert.deepStrictEqual(removed, { status: 200, body: { message: "yarp removed" } });
+    assert(!fs.existsSync(path.join(dirs.environments, "yarp")), "the record stayed");
+    const gone = await request("GET", "/environments/yarp");
+    assert.deepStrictEqual([gone.body.kind, gone.body.exists, gone.body.job], ["other", false, null]);
+    assert.strictEqual((await request("DELETE", "/images/yarp")).status, 400, "remove image does not take a name that is no image");
+    assert.deepStrictEqual(await request("DELETE", "/images/web"), { status: 200, body: { message: "web removed" } });
     assert.strictEqual((await request("GET", "/environments/-x")).status, 400);
     assert.strictEqual((await request("POST", "/environments/-x/start", { body: {} })).status, 400);
   });

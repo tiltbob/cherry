@@ -836,43 +836,61 @@ machinectl poweroff web
 
 ### Environments
 
-An environment is an image built from a **profile**: a recipe as above,
-written by a person, plus `profile.conf` with a `Title=` and a
-`Description=`. The image ships profiles in `/usr/lib/cherry/profiles/`, one
-per distribution it can bootstrap (`debian-trixie`, `ubuntu-noble`,
-`fedora-44`, `arch`, `almalinux-10`, `rocky-10`, `centos-stream-10`), each
-booting with its veth link configured; the machine's administrator adds
-their own under `/var/lib/cherry/profiles/`, which win over the image's by
-id, and persist with `/var`. Creating an environment copies the profile to
-`/var/lib/cherry/images/<name>/`, notes the profile's id in its
-`profile.conf`, and runs `cherry-image@build:<name>`. That is the whole
-interface: a name and a profile. No package list, file or script comes from
-the person or the agent asking; a new need is a new profile.
+Two kinds of thing live in `/var/lib/machines`, both the `cherry` user's to
+manage:
+
+- An **image** is built from a **profile**: a recipe as above, written by a
+  person, plus `profile.conf` with a `Title=` and a `Description=`. The image
+  ships profiles in `/usr/lib/cherry/profiles/`, one per distribution it can
+  bootstrap (`debian-trixie`, `ubuntu-noble`, `fedora-44`, `arch`,
+  `almalinux-10`, `rocky-10`, `centos-stream-10`), each booting with its veth
+  link configured; the machine's administrator adds their own under
+  `/var/lib/cherry/profiles/`, which win over the image's by id, and persist
+  with `/var`. Building copies the profile to `/var/lib/cherry/images/<name>/`,
+  notes the profile's id in its `profile.conf`, and runs
+  `cherry-image@build:<name>`; that recipe is what marks the machine as an
+  image. An image is never started: it is what environments are made from.
+- An **environment** is a clone of an image (`machinectl clone`: a copy, with
+  the image's `.nspawn` settings), started, stopped and removed on its own,
+  with changes of its own; several can come from one image.
+  `/var/lib/cherry/environments/<name>/environment.conf` records its image,
+  and is what marks the machine as an environment. An image with environments
+  is neither removed nor rebuilt until they are gone.
+
+A machine with neither, made by hand with the bootstrap tools, is "other":
+it can be cloned, started and stopped, not built. That is the whole
+interface: a profile and a name make an image, an image and a name make an
+environment. No package list, file or script comes from the person or the
+agent asking; a new need is a new profile.
 
 The verbs are one module, `/usr/lib/cherry/environments.js`, behind two
 front ends that run as the `cherry` user with its privileges alone:
 
 - **OpenChamber's Environments extension** (see [OpenChamber](#openchamber)):
-  a panel in the rail with the list, a create form, start, stop, remove and
-  each environment's status and build log; the `/env` command in the chat
-  (`/env create ubuntu-noble yarp`, `/env status yarp`); and a box that
-  reads a sentence ("create a new ubuntu environment named yarp") into one
-  of those, shown back before it runs. No model is involved: a small parser
-  does it, and asks when a word is missing. The panel talks to a service
-  OpenChamber starts on loopback inside `cherry.service`, which holds the
-  verbs and follows builds, starts and stops as jobs.
+  a panel in the rail with the environments (create from an image, or from a
+  profile whose image is built first when there is none; start, stop,
+  remove, status) and the images (build from a profile, the build log,
+  remove); the `/env` command in the chat (`/env create ubuntu-noble yarp`,
+  `/env status yarp`, `/env build debian-trixie`); and a box that reads a
+  sentence ("create a new ubuntu environment named yarp") into one of those,
+  shown back before it runs. No model is involved: a small parser does it,
+  and asks when a word is missing. The panel talks to a service OpenChamber
+  starts on loopback inside `cherry.service`, which holds the verbs and
+  follows builds, clones, starts and stops as jobs.
 - **OpenCode's MCP server**, `machines` (`/usr/lib/cherry/machines-mcp.js`,
   run on Bun), named by `/etc/opencode/opencode.json`, OpenCode's system
   configuration, with a skill, `machine-images`, for the workflow. Its tools:
 
 | Tool | Does |
 |---|---|
-| `list` | the images (with the profile each came from), the containers running, and the profiles |
-| `create` | an image from a profile: copies it to the recipe and runs `cherry-image@build:<name>`, after `machinectl remove` with `replace` |
-| `start`, `stop` | `machinectl start`, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
-| `status` | through `machinectl shell`, a fixed script: systemd's state, the address of `host0`, the failed units |
-| `log` | the end of the build log |
-| `remove` | `machinectl remove` |
+| `list` | the images (with the profile each came from and its environments), the environments (with their image, and whether they run), the other machines, and the profiles |
+| `build` | an image from a profile: copies it to the recipe and runs `cherry-image@build:<name>`; with `replace`, `machinectl remove` first, if no environments remain |
+| `remove_image` | `machinectl remove` of an image with no environments left; its recipe stays |
+| `log` | the end of an image's build log |
+| `create` | an environment: `machinectl clone` of an image by name, or of the image of a profile, named after it and built first when there is none |
+| `start`, `stop` | `machinectl start`, not of an image, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
+| `status` | the kind, image or profile, and through `machinectl shell` a fixed script: systemd's state, the address of `host0`, the failed units |
+| `remove` | `machinectl remove` of an environment, with its settings and its record |
 
 The same configuration denies the agent every other tool (`permission`:
 `*` is `deny`; `machines_*`, `storage_*`, `skill` and `question` are

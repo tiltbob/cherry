@@ -1,22 +1,23 @@
 // What tests/mcp.js and tests/extension.js share: stand-ins for systemctl,
 // machinectl, busctl and ip on PATH, which log their arguments and keep the
 // machine's state (images, running containers) in files, and the profiles
-// the environments are created from, in temporary directories. The
-// environments module (package/cherry/environments.js) under test reads
-// its directories from CHERRY_IMAGES_DIR, CHERRY_IMAGE_LOGS and
+// the images are built from, in temporary directories. The environments
+// module (package/cherry/environments.js) under test reads its directories
+// from CHERRY_IMAGES_DIR, CHERRY_IMAGE_LOGS, CHERRY_ENVIRONMENTS_DIR and
 // CHERRY_PROFILE_DIRS, which env() gives.
 "use strict";
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-// The machine's state, in files of $STATE with a name per line: images,
-// running containers, and dead ones (running, but never letting a shell in);
-// the switches the tests flip: FAIL_UNIT (a cherry-image@ unit that fails),
-// SLOW_UNIT (one that takes two seconds), KEEP_RUNNING (poweroff does nothing).
+// The machine's state, in files of $STATE with a name per line: images (every
+// machine machinectl knows), running containers, and dead ones (running, but
+// never letting a shell in); the switches the tests flip: FAIL_UNIT (a
+// cherry-image@ unit that fails), SLOW_UNIT (one that takes two seconds),
+// KEEP_RUNNING (poweroff does nothing).
 const STANDINS = {
-  // cherry-image@build:<name>.service: a log, slowness and a failure as told;
-  // and what a container answers to the status script.
+  // cherry-image@build:<name>.service: a log, slowness and a failure as told,
+  // and the machine; and what a container answers to the status script.
   systemctl: `
 echo "systemctl $*" >>"$CALLS"
 case $1 in
@@ -42,6 +43,9 @@ show-image) grep -qxF "$2" "$STATE/images" ;;
 remove) grep -qxF "$2" "$STATE/images" || { echo "No image '$2' known" >&2; exit 1; }
 	grep -qxF "$2" "$STATE/running" && { echo "$2 is running" >&2; exit 1; }
 	grep -vxF "$2" "$STATE/images" >"$STATE/i"; mv "$STATE/i" "$STATE/images" ;;
+clone) grep -qxF "$2" "$STATE/images" || { echo "No image '$2' known" >&2; exit 1; }
+	grep -qxF "$3" "$STATE/images" && { echo "Image '$3' already exists" >&2; exit 1; }
+	echo "$3" >>"$STATE/images" ;;
 start) grep -qxF "$2" "$STATE/images" || { echo "No image '$2' known" >&2; exit 1; }
 	echo "$2" >>"$STATE/running" ;;
 poweroff) [ -n "$KEEP_RUNNING" ] || { grep -vxF "$2" "$STATE/running" >"$STATE/r"; mv "$STATE/r" "$STATE/running"; } ;;
@@ -100,11 +104,12 @@ function writeProfiles(dirs) {
   fs.writeFileSync(path.join(local, "profile.conf"), "Title=Web (local)\n");
 }
 
-// A temporary world: {dirs, env, reset, called, remove}. env is the
-// environment a process under test needs on top of process.env.
+// A temporary world: {dirs, env, reset, called, markImage, markEnvironment,
+// remove}. env is the environment a process under test needs on top of
+// process.env.
 function standins(prefix) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  const dirs = Object.fromEntries(["bin", "recipes", "logs", "state", "profiles", "local"]
+  const dirs = Object.fromEntries(["bin", "recipes", "logs", "state", "profiles", "local", "environments"]
     .map((d) => [d, path.join(tmp, d)]));
   Object.values(dirs).forEach((d) => fs.mkdirSync(d));
   const calls = path.join(tmp, "calls");
@@ -116,20 +121,36 @@ function standins(prefix) {
   writeProfiles(dirs);
   const env = {
     PATH: `${dirs.bin}:${process.env.PATH}`, CALLS: calls, STATE: dirs.state, LOGS: dirs.logs,
-    CHERRY_IMAGES_DIR: dirs.recipes, CHERRY_IMAGE_LOGS: dirs.logs, CHERRY_PROFILE_DIRS: `${dirs.local}:${dirs.profiles}`,
+    CHERRY_IMAGES_DIR: dirs.recipes, CHERRY_IMAGE_LOGS: dirs.logs, CHERRY_ENVIRONMENTS_DIR: dirs.environments,
+    CHERRY_PROFILE_DIRS: `${dirs.local}:${dirs.profiles}`,
   };
-  // reset(state, switches): the machine's state and the stand-ins' switches, afresh.
+  // reset(state, switches): the machine's state and the stand-ins' switches,
+  // afresh; the recipes and records too.
   const reset = (state = {}, switches = {}) => {
     fs.writeFileSync(calls, "");
     for (const key of ["images", "running", "dead"]) {
       fs.writeFileSync(path.join(dirs.state, key), (state[key] ?? []).map((i) => i + "\n").join(""));
     }
     for (const key of ["FAIL_UNIT", "SLOW_UNIT", "KEEP_RUNNING"]) fs.writeFileSync(path.join(dirs.state, key), switches[key] ?? "");
+    for (const dir of [dirs.recipes, dirs.environments]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir);
+    }
+  };
+  // What marks a machine as an image built here (its recipe's profile.conf),
+  // or as an environment (its record).
+  const markImage = (name, profile = "web") => {
+    fs.mkdirSync(path.join(dirs.recipes, name), { recursive: true });
+    fs.writeFileSync(path.join(dirs.recipes, name, "profile.conf"), `Title=${profile} title\nProfile=${profile}\n`);
+  };
+  const markEnvironment = (name, image) => {
+    fs.mkdirSync(path.join(dirs.environments, name), { recursive: true });
+    fs.writeFileSync(path.join(dirs.environments, name, "environment.conf"), `Image=${image}\nCreated=2026-01-01T00:00:00.000Z\n`);
   };
   reset();
   const called = () => fs.readFileSync(calls, "utf8").trim().split("\n").filter(Boolean);
   const remove = () => fs.rmSync(tmp, { recursive: true, force: true });
-  return { tmp, dirs, env, reset, called, remove };
+  return { tmp, dirs, env, reset, called, markImage, markEnvironment, remove };
 }
 
 module.exports = { standins };

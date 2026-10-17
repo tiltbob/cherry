@@ -36,13 +36,15 @@
      cherry-bootstrap@ and nothing else; no openchamber user, state directory
      or service
   9. OpenCode reads its system configuration, /etc/opencode, which denies the
-     agent every tool but the MCP server's; through that server, as the cherry
-     user in cherry.service's sandbox, a Debian environment is created from a
-     profile of the machine's own (cherry-image@.service), started with its
-     network up, read with status, stopped, and removed; OpenChamber lists the
-     Environments extension as a granted built-in, whose service answers in
-     the same sandbox; cherry-image@ writes nothing out, as images never leave
-     the machine (skipped when the guest cannot reach deb.debian.org)
+     agent every tool but the MCP servers'; through the machines server, as
+     the cherry user in cherry.service's sandbox, a Debian image is built from
+     a profile of the machine's own (cherry-image@.service) and refused a
+     start, an environment is cloned from it with its settings, started with
+     its network up, read with status, stopped, and removed before the image
+     is; OpenChamber lists the Environments extension as a granted built-in,
+     whose service answers in the same sandbox; cherry-image@ writes nothing
+     out, as images never leave the machine (skipped when the guest cannot
+     reach deb.debian.org)
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
@@ -893,7 +895,8 @@ class Smoke:
               f"the shipped profiles are not listed: {ids}")
 
         # A profile of the machine's own, written as the cherry user: the smoke test's recipe.
-        name, root = "smoke-image", "/var/lib/machines/smoke-image"
+        image, env = "smoke-base", "smoke-env"
+        root, clone = f"/var/lib/machines/{image}", f"/var/lib/machines/{env}"
         motd = "built by cherry-image for the smoke test"
         profile = "/var/lib/cherry/profiles/smoke"
         files = {
@@ -913,43 +916,65 @@ class Smoke:
         check("smoke" in [p["id"] for p in json.loads(self.mcp("list", {}))["profiles"]],
               "the machine's own profile is not listed")
 
-        text = self.mcp("create", {"name": name, "profile": "smoke"}, timeout=1800)
-        log("create:\n" + text)
-        check(text.startswith(f"Created {name} from the profile smoke.") and f"built {root} " in text,
-              f"the create's log does not end as it should:\n{text}")
-        check(vm.run(f"stat -c %a /var/log/cherry-image/build:{name}.log") == "644",
+        # The image: built from the profile, never started.
+        text = self.mcp("build", {"name": image, "profile": "smoke"}, timeout=1800)
+        log("build:\n" + text)
+        check(text.startswith(f"Built the image {image} from the profile smoke.") and f"built {root} " in text,
+              f"the build's log does not end as it should:\n{text}")
+        check(vm.run(f"stat -c %a /var/log/cherry-image/build:{image}.log") == "644",
               "the build log is not readable by the cherry user")
-        check(vm.run(f"stat -c %U /var/lib/cherry/images/{name}/image.conf") == "cherry",
+        check(vm.run(f"stat -c %U /var/lib/cherry/images/{image}/image.conf") == "cherry",
               "the recipe was not written as the cherry user")
-        check(vm.run(f"cat /var/lib/cherry/images/{name}/profile.conf").endswith("Profile=smoke"),
+        check(vm.run(f"cat /var/lib/cherry/images/{image}/profile.conf").endswith("Profile=smoke"),
               "the recipe does not name its profile")
         check(vm.run(f"cat {root}.nspawn") == "[Exec]\nEnvironment=SMOKE=1", "the image's settings were not installed")
         vm.run(f"test -e {root}/etc/machine-id && ! test -s {root}/etc/machine-id && "
                f"test -z \"$(ls {root}/var/lib/apt/lists)\" && ! test -e {root}/.cherry-image")
         check(vm.run(f"cat {root}/etc/motd {root}/var/postinst-ran") == f"{motd}\npostinst ran",
               "the profile's files and postinst did not land in the image")
-        log(f"{name}: " + vm.run(f"du -sh {root} | cut -f 1"))
+        log(f"{image}: " + vm.run(f"du -sh {root} | cut -f 1"))
+        text = self.mcp("start", {"name": image}, error=True)
+        check("is an image" in text, f"starting the image was not refused as such:\n{text}")
 
-        check(self.mcp("start", {"name": name}, timeout=300) == f"{name} is running", f"{name} did not start")
+        # The environment: a clone of the image, with its settings, recorded as the cherry user.
+        text = self.mcp("create", {"name": env, "image": image}, timeout=600)
+        check(text == f"Created the environment {env} from the image {image}.", f"create answered:\n{text}")
+        vm.run(f"test -d {clone} && test -f {clone}/usr/bin/smoke-hello")
+        check(vm.run(f"cat {clone}.nspawn") == "[Exec]\nEnvironment=SMOKE=1",
+              "the clone did not get the image's settings")
+        record = f"/var/lib/cherry/environments/{env}/environment.conf"
+        check(vm.run(f"stat -c %U {record}") == "cherry" and vm.run(f"cat {record}").startswith(f"Image={image}\n"),
+              f"the environment's record is not the cherry user's, naming its image: {vm.run(f'cat {record}')}")
+        listed = json.loads(self.mcp("list", {}))
+        check([i["name"] for i in listed["images"]] == [image] and listed["images"][0]["environments"] == [env] and
+              [(e["name"], e["image"]) for e in listed["environments"]] == [(env, image)],
+              f"list does not tell the image from its environment:\n{listed}")
+        text = self.mcp("remove_image", {"name": image}, error=True)
+        check("still has environments" in text, f"removing the image under its environment was not refused:\n{text}")
+
+        check(self.mcp("start", {"name": env}, timeout=300) == f"{env} is running", f"{env} did not start")
         # The agent has no tool to run a command in it; root on the host has (stdin kept open: the pty forwarder
         # ends at EOF). Its login messages may come first.
-        text = vm.run(f"sleep 10 | machinectl -q shell {name} /bin/sh -c 'cat /etc/motd /var/postinst-ran; smoke-hello'"
-                      " | tr -d '\\r'", timeout=60)
-        check(f"{motd}\npostinst ran\nhello from {name}" in text,
-              f"the container does not answer as it should:\n{text}")
+        command = "cat /etc/motd /var/postinst-ran; smoke-hello"
+        text = vm.run(f"sleep 10 | machinectl -q shell {env} /bin/sh -c '{command}' | tr -d '\\r'", timeout=60)
+        check(f"{motd}\npostinst ran\nhello from {env}" in text,
+              f"the environment does not answer as it should:\n{text}")
         # Its network: host0, configured by the image's networkd with DHCP from the host, as status reads it.
         status = None
         for _ in range(20):
-            status = json.loads(self.mcp("status", {"name": name}, timeout=180))
+            status = json.loads(self.mcp("status", {"name": env}, timeout=180))
             if status.get("address"):
                 break
             vm.run("sleep 3")
-        check(status["running"] and status["image"] and status["profile"] == {"id": "smoke", "title": "Smoke test"},
+        check(status["kind"] == "environment" and status["image"] == image and status["running"] and status["exists"],
               f"status does not describe the environment:\n{status}")
         check(re.match(r"\d+\.\d+\.\d+\.\d+/\d+$", status.get("address") or ""), f"host0 has no address:\n{status}")
         check(status["system"] in ("running", "degraded", "starting") and
-              "systemd-networkd.service" not in status["failed"], f"systemd in {name} is not up:\n{status}")
-        log(f"{name}: systemd {status['system']}, host0 {status['address']}, failed units {status['failed']}")
+              "systemd-networkd.service" not in status["failed"], f"systemd in {env} is not up:\n{status}")
+        log(f"{env}: systemd {status['system']}, host0 {status['address']}, failed units {status['failed']}")
+        status = json.loads(self.mcp("status", {"name": image}))
+        check(status["kind"] == "image" and status["profile"] == {"id": "smoke", "title": "Smoke test"} and
+              not status["running"], f"status does not describe the image:\n{status}")
 
         # OpenChamber's Environments extension: a built-in, listed with its grants and nothing to click, whose
         # service, started by the first request, answers as the cherry user in cherry.service's sandbox.
@@ -966,7 +991,8 @@ class Smoke:
                                   f"{url}/api/guests/{guest_id}/service/request", timeout=120))
         check(reply.get("status") == 200, f"the Environments service did not answer:\n{reply}")
         listed = json.loads(reply["body"])
-        check(any(i["name"] == name and i["running"] for i in listed["images"]) and
+        check([i["name"] for i in listed["images"]] == [image] and
+              [(e["name"], e["image"], e["running"]) for e in listed["environments"]] == [(env, image, True)] and
               "smoke" in [p["id"] for p in listed["profiles"]],
               f"the service lists otherwise than the MCP server:\n{listed}")
         pids = vm.run("for p in /proc/[0-9]*; do grep -qF cherry-environments/service/main.js $p/cmdline 2>/dev/null "
@@ -978,19 +1004,23 @@ class Smoke:
                   vm.run(f"awk '/^Seccomp:/ {{ print $2 }}' /proc/{pid}/status") == "2",
                   f"the Environments service (pid {pid}) does not run as cherry, on Bun, under the system call filter")
 
-        check(self.mcp("stop", {"name": name}, timeout=180) == f"{name} is stopped", f"{name} did not stop")
+        check(self.mcp("stop", {"name": env}, timeout=180) == f"{env} is stopped", f"{env} did not stop")
 
         # Images never leave the machine: cherry-image@ takes no export verb, and writes nothing out.
-        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{name}.service", check_rc=False)
+        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{image}.service", check_rc=False)
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
-              f"cherry-image@tar:{name} as cherry did not fail on its instance alone: {out}")
+              f"cherry-image@tar:{image} as cherry did not fail on its instance alone: {out}")
         rc, _ = vm.run("test -e /var/lib/cherry/exports", check_rc=False)
         check(rc != 0, "cherry-image@ wrote an export")
 
-        check(self.mcp("remove", {"name": name}) == f"{name} removed", f"{name} was not removed")
+        # The environment goes with its record, then the image.
+        check(self.mcp("remove", {"name": env}) == f"{env} removed", f"{env} was not removed")
+        rc, _ = vm.run(f"test -e {clone} || test -e {clone}.nspawn || test -e {record}", check_rc=False)
+        check(rc != 0, "the environment, its settings or its record are still there")
+        check(self.mcp("remove_image", {"name": image}) == f"{image} removed", f"{image} was not removed")
         rc, _ = vm.run(f"test -e {root} || test -e {root}.nspawn", check_rc=False)
         check(rc != 0, "the image or its settings are still there")
-        vm.run(f"rm -rf /var/lib/cherry/images/{name} {profile}")
+        vm.run(f"rm -rf /var/lib/cherry/images/{image} {profile}")
 
     def s10_zram(self):
         vm = self.vm
