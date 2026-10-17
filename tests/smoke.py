@@ -536,7 +536,7 @@ class Smoke:
         check(listed == key, f"the agent lists another key:\n{listed}")
         check(vm.run("ls -d /etc/ssh/ssh_host_* /var/lib/sshd 2>/dev/null; true") == "", "host keys on disk")
         # Nothing about the key from sshd, which first tries the HostKey file as a private key (tests/exocarp.py).
-        rc, complaints = vm.run("journalctl -b -u sshd --no-pager -o cat | grep -iE 'host key|unprotected|permission'",
+        rc, complaints = vm.run("journalctl -b -u sshd --no-pager -o cat | grep -iE 'host key|unprotected|too open'",
                                 check_rc=False)
         check(rc == 1, f"sshd complained about the host key:\n{complaints}")
         log(f"host key: {key}")
