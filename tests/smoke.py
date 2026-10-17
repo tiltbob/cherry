@@ -92,10 +92,11 @@ NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 # Run a command as the cherry user, from the root shell on the console.
 AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
 # As cherry.service runs OpenCode, and the MCP servers it starts: the parts of its sandbox that could stop them.
+# Not its SystemCallFilter=: the image's systemd is built without seccomp, so that has no effect on cherry.service,
+# and a transient unit refuses it.
 IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectSystem=strict "
-                     "-p ReadWritePaths=/var/lib/cherry -p PrivateDevices=yes -p CapabilityBoundingSet= "
-                     "-p RestrictNamespaces=yes -p SystemCallFilter=@system-service "
-                     "-p 'SystemCallFilter=~@privileged' -p SystemCallErrorNumber=EPERM")
+                     "-p ReadWritePaths=/var/lib/cherry -p PrivateTmp=yes -p PrivateDevices=yes "
+                     "-p CapabilityBoundingSet= -p RestrictNamespaces=yes")
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
