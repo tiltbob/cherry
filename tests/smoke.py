@@ -59,13 +59,13 @@
   14. storage, through OpenCode's storage MCP server as the cherry user, with
      /var on a disk of its own, which is in use: claim refuses a disk not as
      listed, then wipes a blank hard disk, one with a partition table and an
-     NVMe SSD, each now a LUKS2 volume the TPM unlocks, the only physical
-     volumes LVM sees; a pool of the hard disks cached on the SSD, a volume in
-     it, cached, mounted, the cherry user's, which cherry.service sees
-     writable; a hard disk out of the pool, its data moved, and the volume
-     grown; after a poweroff, which closes it all cleanly, the next boot
-     unlocks, activates and mounts it again; then the cache, the volume and
-     the pool go, and the disks are released blank
+     NVMe SSD with one too, each now a LUKS2 volume the TPM unlocks, the only
+     physical volumes LVM sees; a pool of the hard disks cached on the SSD, a
+     volume in it, cached, mounted, the cherry user's, which cherry.service
+     sees writable; a hard disk out of the pool, its data moved, and the
+     volume grown; after a poweroff, which closes it all cleanly, the next
+     boot unlocks, activates and mounts it again; then the cache, the volume
+     and the pool go, and the disks are released blank
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -1100,12 +1100,14 @@ class Smoke:
 
     def s14_storage(self):
         vm = self.vm
-        # A blank disk, which becomes /var; two hard disks, one blank and one with a partition table; an SSD.
+        # A blank disk, which becomes /var; two hard disks, one blank and one with a partition table; an SSD with a
+        # partition table too, as cherry-var takes the first blank disk in the kernel's order, nvme0n1 before vda.
         images = {name: os.path.join(self.workdir, f"storage-{name}.img") for name in ("var", "hdd0", "hdd1", "ssd0")}
         for name, size in (("var", 4 << 30), ("hdd0", 8 << 30), ("hdd1", 8 << 30), ("ssd0", 2 << 30)):
             run_qemu.make_disk(images[name], size)
-        with open(images["hdd1"], "r+b") as f:
-            f.write(DOS_MBR)
+        for name in ("hdd1", "ssd0"):
+            with open(images[name], "r+b") as f:
+                f.write(DOS_MBR)
         disks, ssds = [images["var"], images["hdd0"], images["hdd1"]], [images["ssd0"]]
         self.boot(disks=disks, ssds=ssds)
         config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
@@ -1121,8 +1123,9 @@ class Smoke:
               f"vdb is not a free, blank hard disk: {found['vdb']}")
         check((found["vdc"]["state"], found["vdc"]["blank"]) == ("free", False) and "dos" in found["vdc"]["signatures"],
               f"vdc is not a free disk with a partition table: {found['vdc']}")
-        check((found["nvme0n1"]["state"], found["nvme0n1"]["kind"]) == ("free", "ssd"),
-              f"nvme0n1 is not a free SSD: {found['nvme0n1']}")
+        nvme = found["nvme0n1"]
+        check((nvme["state"], nvme["kind"], nvme["blank"]) == ("free", "ssd", False),
+              f"nvme0n1 is not a free SSD with a partition table: {nvme}")
         check(state["pools"] == [], f"pools before any: {state['pools']}")
 
         # A disk is claimed only as it was listed.
