@@ -22,21 +22,25 @@ Commands:
   check   the files in board/x86_64/secureboot/ are what init and issue write,
           their signatures verify, and the chain holds (make check)
 
-The token is reached through OpenSC's PKCS#11 module (or --module), with
-pkcs11-tool for key generation and OpenSSL 3's pkcs11-provider for signing:
-apt install opensc pkcs11-provider. The PIN is asked once, or taken from
-CHERRY_HSM_PIN.
+The token is reached through OpenSC's pkcs11-tool and PKCS#11 module (or
+--module): it generates the keys and makes every signature with them, over
+certificates and signed data this script puts together. OpenSSL makes the
+release key and checks the results. apt install opensc (or dnf, pacman).
+The PIN is asked once, or taken from CHERRY_HSM_PIN.
 """
 
 import argparse
+import base64
 import datetime
 import getpass
+import hashlib
 import os
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 import uuid
 
 KEYS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "board", "x86_64", "secureboot")
@@ -54,28 +58,27 @@ APPEND_WRITE = 0x40
 WIN_CERT_TYPE_EFI_GUID = 0x0EF1
 OID_SIGNED_DATA = bytes.fromhex("06092a864886f70d010702")  # 1.2.840.113549.1.7.2
 
-# name: (token object label, certificate subject, variable, its GUID, the key that signs its update)
+# name: (token object label, certificate subject's CN, variable, its GUID, the key that signs its update)
 KEYS = {
-    "PK": ("cherry-pk", "/CN=Cherry Platform Key/", "PK", EFI_GLOBAL_VARIABLE, "PK"),
-    "KEK": ("cherry-kek", "/CN=Cherry Key Exchange Key/", "KEK", EFI_GLOBAL_VARIABLE, "PK"),
-    "db": ("cherry-db", "/CN=Cherry Secure Boot CA/", "db", EFI_IMAGE_SECURITY_DATABASE, "KEK"),
+    "PK": ("cherry-pk", "Cherry Platform Key", "PK", EFI_GLOBAL_VARIABLE, "PK"),
+    "KEK": ("cherry-kek", "Cherry Key Exchange Key", "KEK", EFI_GLOBAL_VARIABLE, "PK"),
+    "db": ("cherry-db", "Cherry Secure Boot CA", "db", EFI_IMAGE_SECURITY_DATABASE, "KEK"),
 }
 ROOT_DAYS = 30 * 365 + 7  # firmware never checks validity dates
 RELEASE_DAYS = 5 * 365 + 1
 
-# The token's key certificates: self-signed CAs, as `openssl req -x509` makes them by default.
-ROOT_EXTENSIONS = """[ext]
-basicConstraints = critical, CA:true
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid:always
-"""
-RELEASE_EXTENSIONS = """[ext]
-basicConstraints = critical, CA:false
-keyUsage = critical, digitalSignature
-extendedKeyUsage = codeSigning
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid:always
-"""
+# DER object identifiers, whole.
+OID_DATA = bytes.fromhex("06092a864886f70d010701")  # 1.2.840.113549.1.7.1
+OID_SHA256 = bytes.fromhex("0609608648016503040201")  # 2.16.840.1.101.3.4.2.1
+OID_RSA = bytes.fromhex("06092a864886f70d010101")  # rsaEncryption
+OID_SHA256_RSA = bytes.fromhex("06092a864886f70d01010b")  # sha256WithRSAEncryption
+OID_CN = bytes.fromhex("0603550403")
+OID_BASIC_CONSTRAINTS = bytes.fromhex("0603551d13")
+OID_KEY_USAGE = bytes.fromhex("0603551d0f")
+OID_EXT_KEY_USAGE = bytes.fromhex("0603551d25")
+OID_SUBJECT_KEY_ID = bytes.fromhex("0603551d0e")
+OID_AUTHORITY_KEY_ID = bytes.fromhex("0603551d23")
+OID_CODE_SIGNING = bytes.fromhex("06082b06010505070303")
 
 OPENSC_MODULES = [
     "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so",
@@ -88,7 +91,8 @@ OPENSC_MODULES = [
 
 
 def fail(message):
-    sys.exit(f"secureboot: {message}")
+    print(f"secureboot: {message}", file=sys.stderr)
+    sys.exit(1)
 
 
 def note(message):
@@ -173,90 +177,201 @@ def der(tag, content):
     return bytes([tag, 0x80 | len(length)]) + length + content
 
 
-def unwrap_content_info(blob):
-    _, start, _ = der_tlv(blob)  # ContentInfo SEQUENCE
-    _, _, oid_end = der_tlv(blob, start)
-    if blob[start:oid_end] != OID_SIGNED_DATA:
-        raise ValueError("not a PKCS#7 SignedData")
-    _, inner, _ = der_tlv(blob, oid_end)  # [0] EXPLICIT
-    _, _, end = der_tlv(blob, inner)
-    return blob[inner:end]
+def der_children(blob):
+    """The DER elements, whole, inside the constructed element blob."""
+    _, start, end = der_tlv(blob)
+    children = []
+    while start < end:
+        _, _, child_end = der_tlv(blob, start)
+        children.append(blob[start:child_end])
+        start = child_end
+    return children
+
+
+def der_int(n):
+    return der(0x02, n.to_bytes(n.bit_length() // 8 + 1, "big"))
+
+
+def der_time(t):
+    """UTCTime until 2049, GeneralizedTime from 2050, as RFC 5280 asks."""
+    if t.year < 2050:
+        return der(0x17, t.strftime("%y%m%d%H%M%SZ").encode())
+    return der(0x18, t.strftime("%Y%m%d%H%M%SZ").encode())
+
+
+def algorithm(oid):
+    return der(0x30, oid + b"\x05\x00")  # with NULL parameters
 
 
 def wrap_content_info(signed_data):
     return der(0x30, OID_SIGNED_DATA + der(0xA0, signed_data))
 
 
+# --- X.509 and PKCS #7, around signatures the token makes -----------------------------------------------------
+
+def name(cn):
+    return der(0x30, der(0x31, der(0x30, OID_CN + der(0x0C, cn.encode()))))
+
+
+def extension(oid, value, critical=False):
+    return der(0x30, oid + (b"\x01\x01\xff" if critical else b"") + der(0x04, value))
+
+
+def tbs_fields(cert):
+    """serialNumber, signature, issuer, validity, subject, subjectPublicKeyInfo, ... of a certificate."""
+    fields = der_children(der_children(cert)[0])
+    return fields[1:] if fields[0][0] == 0xA0 else fields
+
+
+def key_identifier(public_key):
+    """The SHA-1 of a SubjectPublicKeyInfo's key, as OpenSSL's subjectKeyIdentifier = hash."""
+    bits = der_children(public_key)[1]
+    _, start, end = der_tlv(bits)
+    return hashlib.sha1(bits[start + 1:end]).digest()
+
+
+def root_extensions():
+    """The token's keys: CAs, as `openssl req -x509` makes them."""
+    return [extension(OID_BASIC_CONSTRAINTS, der(0x30, b"\x01\x01\xff"), critical=True)]
+
+
+def release_extensions():
+    return [extension(OID_BASIC_CONSTRAINTS, der(0x30, b""), critical=True),
+            extension(OID_KEY_USAGE, b"\x03\x02\x07\x80", critical=True),  # digitalSignature
+            extension(OID_EXT_KEY_USAGE, der(0x30, OID_CODE_SIGNING))]
+
+
+def certificate(token, signer, cn, public_key, issuer, days, extensions):
+    """A certificate of public_key, as DER, signed by the token's key `signer`: issued by the certificate
+    issuer, or self-signed when issuer is None."""
+    subject = name(cn)
+    if issuer is None:
+        issuer_name, issuer_key = subject, public_key
+    else:
+        issuer_name, issuer_key = tbs_fields(issuer)[4], tbs_fields(issuer)[5]
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    serial = int.from_bytes(os.urandom(16), "big") >> 1 or 1
+    extensions = extensions + [extension(OID_SUBJECT_KEY_ID, der(0x04, key_identifier(public_key))),
+                               extension(OID_AUTHORITY_KEY_ID, der(0x30, der(0x80, key_identifier(issuer_key))))]
+    tbs = der(0x30, der(0xA0, der_int(2)) + der_int(serial) + algorithm(OID_SHA256_RSA) + issuer_name
+              + der(0x30, der_time(now) + der_time(now + datetime.timedelta(days=days)))
+              + subject + public_key + der(0xA3, der(0x30, b"".join(extensions))))
+    return der(0x30, tbs + algorithm(OID_SHA256_RSA) + der(0x03, b"\x00" + token.sign(signer, tbs)))
+
+
+def signed_data(signer_cert, signature):
+    """A detached PKCS #7 SignedData without signed attributes, as UEFI asks: version 1, SHA-256, RSA, and the
+    signer's certificate. The signature is over the SHA-256 of the content itself."""
+    serial, _, issuer = tbs_fields(signer_cert)[:3]
+    signer_info = der(0x30, der_int(1) + der(0x30, issuer + serial) + algorithm(OID_SHA256) + algorithm(OID_RSA)
+                      + der(0x04, signature))
+    return der(0x30, der_int(1) + der(0x31, algorithm(OID_SHA256)) + der(0x30, OID_DATA)
+               + der(0xA0, signer_cert) + der(0x31, signer_info))
+
+
+def pem(cert):
+    b64 = base64.b64encode(cert).decode()
+    return "".join(["-----BEGIN CERTIFICATE-----\n"] + [b64[i:i + 64] + "\n" for i in range(0, len(b64), 64)]
+                   + ["-----END CERTIFICATE-----\n"])
+
+
 # --- the token -------------------------------------------------------------------------------------------------
 
+def key_id(label):
+    """The token object ID of a key and its certificate: the label, in hex."""
+    return label.encode().hex()
+
+
 class Token:
-    """The PKCS#11 token: key generation with pkcs11-tool, signing through OpenSSL's pkcs11-provider."""
+    """The PKCS#11 token, through pkcs11-tool."""
 
     def __init__(self, args, tmp):
         self.module = args.module or os.environ.get("PKCS11_MODULE") or next(
             (m for m in OPENSC_MODULES if os.path.exists(m)), None)
         if not self.module:
             fail("OpenSC's PKCS#11 module not found: install opensc, or pass --module")
+        if not shutil.which("pkcs11-tool"):
+            fail("pkcs11-tool not found: install opensc")
         self.label = args.token
+        self.tmp = tmp
+        # pkcs11-tool reads the PIN from its environment, so the PIN shows in no process list.
         pin = os.environ.get("CHERRY_HSM_PIN") or getpass.getpass("User PIN of the token: ")
-        # OpenSSL reads the PIN from a file of a private directory, pkcs11-tool from the environment: neither
-        # shows it in the process list.
-        self.pin_file = os.path.join(tmp, "pin")
-        with open(os.open(self.pin_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
-            f.write(pin)
-        self.env = dict(os.environ, CHERRY_HSM_PIN=pin, PKCS11_PROVIDER_MODULE=self.module)
-        self.provider = ["-provider", "pkcs11", "-provider", "default"]
+        self.env = dict(os.environ, CHERRY_HSM_PIN=pin)
+        # The PIN, checked before anything else: a login that fails would otherwise only show as missing keys.
+        p = subprocess.run(self.command("--list-objects", "--type", "privkey"), capture_output=True, env=self.env)
+        if p.returncode != 0:
+            err = p.stderr.decode(errors="replace").strip()
+            hint = (" A Nitrokey HSM 2 blocks its PIN after three wrong ones in a row; sc-hsm-tool shows the tries "
+                    "left." if "CKR_PIN_" in err else "")
+            fail(f"cannot log in to the token.{hint}\n" + "\n".join(err.splitlines()[-3:]))
 
-    def tool(self, *args):
+    def command(self, *args):
         cmd = ["pkcs11-tool", "--module", self.module]
         if self.label:
             cmd += ["--token-label", self.label]
-        return run(cmd + ["--login", "--pin", "env:CHERRY_HSM_PIN", *args], env=self.env).decode()
+        return cmd + ["--login", "--pin", "env:CHERRY_HSM_PIN", *args]
 
-    def private_keys(self):
-        out = self.tool("--list-objects", "--type", "privkey")
+    def tool(self, *args):
+        return run(self.command(*args), env=self.env).decode()
+
+    def labels(self, kind):
+        """The labels of the token's objects of a kind: privkey, pubkey or cert."""
+        out = self.tool("--list-objects", "--type", kind)
         return [line.split(":", 1)[1].strip() for line in out.splitlines() if line.strip().startswith("label:")]
 
+    def delete_commands(self, labels):
+        """The pkcs11-tool commands that delete the keys and certificates of these labels, for a person to run."""
+        base = ["pkcs11-tool", "--module", self.module] + (["--token-label", self.label] if self.label else [])
+        return "\n".join("  " + shlex.join(base + ["--login", "--delete-object", "--type", kind,
+                                                   "--id", key_id(label), "--label", label])
+                         for kind in ("privkey", "pubkey", "cert") for label in labels if label in self.labels(kind))
+
     def generate(self, label):
-        # The ID is the label: unique, and what pairs the key with the certificate stored next to it.
-        self.tool("--keypairgen", "--key-type", "rsa:2048", "--usage-sign", "--label", label,
-                  "--id", label.encode().hex())
+        self.tool("--keypairgen", "--key-type", "rsa:2048", "--usage-sign", "--label", label, "--id", key_id(label))
 
-    def store_certificate(self, label, der_file):
-        self.tool("--write-object", der_file, "--type", "cert", "--label", label, "--id", label.encode().hex())
+    def public_key(self, label):
+        """The SubjectPublicKeyInfo, DER, of the token's key `label`."""
+        out = os.path.join(self.tmp, "public-key.der")
+        self.tool("--read-object", "--type", "pubkey", "--id", key_id(label), "--output-file", out)
+        with open(out, "rb") as f:
+            return f.read()
 
-    def key_uri(self, label):
-        path = f"object={urllib.parse.quote(label)};type=private"
-        if self.label:
-            path = f"token={urllib.parse.quote(self.label)};{path}"
-        return f"pkcs11:{path}?pin-source=file:{urllib.parse.quote(self.pin_file)}"
+    def sign(self, label, data):
+        """An RSA PKCS #1 v1.5 signature of the SHA-256 of data, by the token's key `label`. By its ID: given
+        only a label, pkcs11-tool --sign takes the token's first key."""
+        path = os.path.join(self.tmp, "to-sign")
+        with open(path, "wb") as f:
+            f.write(data)
+        self.tool("--sign", "--mechanism", "SHA256-RSA-PKCS", "--id", key_id(label),
+                  "--input-file", path, "--output-file", path + ".sig")
+        with open(path + ".sig", "rb") as f:
+            return f.read()
 
-    def openssl(self, command, *args, data=None):
-        return run(["openssl", command, *self.provider, *args], env=self.env, data=data)
+    def store_certificate(self, label, cert):
+        path = os.path.join(self.tmp, "certificate.der")
+        with open(path, "wb") as f:
+            f.write(cert)
+        self.tool("--write-object", path, "--type", "cert", "--label", label, "--id", key_id(label))
 
 
-def write_config(tmp, text):
-    path = os.path.join(tmp, "ext.cnf")
-    with open(path, "w") as f:
-        f.write(text)
-    return path
-
-
-def signed_update(token, tmp, var, data, signer_crt, signer_label, when):
-    """The .auth file that sets `var` to `data`, signed by the signer's key on the token."""
-    _, _, name, guid, _ = KEYS[var]
+def signed_update(token, var, data, signer_cert, signer, when):
+    """The .auth file that sets `var` to `data`, signed by the token's key `signer` of the certificate
+    signer_cert (DER)."""
+    _, _, name_, guid, _ = KEYS[var]
     timestamp = efi_time(when)
-    tbs = os.path.join(tmp, f"{var}.tbs")
-    with open(tbs, "wb") as f:
-        f.write(to_be_signed(name, guid, AUTH_ATTRS, timestamp, data))
-    # A detached signature without signed attributes, as the UEFI specification asks.
-    p7 = token.openssl("smime", "-sign", "-binary", "-noattr", "-md", "sha256", "-outform", "DER",
-                       "-signer", signer_crt, "-inkey", token.key_uri(signer_label), "-in", tbs)
-    return auth2(timestamp, unwrap_content_info(p7), data)
+    signature = token.sign(signer, to_be_signed(name_, guid, AUTH_ATTRS, timestamp, data))
+    return auth2(timestamp, signed_data(signer_cert, signature), data)
 
 
 def pem_to_der(pem_file):
     return run(["openssl", "x509", "-in", pem_file, "-outform", "DER"])
+
+
+def write(path, content, mode=0o644, new=False):
+    """Write a file; with new, only one that does not exist yet."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if new else os.O_TRUNC)
+    with open(os.open(path, flags, mode), "wb") as f:
+        f.write(content.encode() if isinstance(content, str) else content)
 
 
 def cmd_init(args):
@@ -266,30 +381,39 @@ def cmd_init(args):
         fail(f"{', '.join(existing)} exist already: init makes a new root of trust only once")
     with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
         token = Token(args, tmp)
-        present = set(token.private_keys())
+        present = set(token.labels("privkey"))
         taken = [label for label, *_ in KEYS.values() if label in present]
         if taken:
-            fail(f"the token holds {', '.join(taken)} already: init generates them, it never reuses a key")
+            fail(f"the token holds {', '.join(taken)} already: init generates them, it never reuses a key. If an "
+                 "init that stopped left them, nothing uses them: delete them, then run init again:\n"
+                 + token.delete_commands(taken))
         os.makedirs(args.dir, exist_ok=True)
-        ext = write_config(tmp, ROOT_EXTENSIONS)
-        crt = {}
-        for var, (label, subject, *_) in KEYS.items():
-            note(f"generating {label} on the token")
-            token.generate(label)
-            crt[var] = os.path.join(args.dir, f"{var}.crt")
-            token.openssl("req", "-new", "-x509", "-key", token.key_uri(label), "-subj", subject, "-sha256",
-                          "-days", str(args.days), "-config", ext, "-extensions", "ext", "-out", crt[var])
-            der_file = os.path.join(tmp, f"{var}.der")
-            with open(der_file, "wb") as f:
-                f.write(pem_to_der(crt[var]))
-            token.store_certificate(label, der_file)
-        when = datetime.datetime.now(datetime.timezone.utc)
-        for var, (*_, signer) in KEYS.items():
-            data = esl(EFI_CERT_X509, [pem_to_der(crt[var])])
-            update = signed_update(token, tmp, var, data, crt[signer], KEYS[signer][0], when)
-            with open(os.path.join(args.dir, f"{var}.auth"), "wb") as f:
-                f.write(update)
-    check(args.dir, require_release=False)
+        crt, made, written = {}, [], []
+        try:
+            for var, (label, cn, *_) in KEYS.items():
+                note(f"generating {label} on the token")
+                made.append(label)
+                token.generate(label)
+                crt[var] = certificate(token, label, cn, token.public_key(label), None, args.days, root_extensions())
+                written.append(os.path.join(args.dir, f"{var}.crt"))
+                write(written[-1], pem(crt[var]))
+                token.store_certificate(label, crt[var])
+            when = datetime.datetime.now(datetime.timezone.utc)
+            for var, (*_, signer) in KEYS.items():
+                data = esl(EFI_CERT_X509, [crt[var]])
+                update = signed_update(token, var, data, crt[signer], KEYS[signer][0], when)
+                written.append(os.path.join(args.dir, f"{var}.auth"))
+                write(written[-1], update)
+            check(args.dir, require_release=False)
+        except SystemExit:
+            # Nothing of a stopped init stays in use: its files go, and the person deletes what it generated on
+            # the token, which init never reuses.
+            for path in written:
+                if os.path.exists(path):
+                    os.remove(path)
+            note("init stopped, and removed the files it wrote. Delete what it generated on the token, then run "
+                 "init again:\n" + token.delete_commands(made))
+            raise
     note(f"wrote {', '.join(files)} to {args.dir}.\n"
          "Commit them, then make the release signing key: scripts/secureboot.py issue")
 
@@ -302,27 +426,32 @@ def cmd_issue(args):
         fail(f"{args.key_out} exists")
     with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
         token = Token(args, tmp)
+        label = KEYS["db"][0]
+        if label not in token.labels("privkey"):
+            fail(f"the token holds no {label}, the key of {ca}: is it the token init used? --token picks one, by "
+                 "its label as pkcs11-tool -L shows it")
         key = os.path.join(tmp, "release.key")
         run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key])
+        public_key = run(["openssl", "pkey", "-in", key, "-pubout", "-outform", "DER"])
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         crt = os.path.join(tmp, "release.crt")
-        token.openssl("req", "-new", "-x509", "-key", key, "-CA", ca, "-CAkey", token.key_uri(KEYS["db"][0]),
-                      "-subj", f"/CN=Cherry Release Signing {stamp}/", "-sha256", "-days", str(args.days),
-                      "-config", write_config(tmp, RELEASE_EXTENSIONS), "-extensions", "ext", "-out", crt)
+        write(crt, pem(certificate(token, label, f"Cherry Release Signing {stamp}", public_key, pem_to_der(ca),
+                                   args.days, release_extensions())))
+        # Before the key goes anywhere: the key of db.crt signed the certificate.
+        if subprocess.run(["openssl", "verify", "-CAfile", ca, crt], capture_output=True).returncode != 0:
+            fail(f"the token's {label} is not the key of {ca}: is it the token init used? --token picks one")
         with open(key, "rb") as f:
-            pem = f.read()
+            key_pem = f.read()
         if args.key_out == "-":
-            sys.stdout.buffer.write(pem)
+            sys.stdout.buffer.write(key_pem)
         else:
-            with open(os.open(args.key_out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
-                f.write(pem)
+            write(args.key_out, key_pem, 0o600, new=True)
         os.replace(crt, os.path.join(args.dir, "release.crt"))
     check(args.dir, require_release=True)
     where = "stdout" if args.key_out == "-" else args.key_out
     note(f"wrote release.crt to {args.dir} and its private key to {where}.\n"
-         "Store the key as the secret SECUREBOOT_KEY of the release environment, e.g.\n"
-         "  gh secret set SECUREBOOT_KEY --env release < <key file>\n"
-         "then delete the key file, and commit release.crt.")
+         "The key is the secret SECUREBOOT_KEY of the release environment (gh secret set SECUREBOOT_KEY --env "
+         "release); commit release.crt.")
 
 
 # --- check -----------------------------------------------------------------------------------------------------
@@ -383,9 +512,11 @@ def check(keys_dir, require_release=False):
                 fail(f"{var}.auth: {e}")
             if entries != [(EFI_CERT_X509, CHERRY_OWNER, pem_to_der(crt))]:
                 fail(f"{var}.auth does not set {var} to {var}.crt alone")
-        if subprocess.run(["openssl", "verify", "-CAfile", path["db.crt"], "-x509_strict", path["db.crt"]],
-                          capture_output=True).returncode != 0:
-            fail("db.crt: not a self-signed CA certificate")
+        for var in KEYS:
+            crt = path[f"{var}.crt"]
+            if subprocess.run(["openssl", "verify", "-check_ss_sig", "-x509_strict", "-CAfile", crt, crt],
+                              capture_output=True).returncode != 0:
+                fail(f"{var}.crt: not a CA certificate signed by its own key")
         if "release.crt" in path:
             if subprocess.run(["openssl", "verify", "-CAfile", path["db.crt"], "-purpose", "any", path["release.crt"]],
                               capture_output=True).returncode != 0:
