@@ -95,7 +95,7 @@ function startJob(name, verb, extra, work) {
     job.message = message;
   }, (e) => {
     job.state = "failed";
-    job.error = e instanceof env.EnvironmentError ? e.message : String(e);
+    job.error = e instanceof env.ToolError ? e.message : String(e);
   }).finally(() => {
     job.finished = new Date().toISOString();
   });
@@ -161,7 +161,7 @@ const server = http.createServer(async (req, res) => {
     answer(status, body);
   } catch (e) {
     if (e instanceof HttpError) return answer(e.status, { error: e.message });
-    if (e instanceof env.EnvironmentError) return answer(400, { error: e.message });
+    if (e instanceof env.ToolError) return answer(400, { error: e.message });
     console.error(e);
     answer(500, { error: String(e && e.message || e) });
   }

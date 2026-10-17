@@ -5,7 +5,8 @@
 // Everything goes through what that user may do (50-cherry.rules):
 // cherry-image@.service builds images, machinectl starts, stops, enters and
 // removes them, and machined's bus API lists them. Images stay on this
-// machine: nothing here writes one out.
+// machine: nothing here writes one out. Running commands and starting units
+// is mcp-stdio.js's, next to it.
 //
 // An environment is an image in /var/lib/machines built from a profile: a
 // recipe as `cherry-image build` reads it (image.conf, extra/, postinst,
@@ -18,10 +19,10 @@
 // $CHERRY_IMAGES_DIR, $CHERRY_IMAGE_LOGS and $CHERRY_PROFILE_DIRS (colon
 // separated) replace the paths above (tests/mcp.js, tests/extension.js).
 "use strict";
-const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { ToolError, check, run, sleep, tail, startUnit } = require("./mcp-stdio.js");
 
 const RECIPES = process.env.CHERRY_IMAGES_DIR || "/var/lib/cherry/images";
 const LOGS = process.env.CHERRY_IMAGE_LOGS || "/var/log/cherry-image";
@@ -35,12 +36,6 @@ const MACHINE_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 // A profile's directory name.
 const PROFILE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Za-z0-9]|[=>78cDEHM])/g;
-
-class EnvironmentError extends Error {}
-
-function check(condition, message) {
-  if (!condition) throw new EnvironmentError(message);
-}
 
 function imageName(name) {
   check(typeof name === "string" && NAME.test(name),
@@ -59,45 +54,6 @@ function profileId(id) {
   return id;
 }
 
-// run(command, args, options): {code, out, err}, never rejected for a failing
-// command. options.timeout in seconds kills it (code null); options.signal
-// (an AbortSignal) too; options.keepStdin leaves stdin open until it exits.
-function run(command, args, options = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let out = "";
-    let err = "";
-    const keep = (s, chunk) => (s + chunk).slice(-1 << 20);
-    child.stdout.on("data", (chunk) => { out = keep(out, chunk); });
-    child.stderr.on("data", (chunk) => { err = keep(err, chunk); });
-    if (!options.keepStdin) child.stdin.end();
-    child.stdin.on("error", () => {});
-    let killed = false;
-    const kill = () => { killed = true; child.kill("SIGTERM"); };
-    const timer = options.timeout ? setTimeout(kill, options.timeout * 1000) : null;
-    if (options.signal) options.signal.addEventListener("abort", kill, { once: true });
-    let done = false;
-    const finish = (code) => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      if (options.signal) options.signal.removeEventListener("abort", kill);
-      for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
-      resolve({ code, out, err });
-    };
-    child.on("error", (e) => { err += String(e); finish(null); });
-    // Once killed, what it started may still hold its output open: done anyway.
-    child.on("exit", () => { if (killed) finish(null); });
-    child.on("close", (code) => finish(code));
-  });
-}
-
-const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
-
-function tail(text, lines) {
-  return text.replace(/\n+$/, "").split("\n").slice(-lines).join("\n").trim();
-}
-
 // The build log of an image: its file, and its last lines, or null without one.
 function log(name, lines = 60) {
   imageName(name);
@@ -109,24 +65,11 @@ function log(name, lines = 60) {
   }
 }
 
-function describeLog(name, lines) {
-  const l = log(name, lines);
-  return l.text === null ? `no log in ${l.file}` : `${l.file}:\n${l.text}`;
-}
-
-// cherry-image@<instance>.service: started, waited for; its log's tail.
-async function cherryImage(name, signal) {
-  const unit = `cherry-image@build:${name}.service`;
-  const r = await run("systemctl", ["start", "--no-ask-password", unit], { signal });
-  if (r.code !== 0) throw new EnvironmentError(`${unit} failed. Log, ${describeLog(name, 60)}\n${r.err.trim()}`);
-  return describeLog(name, 15);
-}
-
 // The reply of a machined Manager method, as busctl --json=short gives it.
 async function machined(method, args = []) {
   const r = await run("busctl", ["--json=short", "call", "org.freedesktop.machine1", "/org/freedesktop/machine1",
     "org.freedesktop.machine1.Manager", method, ...args]);
-  if (r.code !== 0) throw new EnvironmentError(`machined ${method}: ${(r.err || r.out).trim()}`);
+  if (r.code !== 0) throw new ToolError(`machined ${method}: ${(r.err || r.out).trim()}`);
   return JSON.parse(r.out).data;
 }
 
@@ -145,7 +88,7 @@ async function hasImage(name) {
 
 async function machinectl(args, signal) {
   const r = await run("machinectl", ["--no-ask-password", ...args], { signal });
-  if (r.code !== 0) throw new EnvironmentError(`machinectl ${args.join(" ")}: ${(r.err || r.out).trim()}`);
+  if (r.code !== 0) throw new ToolError(`machinectl ${args.join(" ")}: ${(r.err || r.out).trim()}`);
   return r.out.trim();
 }
 
@@ -307,7 +250,7 @@ async function create(name, id, { replace = false, signal } = {}) {
   const p = profile(id);
   if (replace && (await hasImage(name))) await machinectl(["remove", name], signal);
   const dir = writeRecipe(name, p);
-  const built = await cherryImage(name, signal);
+  const built = await startUnit("cherry-image", `build:${name}`, LOGS, signal);
   return { name, profile: p.id, dir, log: built };
 }
 
@@ -323,7 +266,7 @@ async function start(name, { timeout = 120, signal } = {}) {
     await sleep(2);
   }
   const why = signal?.aborted ? "cancelled" : last ? last.error || last.output : "no answer";
-  throw new EnvironmentError(`${name} did not come up within ${timeout} s: ${why}`);
+  throw new ToolError(`${name} did not come up within ${timeout} s: ${why}`);
 }
 
 // Shut a container down, or kill it if it is still up after timeout.
@@ -340,7 +283,7 @@ async function stop(name, { timeout = 60, signal } = {}) {
   if (await wait(timeout)) return `${name} is stopped`;
   await machinectl(["terminate", name], signal);
   if (await wait(30)) return `${name} did not shut down in time and was terminated`;
-  throw new EnvironmentError(`${name} is still running`);
+  throw new ToolError(`${name} is still running`);
 }
 
 // Remove an image, which must not be running. Its recipe stays.
@@ -377,7 +320,7 @@ async function status(name, { signal } = {}) {
 }
 
 module.exports = {
-  EnvironmentError, NAME, MACHINE_NAME, PROFILE_ID, RECIPES, LOGS, PROFILE_DIRS,
+  ToolError, NAME, MACHINE_NAME, PROFILE_ID, RECIPES, LOGS, PROFILE_DIRS,
   imageName, machineName, profileId, profiles, profile, publicProfile,
   list, create, start, stop, status, log, remove,
 };

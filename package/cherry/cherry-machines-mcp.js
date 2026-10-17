@@ -3,17 +3,16 @@
 // through what that user may do (50-cherry.rules): environments.js has the
 // verbs, shared with the OpenChamber extension's service, and the rules.
 // /etc/opencode/opencode.json starts it with Bun, and names its tools
-// machines_<tool>.
+// machines_<tool>. The protocol is mcp-stdio.js's, next to it.
 //
 // Tools: list, create, start, stop, status, log, remove. create takes a name
 // and the id of a profile, one of the recipes written by a person, and
 // nothing else: no package list, file or script, and no command in a
 // container. Images stay on this machine: there is no tool to export one.
 "use strict";
-const readline = require("readline");
+const { serve } = require("./mcp-stdio.js");
 const env = require("./environments.js");
 
-const PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const INSTRUCTIONS = `These tools manage the container environments of this Cherry machine: images that machinectl \
 runs in /var/lib/machines, each built from one of the machine's profiles (a distribution with its setup, chosen \
 by a person). Create an environment from a profile, start it, read its status, stop it, remove it. Load the \
@@ -109,71 +108,4 @@ const TOOLS = [
   },
 ];
 
-function reply(id, result) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
-}
-
-function fail(id, code, message) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
-}
-
-const calls = new Map();
-
-async function callTool(id, params) {
-  const tool = TOOLS.find((t) => t.name === params?.name);
-  if (!tool) return fail(id, -32602, `unknown tool ${JSON.stringify(params?.name)}`);
-  const abort = new AbortController();
-  calls.set(id, abort);
-  try {
-    // The schema says additionalProperties: false; so does the server, for a
-    // client that does not check: an argument the tool does not take is an
-    // error, not an ignored wish (packages, files, a command).
-    const args = params.arguments ?? {};
-    const unknown = Object.keys(args).filter((key) => !(key in tool.inputSchema.properties));
-    if (unknown.length) throw new env.EnvironmentError(`${tool.name} takes no ${unknown.join(", ")}`);
-    const text = await tool.call(args, abort.signal);
-    reply(id, { content: [{ type: "text", text }], isError: false });
-  } catch (e) {
-    reply(id, { content: [{ type: "text", text: e instanceof env.EnvironmentError ? e.message : String(e.stack || e) }],
-      isError: true });
-  } finally {
-    calls.delete(id);
-  }
-}
-
-function handle(message) {
-  const { id, method, params } = message;
-  if (id === undefined) {
-    if (method === "notifications/cancelled") calls.get(params?.requestId)?.abort();
-    return;
-  }
-  switch (method) {
-    case "initialize":
-      return reply(id, {
-        protocolVersion: PROTOCOLS.includes(params?.protocolVersion) ? params.protocolVersion : PROTOCOLS[0],
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cherry-machines", version: "2" },
-        instructions: INSTRUCTIONS,
-      });
-    case "ping":
-      return reply(id, {});
-    case "tools/list":
-      return reply(id, { tools: TOOLS.map(({ name, description, inputSchema, annotations }) =>
-        ({ name, description, inputSchema, ...(annotations && { annotations }) })) });
-    case "tools/call":
-      return callTool(id, params);
-    default:
-      return fail(id, -32601, `unknown method ${method}`);
-  }
-}
-
-readline.createInterface({ input: process.stdin }).on("line", (line) => {
-  if (!line.trim()) return;
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    return fail(null, -32700, "parse error");
-  }
-  for (const m of Array.isArray(message) ? message : [message]) handle(m);
-});
+serve({ name: "cherry-machines", instructions: INSTRUCTIONS, tools: TOOLS });

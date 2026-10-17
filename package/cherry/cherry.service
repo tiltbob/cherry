@@ -28,9 +28,6 @@ Environment=OPENCHAMBER_OPENCODE_HOSTNAME=127.0.0.1
 Environment=OPENCODE_DISABLE_AUTOUPDATE=1
 # For its terminals: bash's line editing handles multibyte characters.
 Environment=LANG=C.UTF-8
-# The browser UI's password, if the machine was given one (SMBIOS strings,
-# see scripts/run_qemu.py --credential).
-ImportCredential=openchamber.ui_password
 ExecStart=/usr/libexec/openchamber-serve
 # Also after a clean exit: `openchamber stop` or `restart` from a shell end the
 # server through its API, and it should come back.

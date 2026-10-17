@@ -58,6 +58,16 @@
      TPM unlocks it and /var kept its files and the SSH host key; another TPM
      cannot unlock it, so that machine's /var is a tmpfs and the disk stays as
      it was, until wipefs, as the README says, makes it blank again
+  14. storage, through OpenCode's storage MCP server as the cherry user, with
+     /var on a disk of its own, which is in use: claim refuses a disk not as
+     listed, then wipes a blank hard disk, one with a partition table and an
+     NVMe SSD with one too, each now a LUKS2 volume the TPM unlocks, the only
+     physical volumes LVM sees; a pool of the hard disks cached on the SSD, a
+     volume in it, cached, mounted, the cherry user's, which cherry.service
+     sees writable; a hard disk out of the pool, its data moved, and the
+     volume grown; after a poweroff, which closes it all cleanly, the next
+     boot unlocks, activates and mounts it again; then the cache, the volume
+     and the pool go, and the disks are released blank
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -310,11 +320,12 @@ class VM:
         self.ssh_port = None
         self.n = 0
 
-    def start(self, tpm_interface="crb", secure_boot=False, server=None, tpm="tpm", disks=()):
+    def start(self, tpm_interface="crb", secure_boot=False, server=None, tpm="tpm", disks=(), ssds=()):
         """Boot with a TPM on tpm_interface, or None for no TPM, from server (default: the images'), with the given
-        disk images. The TPM's state is <workdir>/<tpm>: the VM's own TPM, one for the whole test, unless another one
-        is named. With secure_boot, on OVMF's Secure Boot build, whose variable store lasts from one start to the next
-        (in setup mode at first), and QEMU exits when the guest reboots."""
+        disk images (virtio-blk, hard disks to the guest) and SSD images (NVMe). The TPM's state is <workdir>/<tpm>:
+        the VM's own TPM, one for the whole test, unless another one is named. With secure_boot, on OVMF's Secure
+        Boot build, whose variable store lasts from one start to the next (in setup mode at first), and QEMU exits
+        when the guest reboots."""
         self.stop()
         url = run_qemu.boot_url(server or self.server)
         if secure_boot:
@@ -332,7 +343,7 @@ class VM:
         cmd = run_qemu.qemu_command(vars_path, serial="stdio", ssh_port=self.ssh_port,
                                     credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
                                     tpm=self.tpm, tpm_interface=tpm_interface, secure_boot=secure_boot,
-                                    disks=disks)
+                                    disks=disks, ssds=ssds)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.console = Console(self.proc, os.path.join(self.workdir, "serial.log"))
@@ -428,12 +439,12 @@ class Smoke:
         self.server = run_qemu.serve(self.images)
         self.vm = VM(self.workdir, self.server)
 
-    def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None, tpm="tpm", disks=(),
+    def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None, tpm="tpm", disks=(), ssds=(),
              expect="running"):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
         start = time.monotonic()
-        vm.start(tpm_interface, secure_boot=secure_boot, server=server, tpm=tpm, disks=disks)
+        vm.start(tpm_interface, secure_boot=secure_boot, server=server, tpm=tpm, disks=disks, ssds=ssds)
         if banner:
             vm.console.expect(re.escape(banner), 600, allow_boot=True)
         vm.wait_shell()
@@ -830,9 +841,9 @@ class Smoke:
         rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
         log(f"OpenChamber {version}: {rss_kb >> 10} MiB resident")
 
-    def mcp(self, tool, arguments, timeout=120):
-        """Call a tool of OpenCode's MCP server, /etc/opencode's machines, as OpenCode in cherry.service would:
-        the reply's text, which must not be an error."""
+    def mcp(self, tool, arguments, timeout=120, server="machines", error=False):
+        """Call a tool of one of OpenCode's MCP servers in /etc/opencode, machines or storage, as OpenCode in
+        cherry.service would: the reply's text, which must not be an error, or must be one with error."""
         messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
                      "params": {"protocolVersion": "2025-11-25", "capabilities": {},
                                 "clientInfo": {"name": "cherry-smoke", "version": "1"}}},
@@ -844,12 +855,15 @@ class Smoke:
         for i in range(0, len(requests), 600):
             self.vm.run(f"printf %s {requests[i:i + 600]} {'>' if i == 0 else '>>'}/tmp/mcp-requests.b64")
         out = self.vm.run(f"base64 -d /tmp/mcp-requests.b64 >/tmp/mcp-requests && {AS_CHERRY} {IN_CHERRY_SERVICE} "
-                          "/usr/bin/bun /usr/lib/cherry/machines-mcp.js </tmp/mcp-requests", timeout=timeout)
+                          f"/usr/bin/bun /usr/lib/cherry/{server}-mcp.js </tmp/mcp-requests", timeout=timeout)
         for line in out.splitlines():
             if line.startswith("{") and json.loads(line).get("id") == 2:
                 result = json.loads(line)["result"]
                 text = result["content"][0]["text"]
-                check(not result["isError"], f"the MCP tool {tool} failed:\n{text}")
+                if error:
+                    check(result["isError"], f"the MCP tool {tool} did not fail:\n{text}")
+                else:
+                    check(not result["isError"], f"the MCP tool {tool} failed:\n{text}")
                 return text
         raise TestFailure(f"no reply from the MCP tool {tool}:\n{out}")
 
@@ -1141,6 +1155,131 @@ class Smoke:
               "wipefs did not leave the disk blank")
         vm.stop()
         check(file_sha256(used) == used_sha256, "the disk with a partition table was written to")
+
+    def storage(self, tool, arguments, timeout=300, error=False):
+        """A tool of the storage MCP server; for those that change a pool, the pool as it is after, too."""
+        text = self.mcp(tool, arguments, timeout=timeout, server="storage", error=error)
+        at = text.rfind("\n\n{")
+        return text, (json.loads(text[at + 2:]) if at >= 0 and not error else None)
+
+    def s14_storage(self):
+        vm = self.vm
+        # A blank disk, which becomes /var; two hard disks, one blank and one with a partition table; an SSD with a
+        # partition table too, as cherry-var takes the first blank disk in the kernel's order, nvme0n1 before vda.
+        images = {name: os.path.join(self.workdir, f"storage-{name}.img") for name in ("var", "hdd0", "hdd1", "ssd0")}
+        for name, size in (("var", 4 << 30), ("hdd0", 8 << 30), ("hdd1", 8 << 30), ("ssd0", 2 << 30)):
+            run_qemu.make_disk(images[name], size)
+        for name in ("hdd1", "ssd0"):
+            with open(images[name], "r+b") as f:
+                f.write(DOS_MBR)
+        disks, ssds = [images["var"], images["hdd0"], images["hdd1"]], [images["ssd0"]]
+        self.boot(disks=disks, ssds=ssds)
+        config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
+        check("storage-mcp.js" in config, f"OpenCode's configuration has no storage MCP server:\n{config}")
+        vm.run("for s in storage configure-storage manage-storage; do test -s /etc/opencode/skills/$s.md || exit; done")
+
+        state = json.loads(self.storage("list", {})[0])
+        found = {d["name"]: d for d in state["disks"]}
+        log("disks: " + ", ".join(f"{d['name']} {d['kind']} {d['size']} {d['state']}" for d in state["disks"]))
+        check(found["vda"]["state"] == "in-use" and "cherry-var" in found["vda"]["reason"]
+              and state["var"]["source"] == "/dev/mapper/cherry-var", f"vda is not /var's disk, in use: {state}")
+        check((found["vdb"]["state"], found["vdb"]["kind"], found["vdb"]["blank"]) == ("free", "hdd", True),
+              f"vdb is not a free, blank hard disk: {found['vdb']}")
+        check((found["vdc"]["state"], found["vdc"]["blank"]) == ("free", False) and "dos" in found["vdc"]["signatures"],
+              f"vdc is not a free disk with a partition table: {found['vdc']}")
+        nvme = found["nvme0n1"]
+        check((nvme["state"], nvme["kind"], nvme["blank"]) == ("free", "ssd", False),
+              f"nvme0n1 is not a free SSD with a partition table: {nvme}")
+        check(state["pools"] == [], f"pools before any: {state['pools']}")
+
+        # A disk is claimed only as it was listed.
+        text = self.storage("claim", {"disks": [{"name": "vdb", "fingerprint": "000000000000"}]}, error=True)[0]
+        check("is not as it was listed" in text, f"claim with a wrong fingerprint:\n{text}")
+        rc, _ = vm.run("test -e /sys/class/block/vdb/vdb1", check_rc=False)
+        check(rc != 0, "a refused claim wrote to vdb")
+        text = self.storage("claim", {"disks": [{"name": n, "fingerprint": found[n]["fingerprint"]}
+                                                for n in ("vdb", "vdc", "nvme0n1")]}, timeout=600)[0]
+        for disk, part in (("vdb", "vdb1"), ("vdc", "vdc1"), ("nvme0n1", "nvme0n1p1")):
+            check(f"claimed /dev/{disk}: /dev/{part}, unlocked with the TPM" in text, f"{disk} not claimed:\n{text}")
+            vm.run(f"grep -qx PARTNAME=cherry-pv /sys/class/block/{part}/uevent")
+            luks = vm.run(f"cryptsetup luksDump /dev/{part}")
+            check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M)
+                  and len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1,
+                  f"/dev/{part} is not a LUKS2 volume with the TPM's key alone:\n{luks}")
+        # LVM sees Cherry's physical volumes only: not /var's volume, nor anything else.
+        pvs = vm.run("pvs --noheadings -o pv_name 2>/dev/null | sort").split()
+        check(pvs == ["/dev/mapper/cherry-pv-nvme0n1p1", "/dev/mapper/cherry-pv-vdb1", "/dev/mapper/cherry-pv-vdc1"],
+              f"LVM's physical volumes: {pvs}")
+
+        # A pool of the hard disks, cached on the SSD; a volume, cached, mounted, the cherry user's.
+        pool = self.storage("create_pool", {"name": "tank", "disks": ["vdb", "vdc"], "cache": ["nvme0n1"]})[1]
+        check(pool["disks"] == ["vdb", "vdc"] and pool["cache"]["disks"] == ["nvme0n1"]
+              and pool["cache"]["mode"] == "writethrough", f"the pool is not as made: {pool}")
+        pool = self.storage("create_volume", {"pool": "tank", "name": "data", "size": "3G"})[1]
+        mp = "/var/lib/cherry/volumes/tank/data"
+        volume = pool["volumes"][0]
+        check(volume["name"] == "data" and volume["mounted"] and volume["path"] == mp and volume["cache"]
+              and volume["cache"]["mode"] == "writethrough", f"the volume is not as made: {pool}")
+        log(f"pool tank: {pool['size']}, cache {pool['cache']['size']}; volume data: {volume['size']}, "
+            f"cache {volume['cache']['size']}")
+
+        def check_volume():
+            mount = vm.fstype(mp)
+            dev = vm.run("cat /sys/class/block/$(basename $(readlink -f /dev/tank/data))/dev")
+            options = set(mount.split()[5].split(","))
+            check(mount.split()[2] == dev and " - ext4 " in mount and {"nodev", "nosuid"} <= options,
+                  f"{mp} is not tank/data's ext4 ({dev}), nodev and nosuid: {mount}")
+            check(vm.run("lvs --noheadings -o segtype tank/data").strip() == "cache", "tank/data is not cached")
+            check(vm.run(f"stat -c %U {mp}") == "cherry", f"{mp} is not the cherry user's")
+
+        check_volume()
+        vm.run(f"{AS_CHERRY} {IN_CHERRY_SERVICE} sh -c 'echo cherry-storage >{mp}/hello'")
+        # cherry.service, which started before the volume was made, sees it, writable.
+        pid = vm.run("systemctl show -p MainPID --value cherry.service")
+        line = vm.run(f"awk -v mp={mp} '$5 == mp' /proc/{pid}/mountinfo")
+        check(line and line.split()[5].split(",")[0] == "rw", f"cherry.service does not see {mp} writable: {line!r}")
+
+        # A data disk out: its data moves to the other one, and the cache comes back.
+        pool = self.storage("remove_disk", {"pool": "tank", "disk": "vdb"}, timeout=900)[1]
+        check(pool["disks"] == ["vdc"] and pool["volumes"][0]["cache"], f"vdb did not leave the pool: {pool}")
+        check(vm.run(f"cat {mp}/hello") == "cherry-storage", "the volume's data did not survive the move")
+        pool = self.storage("resize_volume", {"pool": "tank", "name": "data", "size": "5G"})[1]
+        size = int(vm.run(f"df -B 1 --output=size {mp} | tail -n 1"))
+        check(size > 4.5 * (1 << 30) and pool["volumes"][0]["cache"],
+              f"the volume did not grow, or lost its cache: {size}, {pool}")
+        rc, out = vm.run(f"{AS_CHERRY} systemctl stop cherry-storage.service", check_rc=False)
+        check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
+              f"the cherry user may stop cherry-storage.service: {out}")
+
+        # Powered off, which unmounts and closes it all, and booted again: unlocked, activated, checked, mounted.
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+        self.boot(disks=disks, ssds=ssds)
+        check(vm.run("systemctl is-active cherry-storage.service") == "active", "cherry-storage.service is not active")
+        shown = vm.run("journalctl -b -u cherry-storage --no-pager -o cat")
+        check("recovering journal" not in shown and not re.search(r"cannot|not active|missing disks|errors", shown),
+              f"the volume was not left clean, or not set up:\n{shown}")
+        check_volume()
+        check(vm.run(f"cat {mp}/hello") == "cherry-storage", "the volume's data did not survive the reboot")
+
+        # Taken apart: the cache, the volume, the pool; then the disks, given back blank.
+        pool = self.storage("set_cache", {"pool": "tank", "disks": []})[1]
+        check(pool["cache"] is None and pool["volumes"][0]["cache"] is None, f"the cache is still there: {pool}")
+        self.storage("remove_volume", {"pool": "tank", "name": "data"})
+        rc, _ = vm.run(f"test -e {mp}", check_rc=False)
+        check(rc != 0, f"{mp} is still there")
+        self.storage("destroy_pool", {"name": "tank"})
+        state = json.loads(self.storage("list", {})[0])
+        found = {d["name"]: d for d in state["disks"]}
+        check(state["pools"] == [] and all((found[n]["state"], found[n]["pool"]) == ("claimed", None)
+                                           for n in ("vdb", "vdc", "nvme0n1")), f"not claimed, in no pool: {state}")
+        self.storage("release", {"disks": [{"name": n, "fingerprint": found[n]["fingerprint"]}
+                                           for n in ("vdb", "vdc", "nvme0n1")]}, timeout=600)
+        found = {d["name"]: d for d in json.loads(self.storage("list", {})[0])["disks"]}
+        check(all((found[n]["state"], found[n]["blank"]) == ("free", True) for n in ("vdb", "vdc", "nvme0n1")),
+              f"the disks were not given back blank: {found}")
+        check("cherry-pv" not in vm.run("ls /dev/mapper"), "a cherry-pv volume is still open")
+        vm.stop()
 
     def run(self):
         names = scenario_names(type(self))

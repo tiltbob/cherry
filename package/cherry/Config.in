@@ -4,19 +4,27 @@ config BR2_PACKAGE_CHERRY
 	depends on BR2_PACKAGE_SYSTEMD_MACHINED # the user's containers
 	depends on BR2_PACKAGE_SYSTEMD_NSPAWN # cherry-image
 	depends on BR2_PACKAGE_SYSTEMD_POLKIT # its machinectl privileges
+	depends on BR2_PACKAGE_SYSTEMD_REPART # cherry-storage: claims disks
+	depends on BR2_PACKAGE_CRYPTSETUP # cherry-storage: the disks' LUKS2 volumes
 	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # coreutils, tar
-	depends on BR2_USE_MMU # coreutils, tar
+	depends on BR2_USE_MMU # coreutils, tar, lvm2
 	depends on BR2_USE_WCHAR # coreutils, tar
+	depends on BR2_TOOLCHAIN_HAS_THREADS # lvm2
+	depends on !BR2_STATIC_LIBS # lvm2's standard install
 	select BR2_PACKAGE_COREUTILS # cherry-image: mv -T
 	select BR2_PACKAGE_TAR # cherry-image: the recipe
+	select BR2_PACKAGE_LVM2 # cherry-storage: the pools
+	select BR2_PACKAGE_LVM2_STANDARD_INSTALL # lvm, not only dmsetup
+	select BR2_PACKAGE_E2FSPROGS # cherry-storage: the volumes
+	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS # growing a volume
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_WIPEFS # claiming a disk
 	select BR2_PACKAGE_UBUNTU_KEYRING if BR2_PACKAGE_DEBOOTSTRAP # the ubuntu-noble profile
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
 	  as that user, on 127.0.0.1:3000 only, with the OpenCode it
-	  runs on loopback too. Given the systemd credential
-	  openchamber.ui_password, the browser UI asks for that
-	  password.
+	  runs on loopback too, with no password on the browser UI.
 	  cherry-connect-url.service shows the link that pairs another
 	  OpenChamber app with it on the console, once it is online.
 
@@ -32,7 +40,17 @@ config BR2_PACKAGE_CHERRY
 	  /usr/lib/cherry/profiles (recipes written by a person, one
 	  per distribution) and /var/lib/cherry/profiles. OpenChamber
 	  gets a built-in extension for them, Environments: a panel,
-	  the /env command and a service with the verbs; the OpenCode
-	  agent gets the same verbs as the tools of an MCP server,
-	  cherry-machines-mcp, with a skill, in /etc/opencode, and
-	  nothing else: its other tools are denied there.
+	  the /env command and a service with the verbs.
+
+	  It manages storage too: cherry-storage@.service, which runs as
+	  root, claims disks for it, which erases them and makes each a
+	  LUKS2 volume the TPM unlocks, and makes LVM pools of them,
+	  hard disks or SSDs, with SSDs as a pool's cache (dm-cache),
+	  and volumes in the pools, mounted for it under
+	  /var/lib/cherry/volumes. cherry-storage.service unlocks,
+	  activates and mounts them at boot.
+
+	  OpenCode gets tools for all of it, and nothing else: MCP
+	  servers, cherry-machines-mcp (the environment verbs) and
+	  cherry-storage-mcp, and skills, in /etc/opencode, whose
+	  permissions deny its other tools.
