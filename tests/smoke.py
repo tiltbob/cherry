@@ -57,11 +57,12 @@
      unsigned, but boots it with Secure Boot on once signed by a CA the test
      adds to db (skipped when the image has no keys)
   13. with disks, the machine makes its blank one its /var: a LUKS2 volume
-     whose key the TPM seals, holding ext4, and leaves the disk with a
+     whose key the TPM seals, holding btrfs, and leaves the disk with a
      partition table alone; after a poweroff, which unmounts it cleanly, the
-     TPM unlocks it and /var kept its files, and the SSH host key is the TPM's
-     on either boot; another TPM cannot unlock it, so that machine's /var is a
-     tmpfs, its host key is another, and the disk stays as it was, until
+     TPM unlocks it, /var kept its files, the SSH host key is the TPM's on
+     either boot, and machinectl clone on it makes a snapshot of an image, as
+     environments are; another TPM cannot unlock it, so that machine's /var is
+     a tmpfs, its host key is another, and the disk stays as it was, until
      wipefs, as the README says, makes it blank again
   14. storage, through OpenCode's storage MCP server as the cherry user, with
      /var on a disk of its own, which is in use: claim refuses a disk not as
@@ -564,10 +565,10 @@ class Smoke:
             return f.read().split()[1:3]
 
     def check_var_on_disk(self, partition):
-        """/var is the ext4 of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
+        """/var is the btrfs of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
         vm = self.vm
         var = vm.fstype("/var")
-        check(" - ext4 " in var, f"/var is not an ext4: {var}")
+        check(" - btrfs " in var, f"/var is not a btrfs: {var}")
         check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
         dm = vm.run("grep -lx cherry-var /sys/class/block/dm-*/dm/name | cut -d / -f 5")
         check(var.split()[2] == vm.run(f"cat /sys/class/block/{dm}/dev"), f"/var is not on {dm}, cherry-var: {var}")
@@ -1220,12 +1221,28 @@ class Smoke:
         # The TPM unlocks it at the next boot, its filesystem was left clean, and /var kept its files.
         self.boot(disks=disks)
         shown = vm.run(journal)
-        check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown,
+        check("/var is on /dev/vdb1 (btrfs), unlocked with the TPM" in shown and "making" not in shown,
               f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
-        check("recovering journal" not in shown, f"/var was not unmounted cleanly at the poweroff:\n{shown}")
+        # Left clean, it has no tree log for the mount to replay.
+        check("tree-log replay" not in vm.run("dmesg | grep BTRFS || true"),
+              "/var was not unmounted cleanly at the poweroff: the mount replayed a tree log")
         self.check_var_on_disk("vdb1")
         check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
         check(self.check_host_key() == self.host_key, "the SSH host key changed")
+
+        # On btrfs, machinectl clone is a snapshot: an environment shares its image's blocks until it changes them. The
+        # trees cherry-bootstrap and cherry-image make there are subvolumes for it (tests/bootstrap.sh); this one is by
+        # hand.
+        vm.run("btrfs subvolume create /var/lib/machines/cow-image >/dev/null && "
+               "echo shared >/var/lib/machines/cow-image/file && machinectl clone cow-image cow-env")
+        image_uuid = vm.run("btrfs subvolume show /var/lib/machines/cow-image | awk '$1 == \"UUID:\" { print $2 }'")
+        clone = vm.run("btrfs subvolume show /var/lib/machines/cow-env")
+        check(re.search(rf"^\s*Parent UUID:\s+{image_uuid}\s*$", clone, re.M),
+              f"cow-env is not a snapshot of cow-image ({image_uuid}):\n{clone}")
+        check(vm.run("cat /var/lib/machines/cow-env/file") == "shared", "the snapshot lacks the image's file")
+        types = vm.run("machinectl list-images --no-legend | awk '$1 ~ /^cow-/ { print $1, $2 }' | sort")
+        check(types == "cow-env subvolume\ncow-image subvolume", f"not two subvolumes: {types}")
+        vm.run("machinectl remove cow-env cow-image && test ! -e /var/lib/machines/cow-env")
 
         # Another machine's TPM cannot: its /var is a tmpfs, and the disk is left as it was.
         self.boot(tpm="tpm-other", disks=[blank], expect="degraded")

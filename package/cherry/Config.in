@@ -13,6 +13,7 @@ config BR2_PACKAGE_CHERRY
 	depends on !BR2_STATIC_LIBS # lvm2's standard install
 	select BR2_PACKAGE_COREUTILS # cherry-image: mv -T
 	select BR2_PACKAGE_TAR # cherry-image: the recipe
+	select BR2_PACKAGE_BTRFS_PROGS # cherry-bootstrap: a tree on btrfs is a subvolume
 	select BR2_PACKAGE_LVM2 # cherry-storage: the pools
 	select BR2_PACKAGE_LVM2_STANDARD_INSTALL # lvm, not only dmsetup
 	select BR2_PACKAGE_E2FSPROGS # cherry-storage: the volumes
@@ -40,7 +41,8 @@ config BR2_PACKAGE_CHERRY
 	  profile in /usr/lib/cherry/profiles (recipes written by a
 	  person, one per distribution) or /var/lib/cherry/profiles,
 	  and never started; an environment is a clone of an image
-	  (machinectl clone), started, stopped and removed on its own.
+	  (machinectl clone: on the disk's btrfs, a snapshot of it),
+	  started, stopped and removed on its own.
 	  OpenChamber gets a built-in extension for them, Environments:
 	  a panel, the /env command and a service with the verbs.
 

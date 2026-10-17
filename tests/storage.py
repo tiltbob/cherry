@@ -383,7 +383,7 @@ class Machine:
             os.makedirs(f"{self.tmp}/{d}")
         open(f"{self.tmp}/identity/ek-hash", "w").write("0" * 64 + "\n")
         open(f"{self.tmp}/mountinfo", "w").write(
-            "36 25 0:32 / /var rw,nodev,relatime shared:5 - ext4 /dev/mapper/cherry-var rw\n")
+            "36 25 0:32 / /var rw,nodev,relatime shared:5 - btrfs /dev/mapper/cherry-var rw\n")
         open(f"{self.tmp}/swaps", "w").write("Filename\tType\tSize\tUsed\tPriority\n/dev/zram0\tpartition\t1\t0\t100\n")
         save({"calls": [], "pvs": {}, "vgs": {}, "lvs": {}, "signatures": {}, "locked": [], "fail": [], "busy": [],
               "e2fsck": {}, "stale": [], "minor": 0})
@@ -582,7 +582,7 @@ def tests():
               and sdb["size"] == 100 * GIB and sdb["signatures"] == ["gpt"]
               and sdb["partitions"] == [{"name": "sdb1", "size": 2 * GIB, "label": "", "fstype": "ext4"}], sdb)
         check(all(len(d["fingerprint"]) == 12 for d in facts["disks"]), "fingerprints")
-        check(facts["var"] == {"fstype": "ext4", "source": "/dev/mapper/cherry-var"} and facts["tpm"] is True, facts)
+        check(facts["var"] == {"fstype": "btrfs", "source": "/dev/mapper/cherry-var"} and facts["tpm"] is True, facts)
         check(facts["pvs"] == {"report": [{"pv": []}]} and facts["mounts"] == [], facts)
         check(m.calls() == [], f"list changed something: {m.calls()}")
 

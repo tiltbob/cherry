@@ -44,7 +44,7 @@ const disk = (name, state, extra = {}) => ({ name, size: 100 * GIB, rotational: 
   signatures: [], partitions: [], ...extra });
 const FACTS = {
   tpm: true,
-  var: { fstype: "ext4", source: "/dev/mapper/cherry-var" },
+  var: { fstype: "btrfs", source: "/dev/mapper/cherry-var" },
   disks: [
     disk("nvme0n1", "claimed", { size: 10 * GIB, rotational: false, pv: "/dev/mapper/cherry-pv-nvme0n1p1" }),
     disk("sda", "claimed", { pv: "/dev/mapper/cherry-pv-sda1" }),

@@ -39,10 +39,15 @@ CONFIG_E1000E=y
 CONFIG_IGB=y
 CONFIG_R8169=y
 
-# Filesystems for containers and their images, and for disks later.
+# Filesystems for containers and their images, and for disks: btrfs for /var
+# (cherry-var.service), where an environment is a snapshot of its image
+# (machinectl clone) and takes space only for what it changes; ext4 for the
+# storage volumes (cherry-storage), and for a /var that an older image made.
 CONFIG_BLK_DEV_LOOP=y
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_ZSTD=y
+CONFIG_BTRFS_FS=y
+CONFIG_BTRFS_FS_POSIX_ACL=y
 CONFIG_EXT4_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y

@@ -352,17 +352,20 @@ key. Without a usable TPM, neither the agent nor sshd starts.
 
 A machine keeps `/var` on an encrypted disk of its own, and with it the
 containers and the `cherry` user's state. That disk is a GPT partition
-labelled `cherry-var`: a LUKS2 volume holding ext4, whose key the machine's
+labelled `cherry-var`: a LUKS2 volume holding btrfs, whose key the machine's
 TPM seals. The machine unlocks it at boot without a passphrase; elsewhere, it
-is unreadable.
+is unreadable. On btrfs, an environment is a snapshot of its image
+(`machinectl clone`), which takes space only for what it changes (see
+[Environments](#environments)).
 
 `cherry-var.service` ([`/usr/lib/cherry/var`](board/x86_64/rootfs-overlay/usr/lib/cherry/var))
 sets it up before systemd mounts `/var`, and only on a machine with a usable
 TPM:
 
 - **Unlock:** given a partition labelled `cherry-var`, it unlocks it with the
-  TPM (`systemd-cryptsetup`) as `/dev/mapper/cherry-var`, checks its
-  filesystem (`e2fsck -p`) and mounts it on `/var`.
+  TPM (`systemd-cryptsetup`) as `/dev/mapper/cherry-var` and mounts it on
+  `/var`: btrfs, or the ext4 of a disk an older image made, which it checks
+  first (`e2fsck -p`) and uses as it is.
 - **First boot:** without one, it claims the first blank disk, in the order
   of the kernel's names (`nvme0n1`, `sda`, `vda`, ...). `systemd-repart`
   writes a GPT and makes all of the disk the `cherry-var` partition, with a
@@ -378,17 +381,22 @@ TPM:
 Nothing erases a disk:
 
 - If the `cherry-var` partition can't be unlocked (another machine's disk,
-  or a cleared TPM) or its filesystem can't be repaired,
-  `cherry-var.service` fails and `/var` is a tmpfs for that boot. The disk
-  stays as it was.
+  or a cleared TPM), holds something else, or its filesystem can't be
+  mounted (or, ext4, repaired), `cherry-var.service` fails and `/var` is a
+  tmpfs for that boot. The disk stays as it was.
 - With more than one `cherry-var` partition, it uses none, and fails.
 - A machine with a `cherry-var` partition never claims a blank disk, even
   if it can't unlock that partition.
 
-To repair a filesystem that `e2fsck -p` left with errors, unlock it by hand
+To look at a volume that won't mount, unlock it by hand
 (`systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto`), run
-`e2fsck /dev/mapper/cherry-var`, then
-`systemd-cryptsetup detach cherry-var`, and reboot.
+`btrfs check /dev/mapper/cherry-var` (which only reports; `btrfs restore`
+copies files out, and `btrfs check --repair` is the last resort), or on
+ext4 `e2fsck /dev/mapper/cherry-var`, then
+`systemd-cryptsetup detach cherry-var`, and reboot. An older disk's ext4
+keeps working as it is, without snapshots; `btrfs-convert` is on the image,
+but needs the volume unmounted, which `/var` never is on a running machine,
+so moving to btrfs is starting over, with a copy of what matters.
 
 To start over with an empty `/var`, erase the `cherry-var` partition, then
 its disk (`wipefs --all --force /dev/vda1 /dev/vda`), and reboot: the disk is
@@ -897,9 +905,11 @@ manage:
   notes the profile's id in its `profile.conf`, and runs
   `cherry-image@build:<name>`; that recipe is what marks the machine as an
   image. An image is never started: it is what environments are made from.
-- An **environment** is a clone of an image (`machinectl clone`: a copy, with
-  the image's `.nspawn` settings), started, stopped and removed on its own,
-  with changes of its own; several can come from one image.
+- An **environment** is a clone of an image (`machinectl clone`, with the
+  image's `.nspawn` settings: on the disk's btrfs, a snapshot of the image's
+  subvolume, which takes space only for what it changes; on a tmpfs `/var`,
+  a copy), started, stopped and removed on its own, with changes of its
+  own; several can come from one image.
   `/var/lib/cherry/environments/<name>/environment.conf` records its image,
   and is what marks the machine as an environment. An image with environments
   is neither removed nor rebuilt until they are gone.

@@ -88,6 +88,18 @@ done
 exec unshare -r -m -u "$BUSYBOX" sh -c 'hostname "$2" && mount --rbind /dev "$0/dev" && exec chroot "$0" "$1"' \
 	"$dir" "$command" "$hostname"
 EOF
+# stat -f, the filesystem of the staging directory, answers FAKE_FSTYPE (tmpfs
+# unless set); btrfs makes the subvolume cherry-bootstrap asks for.
+cat >"$tmp/bin/stat" <<'EOF'
+#!/bin/sh
+[ "$1" = -f ] || exec /usr/bin/stat "$@"
+echo "${FAKE_FSTYPE:-tmpfs}"
+EOF
+cat >"$tmp/bin/btrfs" <<'EOF'
+#!/bin/sh
+echo "btrfs $*" >>"$CALLS"
+[ "$1 $2" != "subvolume create" ] || mkdir "$3"
+EOF
 chmod +x "$tmp/bin"/*
 
 mktree "$tmp/probe" apt-get
@@ -240,5 +252,16 @@ run build:arch
 grep -qxF "pacstrap -K -c $machines/.cherry-image/arch base" "$CALLS" || die "pacstrap was not called right: $(cat "$CALLS")"
 [ "$(cat "$machines/arch/var/log/pm")" = "pacman -Syu --noconfirm --needed nginx" ] ||
 	die "pacman was called: $(cat "$machines/arch/var/log/pm")"
+
+# On btrfs, the tree is staged as a subvolume (cherry-bootstrap's), and keeps being one under its name.
+recipe cow Distribution=debian Release=trixie
+export FAKE_FSTYPE=btrfs
+run build:cow
+unset FAKE_FSTYPE
+[ "$rc" -eq 0 ] || die "build:cow failed: $(cat "$log")"
+grep -qxF "btrfs subvolume create $machines/.cherry-image/cow" "$CALLS" ||
+	die "the tree was not staged as a subvolume: $(cat "$CALLS")"
+[ -d "$machines/cow" ] || die "build:cow made no image"
+[ -z "$(ls -A "$machines/.cherry-image")" ] || die "build:cow left its staging behind"
 
 echo "image: $n cases passed"
