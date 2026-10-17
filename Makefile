@@ -13,10 +13,21 @@ O ?= $(CURDIR)/output/$(DEFCONFIG:_defconfig=)
 export BR2_DL_DIR ?= $(CURDIR)/dl
 export BR2_CCACHE_DIR ?= $(CURDIR)/.ccache
 
+# The image's version, in os-release and the boot banner
+# (board/x86_64/post-build.sh), unless given: from the nearest release tag,
+# v<version>, as v0.0.1 on its commit or v0.0.1-3-g<commit> three commits
+# later, plus -dirty while tracked files have changes; g<commit> without such
+# a tag. Buildroot's own name for the tree comes from a plain `git describe`,
+# which sees only annotated tags, and GitHub creates release tags as
+# lightweight ones. The sdk-* tags are the SDK's releases, never the image's.
+BR2_EXTERNAL_CHERRY_VERSION ?= $(shell git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null | sed '/^v/!s/^/g/')
+
 # DEFCONFIG also names the file Buildroot's savedefconfig writes, so pass its
-# path: as a plain name it would land in buildroot/.
+# path: as a plain name it would land in buildroot/. The version on the command
+# line overrides the one Buildroot writes to .br2-external.mk.
 BR := $(MAKE) -C $(CURDIR)/buildroot O=$(abspath $(O)) BR2_EXTERNAL=$(CURDIR) \
-	DEFCONFIG=$(CURDIR)/configs/$(DEFCONFIG)
+	DEFCONFIG=$(CURDIR)/configs/$(DEFCONFIG) \
+	BR2_EXTERNAL_CHERRY_VERSION='$(BR2_EXTERNAL_CHERRY_VERSION)'
 
 .PHONY: all build menuconfig savedefconfig linux-menuconfig \
 	linux-update-defconfig qemu test sdk check $(CHECKS) clean help
@@ -67,7 +78,7 @@ test:
 # pkcs11-provider for the key ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall \
-	check-secureboot check-ceremony check-var
+	check-secureboot check-ceremony check-var check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -130,6 +141,10 @@ check-ceremony:
 # cherry-var.service claims only a blank disk, and unlocks the right partition.
 check-var:
 	tests/var.sh
+
+# The image is named after the nearest release tag, and a given name wins.
+check-version:
+	tests/version.sh
 
 clean:
 	rm -rf $(O)

@@ -4,6 +4,9 @@
 set -eu
 
 TARGET_DIR=$1
+# The top-level Makefile names the image (v0.0.1-3-g<commit>). Buildroot run
+# without it, e.g. `make -C output/cherry_x86_64`, names it itself, with a
+# leading dash (-g<commit>), which goes.
 version=${BR2_EXTERNAL_CHERRY_VERSION#-}
 version=${version:-unknown}
 

@@ -34,6 +34,7 @@ on:
       - 'tests/syntax.sh'
       - 'tests/units.sh'
       - 'tests/var.sh'
+      - 'tests/version.sh'
       - '.shellcheckrc'
   pull_request:
   merge_group:
@@ -84,7 +85,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -233,9 +234,10 @@ jobs:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
 
-      # A release by hand names the image after itself (os-release, the boot
-      # banner), as `git describe` would once the release job has created the
-      # tag on this commit.
+      # The Makefile names the image (os-release, the boot banner) after the
+      # nearest release tag with `git describe`: a published release's build
+      # checks out its tag, and gets its name. A release by hand has no tag
+      # until the release job creates it, so it passes its name instead.
       - name: Build
         env:
           RELEASE: ${{ inputs.release }}

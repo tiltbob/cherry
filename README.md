@@ -59,6 +59,13 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make check` | fast checks that need no build (below) |
 | `make clean` | remove `output/cherry_x86_64` |
 
+The image takes its version (`/usr/lib/os-release`, the boot banner) from
+`git describe` and the nearest release tag: `v0.0.1` for a build of the
+release's commit, `v0.0.1-3-g<commit>` for one three commits later, with
+`-dirty` while tracked files have uncommitted changes, and `g<commit>` in a
+clone without the tags. `make BR2_EXTERNAL_CHERRY_VERSION=<name>` names it
+otherwise.
+
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`. Buildroot never deletes a download:
 `python3 scripts/prune_dl.py` lists what in `dl/` no configuration needs any
@@ -102,7 +109,8 @@ argument checks and tool calls, `post-build.sh`'s check of `opencode`, the
 firewall's rules, in network namespaces standing in for a host, its LAN and
 its containers, the Secure Boot keys in `board/x86_64/secureboot/` and what
 `cherry-secureboot` enrolls from them, the key ceremony on a SoftHSM token,
-and `cherry-var.service`'s choice of disk. `make -k check` runs on after a
+`cherry-var.service`'s choice of disk, and the image's version from the
+release tags. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
 python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
 the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
