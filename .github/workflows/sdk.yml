@@ -18,30 +18,48 @@ on:
         type: string
         default: ''
 
+# The sdk job reads the repository; only the release job below writes to it.
+permissions:
+  contents: read
+
+# As in build.yml: a newer run on the same ref replaces the running one,
+# except a release by hand, which runs in a group of its own, to the end.
 concurrency:
-  group: sdk-${{ github.ref }}
-  cancel-in-progress: true
+  group: sdk-${{ github.ref }}-${{ inputs.release }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 jobs:
   sdk:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    permissions:
-      contents: write # the release
     env:
       CCACHE_MAXSIZE: 2G
     steps:
+      # No token left in the git configuration for the build's scripts to
+      # read: nothing here needs one, the repository being public and
+      # Buildroot on gitlab.com.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A release by hand is named sdk-<version>, and new: the main defconfig
+      # pins a release's tarball by its SHA-256, which a rebuild would replace.
+      # An origin that can't be read fails here rather than pass as no tag.
       - name: Check the release name
         if: inputs.release != ''
         env:
           RELEASE: ${{ inputs.release }}
         run: |
           case $RELEASE in
+          *[!A-Za-z0-9._-]*) echo "::error::the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
           sdk-[0-9]*) ;;
-          *) echo "the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
+          *) echo "::error::the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
           esac
-
-      - uses: actions/checkout@v7
+          tags=$(git ls-remote --tags origin "refs/tags/$RELEASE")
+          if [ -n "$tags" ]; then
+            echo "::error::the tag $RELEASE exists already"
+            exit 1
+          fi
 
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
@@ -67,7 +85,7 @@ jobs:
       # workflow's prefix, dl-, matches no sdk-dl- key either).
       - name: Restore download cache
         id: dl
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
@@ -75,10 +93,10 @@ jobs:
 
       - name: Restore ccache
         id: ccache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             sdk-ccache-${{ steps.keys.outputs.toolchain }}-
             ccache-${{ steps.keys.outputs.toolchain }}-
@@ -97,22 +115,24 @@ jobs:
 
       - name: Save download cache
         if: always() && github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: sdk-dl-${{ steps.keys.outputs.toolchain }}
 
       - name: Save ccache
         if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Unpacked somewhere else and relocated, the SDK compiles and links C and
       # C++ for the target; the target being x86_64 glibc, the runner can run
       # the static binaries, and the sysroot's libc, through the sysroot's own
       # dynamic loader (the runner's would fail on it), reports its version.
+      # The versions go next to the tarball, into the artifact: the release
+      # notes list them.
       - name: Check the SDK
         run: |
           set -x
@@ -133,7 +153,7 @@ jobs:
             "$sdk/bin/x86_64-buildroot-linux-gnu-ld" --version | head -n 1
             "$sysroot/lib/ld-linux-x86-64.so.2" "$sysroot/lib/libc.so.6" | head -n 1
             echo "Linux headers $(awk '/LINUX_VERSION_CODE/ { v = $3 } END { printf "%d.%d.%d", v / 65536, v % 65536 / 256, v % 256 }' "$sysroot/usr/include/linux/version.h")"
-          } | tee /tmp/sdk/versions.txt
+          } | tee output/cherry_sdk_x86_64/images/versions.txt
 
       - name: Checksum
         run: |
@@ -141,41 +161,58 @@ jobs:
           sha256sum cherry-sdk-x86_64.tar.gz | tee cherry-sdk-x86_64.tar.gz.sha256
           ls -lh cherry-sdk-x86_64.tar.gz
 
-      - uses: actions/upload-artifact@v7
+      # What the release job publishes, and also after a failure, to look into.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: cherry-sdk-x86_64
           path: |
             output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz
             output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz.sha256
+            output/cherry_sdk_x86_64/images/versions.txt
           retention-days: 14
 
-      # The release named after the tag, or after the input of a run by hand:
-      # created here (with the tag, on this commit, if it is new), or the one
-      # that created the tag, which then gets the files.
+  # The release named after the pushed tag, or after the input of a run by
+  # hand, once the SDK built and passed its check: created here (with the tag,
+  # on this commit, for a run by hand), or the one that created the tag, which
+  # then gets the files. A run by hand on a tag without a name publishes
+  # nothing, as on a branch. Only this job may write to the repository, and it
+  # runs nothing of the build's: it publishes the sdk job's artifact, with no
+  # checkout.
+  release:
+    needs: sdk
+    if: success() && (github.event_name == 'push' || inputs.release != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cherry-sdk-x86_64
+          path: sdk
+
       - name: Publish the release
-        if: github.ref_type == 'tag' || inputs.release != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release }}
         run: |
-          cd output/cherry_sdk_x86_64/images
+          cd sdk
           {
             echo "Cherry's cross toolchain, built from \`configs/cherry_sdk_x86_64_defconfig\` at $GITHUB_SHA by \`make sdk\`:"
             echo
-            sed 's/^/- /' /tmp/sdk/versions.txt
+            sed 's/^/- /' versions.txt
             echo
             echo "Unpack \`cherry-sdk-x86_64.tar.gz\` anywhere and run its \`relocate-sdk.sh\`."
             echo
             echo '```'
             cat cherry-sdk-x86_64.tar.gz.sha256
             echo '```'
-          } > /tmp/sdk/notes.md
+          } > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload --clobber "$TAG" cherry-sdk-x86_64.tar.gz cherry-sdk-x86_64.tar.gz.sha256
-            gh release edit "$TAG" --notes-file /tmp/sdk/notes.md
+            gh release edit "$TAG" --notes-file notes.md
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "Cherry SDK $TAG" \
-              --notes-file /tmp/sdk/notes.md cherry-sdk-x86_64.tar.gz cherry-sdk-x86_64.tar.gz.sha256
+              --notes-file notes.md cherry-sdk-x86_64.tar.gz cherry-sdk-x86_64.tar.gz.sha256
           fi
