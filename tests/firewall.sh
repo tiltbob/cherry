@@ -32,7 +32,8 @@ fi
 
 tmp=$(mktemp -d)
 pids=
-trap 'kill $pids 2>/dev/null; rm -rf "$tmp"' EXIT
+# udhcpd writes its leases into $tmp as it exits: wait for it before rm.
+trap 'kill $pids 2>/dev/null; wait; rm -rf "$tmp"' EXIT
 # probe serve: TCP and UDP echo on port 7. probe tcp|udp <address> <port> [<source port>]: an echo comes back.
 cat >"$tmp/probe" <<'EOF'
 import socket, sys, threading
