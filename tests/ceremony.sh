@@ -1,7 +1,10 @@
 #!/bin/sh
 # scripts/secureboot.py makes Cherry's root of trust on a token and checks it:
 # run against a SoftHSM token standing in for the Nitrokey, all in a temporary
-# directory. init writes the six files and check verifies them; init refuses
+# directory. Without OpenSSL's provider, init stops before it touches the
+# token; stopped after a key, it removes its files and prints the commands that
+# delete what it generated, which then refuses to run over until they ran.
+# init writes the six files and check verifies them; init refuses
 # to run again, over the files or over the keys on the token; issue writes
 # release.crt and its key, to a new file or stdout; check catches a tampered
 # file, a swapped one and a release certificate the CA didn't issue. Skipped
@@ -54,9 +57,49 @@ refused() {
 	esac
 }
 
+# privkeys: the labels of the token's private keys, on one line.
+privkeys() {
+	pkcs11-tool --module "$module" --token-label "Cherry Secure Boot" --login --pin "$CHERRY_HSM_PIN" \
+		--list-objects --type privkey 2>/dev/null | sed -n 's/^ *label: *//p' | tr '\n' ' '
+}
+# run_deletes: run the pkcs11-tool commands init printed, with the PIN.
+run_deletes() {
+	printf '%s\n' "$out" | grep '^  pkcs11-tool ' >"$tmp/deletes" || die "no delete commands in: $out"
+	while read -r cmd; do
+		eval "$cmd --pin \"\$CHERRY_HSM_PIN\"" >/dev/null 2>&1 || die "failed: $cmd"
+	done <"$tmp/deletes"
+}
+
 sb check
 ok
 case $out in *"no keys"*) ;; *) die "an empty directory: $out" ;; esac
+
+mkdir "$tmp/no-modules"
+OPENSSL_MODULES=$tmp/no-modules token init
+refused "OpenSSL cannot load its PKCS#11 provider: install pkcs11-provider"
+[ -z "$(privkeys)" ] || die "init without the provider generated keys: $(privkeys)"
+[ ! -e "$keys" ] || die "init without the provider wrote files: $(ls -A "$keys")"
+
+# An openssl that makes no certificate: init stops after the PK's key.
+mkdir "$tmp/bin"
+cat >"$tmp/bin/openssl" <<EOF
+#!/bin/sh
+[ "\$1" != req ] || { echo "req: failing as told" >&2; exit 1; }
+exec $(command -v openssl) "\$@"
+EOF
+chmod +x "$tmp/bin/openssl"
+PATH=$tmp/bin:$PATH token init
+refused "init stopped, and removed the files it wrote"
+[ "$(privkeys)" = "cherry-pk " ] || die "init stopped with keys: $(privkeys)"
+[ -z "$(ls -A "$keys")" ] || die "a stopped init left files: $(ls -A "$keys")"
+case $out in
+*"--delete-object --type privkey --label cherry-pk"*) ;;
+*) die "no command deletes cherry-pk: $out" ;;
+esac
+token init
+refused "the token holds cherry-pk already"
+run_deletes
+[ -z "$(privkeys)" ] || die "the printed commands left keys: $(privkeys)"
 
 token init
 ok

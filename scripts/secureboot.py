@@ -32,6 +32,8 @@ import argparse
 import datetime
 import getpass
 import os
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -88,7 +90,8 @@ OPENSC_MODULES = [
 
 
 def fail(message):
-    sys.exit(f"secureboot: {message}")
+    print(f"secureboot: {message}", file=sys.stderr)
+    sys.exit(1)
 
 
 def note(message):
@@ -197,15 +200,25 @@ class Token:
             (m for m in OPENSC_MODULES if os.path.exists(m)), None)
         if not self.module:
             fail("OpenSC's PKCS#11 module not found: install opensc, or pass --module")
+        if not shutil.which("pkcs11-tool"):
+            fail("pkcs11-tool not found: install opensc")
         self.label = args.token
+        self.env = dict(os.environ, PKCS11_PROVIDER_MODULE=self.module)
+        self.provider = ["-provider", "pkcs11", "-provider", "default"]
+        # Before the PIN, and before anything changes on the token: OpenSSL makes every certificate and signature
+        # through the provider, so without it a key init generates would get none.
+        p = subprocess.run(["openssl", "list", "-providers", *self.provider], capture_output=True, env=self.env)
+        if p.returncode != 0:
+            fail("OpenSSL cannot load its PKCS#11 provider: install pkcs11-provider (apt, dnf or pacman), or set "
+                 "OPENSSL_MODULES to the directory of its pkcs11.so:\n"
+                 + "\n".join(p.stderr.decode(errors="replace").strip().splitlines()[-3:]))
         pin = os.environ.get("CHERRY_HSM_PIN") or getpass.getpass("User PIN of the token: ")
         # OpenSSL reads the PIN from a file of a private directory, pkcs11-tool from the environment: neither
         # shows it in the process list.
         self.pin_file = os.path.join(tmp, "pin")
         with open(os.open(self.pin_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
             f.write(pin)
-        self.env = dict(os.environ, CHERRY_HSM_PIN=pin, PKCS11_PROVIDER_MODULE=self.module)
-        self.provider = ["-provider", "pkcs11", "-provider", "default"]
+        self.env["CHERRY_HSM_PIN"] = pin
 
     def tool(self, *args):
         cmd = ["pkcs11-tool", "--module", self.module]
@@ -213,9 +226,16 @@ class Token:
             cmd += ["--token-label", self.label]
         return run(cmd + ["--login", "--pin", "env:CHERRY_HSM_PIN", *args], env=self.env).decode()
 
-    def private_keys(self):
-        out = self.tool("--list-objects", "--type", "privkey")
+    def labels(self, kind):
+        """The labels of the token's objects of a kind: privkey, pubkey or cert."""
+        out = self.tool("--list-objects", "--type", kind)
         return [line.split(":", 1)[1].strip() for line in out.splitlines() if line.strip().startswith("label:")]
+
+    def delete_commands(self, labels):
+        """The pkcs11-tool commands that delete the keys and certificates of these labels, for a person to run."""
+        base = ["pkcs11-tool", "--module", self.module] + (["--token-label", self.label] if self.label else [])
+        return "\n".join("  " + shlex.join(base + ["--login", "--delete-object", "--type", kind, "--label", label])
+                         for kind in ("privkey", "pubkey", "cert") for label in labels if label in self.labels(kind))
 
     def generate(self, label):
         # The ID is the label: unique, and what pairs the key with the certificate stored next to it.
@@ -266,30 +286,45 @@ def cmd_init(args):
         fail(f"{', '.join(existing)} exist already: init makes a new root of trust only once")
     with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
         token = Token(args, tmp)
-        present = set(token.private_keys())
+        present = set(token.labels("privkey"))
         taken = [label for label, *_ in KEYS.values() if label in present]
         if taken:
-            fail(f"the token holds {', '.join(taken)} already: init generates them, it never reuses a key")
+            fail(f"the token holds {', '.join(taken)} already: init generates them, it never reuses a key. If an "
+                 "init that stopped left them, nothing uses them: delete them, then run init again:\n"
+                 + token.delete_commands(taken))
         os.makedirs(args.dir, exist_ok=True)
         ext = write_config(tmp, ROOT_EXTENSIONS)
-        crt = {}
-        for var, (label, subject, *_) in KEYS.items():
-            note(f"generating {label} on the token")
-            token.generate(label)
-            crt[var] = os.path.join(args.dir, f"{var}.crt")
-            token.openssl("req", "-new", "-x509", "-key", token.key_uri(label), "-subj", subject, "-sha256",
-                          "-days", str(args.days), "-config", ext, "-extensions", "ext", "-out", crt[var])
-            der_file = os.path.join(tmp, f"{var}.der")
-            with open(der_file, "wb") as f:
-                f.write(pem_to_der(crt[var]))
-            token.store_certificate(label, der_file)
-        when = datetime.datetime.now(datetime.timezone.utc)
-        for var, (*_, signer) in KEYS.items():
-            data = esl(EFI_CERT_X509, [pem_to_der(crt[var])])
-            update = signed_update(token, tmp, var, data, crt[signer], KEYS[signer][0], when)
-            with open(os.path.join(args.dir, f"{var}.auth"), "wb") as f:
-                f.write(update)
-    check(args.dir, require_release=False)
+        crt, made, written = {}, [], []
+        try:
+            for var, (label, subject, *_) in KEYS.items():
+                note(f"generating {label} on the token")
+                made.append(label)
+                token.generate(label)
+                crt[var] = os.path.join(args.dir, f"{var}.crt")
+                written.append(crt[var])
+                token.openssl("req", "-new", "-x509", "-key", token.key_uri(label), "-subj", subject, "-sha256",
+                              "-days", str(args.days), "-config", ext, "-extensions", "ext", "-out", crt[var])
+                der_file = os.path.join(tmp, f"{var}.der")
+                with open(der_file, "wb") as f:
+                    f.write(pem_to_der(crt[var]))
+                token.store_certificate(label, der_file)
+            when = datetime.datetime.now(datetime.timezone.utc)
+            for var, (*_, signer) in KEYS.items():
+                data = esl(EFI_CERT_X509, [pem_to_der(crt[var])])
+                update = signed_update(token, tmp, var, data, crt[signer], KEYS[signer][0], when)
+                written.append(os.path.join(args.dir, f"{var}.auth"))
+                with open(written[-1], "wb") as f:
+                    f.write(update)
+            check(args.dir, require_release=False)
+        except SystemExit:
+            # Nothing of a stopped init stays in use: its files go, and the person deletes what it generated on
+            # the token, which init never reuses.
+            for path in written:
+                if os.path.exists(path):
+                    os.remove(path)
+            note("init stopped, and removed the files it wrote. Delete what it generated on the token, then run "
+                 "init again:\n" + token.delete_commands(made))
+            raise
     note(f"wrote {', '.join(files)} to {args.dir}.\n"
          "Commit them, then make the release signing key: scripts/secureboot.py issue")
 

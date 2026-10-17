@@ -407,7 +407,8 @@ enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
 **The ceremony,** once, on a computer with the Nitrokey plugged in:
 
 ```sh
-apt install opensc pkcs11-provider    # pkcs11-tool, sc-hsm-tool, OpenSSL's PKCS#11 provider
+# pkcs11-tool, sc-hsm-tool, and OpenSSL's PKCS#11 provider (dnf and pacman too)
+apt install opensc pkcs11-provider
 # Initialize the Nitrokey, which erases it, with a key share to back up its
 # keys with. It ships with the SO PIN 3537363231383830 and the PIN 648219:
 # change both afterwards, as Nitrokey's documentation shows.
@@ -426,6 +427,9 @@ git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
   other tokens plugged in, pass `--token` with the Nitrokey's label as
   `pkcs11-tool -L` shows it; `--module` names another PKCS#11 module than
   OpenSC's.
+- `init` never reuses a key on the token. Should it stop partway, it removes
+  the files it wrote and prints the `pkcs11-tool` commands that delete what
+  it generated: run them, then `init` again.
 - **Back up** the three keys, wrapped by the key share: `sc-hsm-tool
   --wrap-key <file> --key-reference <n>` for each (`pkcs15-tool -D` lists
   their references). A second Nitrokey initialized with the same share takes
