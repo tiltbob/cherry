@@ -13,13 +13,16 @@
 # which creates containers for it as root, and cherry-image@.service, which
 # builds images for it as root; and the OpenCode agent's tools for
 # them, in the system configuration directory /etc/opencode: the MCP server
-# cherry-machines-mcp, run on Bun, and the machine-images skill.
+# cherry-machines-mcp, run on Bun, with mcp-stdio.js, and the machine-images
+# skill.
 CHERRY_DEPENDENCIES = openchamber
 CHERRY_USERS = cherry -1 cherry -1 * /var/lib/cherry - - Cherry
 
 define CHERRY_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/50-cherry.rules \
 		$(TARGET_DIR)/usr/share/polkit-1/rules.d/50-cherry.rules
+	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/mcp-stdio.js \
+		$(TARGET_DIR)/usr/lib/cherry/mcp-stdio.js
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-machines-mcp.js \
 		$(TARGET_DIR)/usr/lib/cherry/machines-mcp.js
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/opencode.json \
