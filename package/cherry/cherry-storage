@@ -62,6 +62,9 @@ definitions=/usr/lib/cherry/storage/repart.d
 min_sectors=2097152
 # The smallest cache worth making for a volume.
 min_cache_bytes=67108864
+# lvm runs with the lock's file descriptor open (one operation at a time): no
+# warning about it at every call.
+export LVM_SUPPRESS_FD_WARNINGS=1
 
 fail() {
 	echo "$1" >&2
