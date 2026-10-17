@@ -18,9 +18,11 @@ on:
         type: string
         default: ''
 
+# As in build.yml: a newer run on the same ref replaces the running one,
+# except a release by hand, which runs in a group of its own, to the end.
 concurrency:
-  group: sdk-${{ github.ref }}
-  cancel-in-progress: true
+  group: sdk-${{ github.ref }}-${{ inputs.release }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 jobs:
   sdk:
@@ -31,17 +33,24 @@ jobs:
     env:
       CCACHE_MAXSIZE: 2G
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A release by hand is named sdk-<version>, and new: the main defconfig
+      # pins a release's tarball by its SHA-256, which a rebuild would replace.
       - name: Check the release name
         if: inputs.release != ''
         env:
           RELEASE: ${{ inputs.release }}
         run: |
           case $RELEASE in
+          *[!A-Za-z0-9._-]*) echo "::error::the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
           sdk-[0-9]*) ;;
-          *) echo "the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
+          *) echo "::error::the release must be named sdk-<version>, not '$RELEASE'"; exit 1 ;;
           esac
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE" >/dev/null; then
+            echo "::error::the tag $RELEASE exists already"
+            exit 1
+          fi
 
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
@@ -78,7 +87,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             sdk-ccache-${{ steps.keys.outputs.toolchain }}-
             ccache-${{ steps.keys.outputs.toolchain }}-
@@ -107,7 +116,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}
+          key: sdk-ccache-${{ steps.keys.outputs.toolchain }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # Unpacked somewhere else and relocated, the SDK compiles and links C and
       # C++ for the target; the target being x86_64 glibc, the runner can run
@@ -150,15 +159,16 @@ jobs:
             output/cherry_sdk_x86_64/images/cherry-sdk-x86_64.tar.gz.sha256
           retention-days: 14
 
-      # The release named after the tag, or after the input of a run by hand:
-      # created here (with the tag, on this commit, if it is new), or the one
-      # that created the tag, which then gets the files.
+      # The release named after the pushed tag, or after the input of a run by
+      # hand: created here (with the tag, on this commit, for a run by hand),
+      # or the one that created the tag, which then gets the files. A run by
+      # hand on a tag without a name publishes nothing, as on a branch.
       - name: Publish the release
-        if: github.ref_type == 'tag' || inputs.release != ''
+        if: github.event_name == 'push' || inputs.release != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release }}
         run: |
           cd output/cherry_sdk_x86_64/images
           {
