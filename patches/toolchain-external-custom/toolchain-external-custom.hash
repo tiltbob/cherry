@@ -1,4 +1,4 @@
 # The SDK of the external toolchain (configs/cherry_x86_64_defconfig): the
 # release's SHA-256, from the .sha256 file beside its tarball.
-# sdk-2026.10.08.001
-sha256  062f34c09732da81cb6527b818334aed04cd5f6c5c88a9bd6b4a1f70c19efd5f  cherry-sdk-x86_64.tar.gz
+# sdk-2026.10.16.001
+sha256  6add7d524808a3490a661c14dd61a590ad85d6d0830e04be9b67e2c2e2825082  cherry-sdk-x86_64.tar.gz
