@@ -3,11 +3,13 @@
 # run by systemd-nspawn as the image's root, once it is bootstrapped.
 # /.cherry-image holds what cherry-image staged there: packages, the extra
 # packages on one line, and recipe/, the cherry user's recipe. In turn:
-#   1. install the packages with the image's package manager: apt-get, dnf or
+#   1. remove /etc/hostname, which debootstrap copies from the host, so that
+#      each container takes its machine's name, unless the recipe sets one
+#   2. install the packages with the image's package manager: apt-get, dnf or
 #      pacman
-#   2. copy recipe/extra/ onto the root
-#   3. run recipe/postinst
-#   4. leave the image generic: an empty /etc/machine-id, so that each
+#   3. copy recipe/extra/ onto the root
+#   4. run recipe/postinst
+#   5. leave the image generic: an empty /etc/machine-id, so that each
 #      container of it gets its own, and no package caches
 set -eu
 
@@ -34,6 +36,8 @@ copy_tree() {
 		fi
 	done
 }
+
+rm -f /etc/hostname
 
 set -f
 # shellcheck disable=SC2046 # the packages are words; set -f, no globbing

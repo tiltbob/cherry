@@ -656,10 +656,12 @@ systemctl start cherry-image@raw:web     # /var/lib/cherry/exports/web.raw
 - **build:** bootstraps the distribution with `cherry-bootstrap` under
   `/var/lib/machines/.cherry-image/`, then does the rest in the image, under
   `systemd-nspawn` with a user namespace, so that the recipe's script is root
-  only in there: installs the packages, copies `extra/` (into the image's own
-  directories, links such as `/bin -> usr/bin` included), runs `postinst`,
-  empties `/etc/machine-id`, so that each container of the image gets its own,
-  and clears the package caches. Then the image takes its name. A failed build
+  only in there: drops the host's `/etc/hostname`, which debootstrap copies,
+  so that each container takes its machine's name unless the recipe sets one;
+  installs the packages, copies `extra/` (into the image's own directories,
+  links such as `/bin -> usr/bin` included), runs `postinst`, empties
+  `/etc/machine-id`, so that each container of the image gets its own, and
+  clears the package caches. Then the image takes its name. A failed build
   leaves nothing behind, and a build never replaces an image: `machinectl
   remove` it first. Image names are letters, digits and `-`, up to 48.
 - **tar:** the image, which must not be running, as an xz-compressed tarball,

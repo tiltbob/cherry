@@ -57,8 +57,9 @@ The recipe lands in `/var/lib/cherry/images/<name>/` (`image.conf`,
 whole log is there to read when a build fails.
 
 Every image built has an empty `/etc/machine-id`, so each container gets its
-own, and no package caches: run `apt-get update` before `apt-get install` in
-a container.
+own; no `/etc/hostname` unless the recipe puts one there, so a container is
+named after its machine; and no package caches: run `apt-get update` before
+`apt-get install` in a container.
 
 ## Networking
 

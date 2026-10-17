@@ -243,7 +243,8 @@ const TOOLS = [
       "a distribution, install packages with its package manager, copy files in, run a setup script in it as " +
       "root, and give it nspawn settings. Takes minutes; returns the end of the build log, or fails with it. " +
       `The arguments become the recipe in ${RECIPES}/<name>/, replacing any recipe there. The new image has an ` +
-      "empty /etc/machine-id and no package caches. Start it with the start tool.",
+      "empty /etc/machine-id, no /etc/hostname unless the files set one (a container takes its machine's name), and " +
+      "no package caches. Start it with the start tool.",
     inputSchema: {
       type: "object",
       properties: {

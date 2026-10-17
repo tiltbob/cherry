@@ -35,7 +35,8 @@ export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" BUSYBOX="$busybox" REAL_TAR REAL
 machines=$CHERRY_MACHINES_DIR recipes=$CHERRY_IMAGES_DIR exports=$CHERRY_EXPORTS_DIR
 
 # mktree <dir> <package manager>: a merged-/usr root with busybox, a machine
-# ID, and a package manager that logs its arguments to /var/log/pm.
+# ID, the host's /etc/hostname (as debootstrap copies it), and a package
+# manager that logs its arguments to /var/log/pm.
 cat >"$tmp/bin/mktree" <<'EOF'
 #!/bin/sh
 set -eu
@@ -46,6 +47,7 @@ for applet in sh cat cp rm mkdir chmod ls echo printf test [ hostname; do
 	ln -s busybox "$1/usr/bin/$applet"
 done
 echo 0123456789abcdef0123456789abcdef >"$1/etc/machine-id"
+echo 'cherry-????????' >"$1/etc/hostname"
 printf '#!/bin/sh\necho "%s $*" >>/var/log/pm\n' "$2" >"$1/usr/bin/$2"
 chmod 0755 "$1/usr/bin/$2"
 EOF
@@ -222,6 +224,7 @@ apt-get clean"
 [ "$(readlink "$img/etc/secret")" = "$tmp/secret" ] || die "extra/etc/secret was followed out of the recipe"
 [ "$(cat "$img/var/postinst-ran")" = welcome ] || die "postinst did not run after extra/ was copied"
 grep -qxF "postinst on web" "$log" || die "postinst did not run with the image's hostname, or its output is not in the log"
+[ ! -e "$img/etc/hostname" ] || die "the host's /etc/hostname is still in the image: $(cat "$img/etc/hostname")"
 [ -e "$img/etc/machine-id" ] || die "/etc/machine-id was removed"
 [ ! -s "$img/etc/machine-id" ] || die "/etc/machine-id was not emptied"
 cmp -s "$r/image.nspawn" "$machines/web.nspawn" || die "the settings were not installed as web.nspawn"
@@ -247,12 +250,15 @@ failed build:broken "postinst fails"
 [ ! -e "$machines/broken" ] || die "a failed postinst left an image"
 
 recipe fedora Distribution=fedora Release=44 Packages=httpd
+mkdir -p "$r/extra/etc"
+echo www >"$r/extra/etc/hostname"
 run build:fedora
 [ "$rc" -eq 0 ] || die "build:fedora failed: $(cat "$log")"
 grep -qxF "rpmstrap fedora 44 $machines/.cherry-image/fedora" "$CALLS" || die "rpmstrap was not called right: $(cat "$CALLS")"
 expected="dnf -y --setopt=install_weak_deps=False install httpd
 dnf clean all"
 [ "$(cat "$machines/fedora/var/log/pm")" = "$expected" ] || die "dnf was called: $(cat "$machines/fedora/var/log/pm")"
+[ "$(cat "$machines/fedora/etc/hostname")" = www ] || die "the recipe's /etc/hostname was not kept"
 
 recipe arch Distribution=arch Packages=nginx
 run build:arch
