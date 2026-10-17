@@ -1,0 +1,8 @@
+config BR2_PACKAGE_UBUNTU_KEYRING
+	bool "ubuntu-keyring"
+	help
+	  The OpenPGP keys that sign the Ubuntu archive, installed as
+	  /usr/share/keyrings/ubuntu-archive-keyring.gpg for debootstrap
+	  (--keyring), which verifies Debian's archive by default.
+
+	  https://launchpad.net/ubuntu/+source/ubuntu-keyring

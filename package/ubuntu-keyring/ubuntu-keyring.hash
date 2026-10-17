@@ -1,0 +1,4 @@
+# Locally computed, after checking the sha1 that snapshot.debian.org records
+# for it (0c97adf00d2c6b4a63d839c053d2a746cbf27105)
+sha256  b2e7ed48431bf9e7978ae810bbdaf253093570d6e3f864e575b7c13554b81174  ubuntu-keyring_2023.11.28.1-0.2_all.deb
+sha256  0ad44922bd0190f3111c0f96b76d964fc1009ba75a27f4e7af83a73df69efe24  usr/share/doc/ubuntu-keyring/copyright

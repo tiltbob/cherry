@@ -78,8 +78,8 @@ test:
 # softhsm2 and opensc for the key ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
-	check-postbuild check-firewall check-secureboot check-ceremony check-var \
-	check-version
+	check-extension check-postbuild check-firewall check-secureboot \
+	check-ceremony check-var check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -124,11 +124,18 @@ check-bootstrap:
 check-image:
 	tests/image.sh
 
-# OpenCode's MCP server writes the recipe and drives cherry-image@ and
-# machinectl as it should (skipped without node).
+# OpenCode's MCP server copies the profile into the recipe and drives
+# cherry-image@ and machinectl as it should (skipped without node).
 check-mcp:
 	@if command -v node >/dev/null 2>&1; then node tests/mcp.js; \
 	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-machines-mcp.js unchecked)"; fi
+
+# OpenChamber's Environments extension: its manifest is what the host
+# installs, and its service answers the routes the panel calls (skipped
+# without node).
+check-extension:
+	@if command -v node >/dev/null 2>&1; then node tests/extension.js; \
+	else echo "extension: SKIPPED, node is not installed (package/cherry/openchamber-extension unchecked)"; fi
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:

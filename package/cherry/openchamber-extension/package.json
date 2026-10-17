@@ -1,0 +1,30 @@
+{
+  "name": "cherry-environments",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Manage the container environments of this Cherry machine from OpenChamber: a panel, the /env command, and a service that holds the verbs.",
+  "openchamber": {
+    "apiVersion": 1,
+    "contributes": {
+      "panel": {
+        "id": "openchamber-builtin-cherry-environments",
+        "name": "Environments",
+        "icon": "server",
+        "entry": "panel/index.html"
+      },
+      "background": { "entry": "panel/background.html" },
+      "page": { "entry": "panel/index.html", "title": "Environments" },
+      "commands": [
+        { "name": "env", "description": "list, create <profile> <name>, start/stop/status/log/remove <name>" }
+      ],
+      "tools": [
+        { "match": "machines_*", "name": "Environments", "icon": "server", "title": "{input.name}", "subtitle": "{input.profile}" }
+      ],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": { "exec": ["machinectl", "systemctl", "busctl"] }
+      }
+    }
+  }
+}

@@ -7,5 +7,11 @@
         "command": ["/usr/bin/bun", "/usr/lib/cherry/machines-mcp.js"]
       }
     }
+  },
+  "permission": {
+    "*": "deny",
+    "machines_*": "allow",
+    "skill": "allow",
+    "question": "allow"
   }
 }

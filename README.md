@@ -109,8 +109,9 @@ against a root laid out as the image (so a unit's `ExecStart=` must name a
 script where its package installs it), and tests of their own under `tests/`:
 the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
-busybox root, the OpenCode MCP server's tools against stand-ins for
-systemctl, machinectl and busctl, `post-build.sh`'s check of
+busybox root, the OpenCode MCP server's tools and the Environments
+extension's manifest and service against stand-ins for systemctl,
+machinectl, busctl and ip, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
@@ -118,7 +119,7 @@ key ceremony on a SoftHSM token, `cherry-var.service`'s choice of disk, and
 the image's version from the release tags. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
 python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
-the polkit rules and the MCP server; busybox and user namespaces for
+the polkit rules, the MCP server and the extension; busybox and user namespaces for
 `cherry-image` and the firewall, and nft and ip for the firewall; softhsm2 and
 opensc for the ceremony (each skipped without them).
 
@@ -557,6 +558,7 @@ the distribution, its release and the machine's name, separated by colons:
 
 ```sh
 systemctl start cherry-bootstrap@debian:trixie:mybox    # debootstrap
+systemctl start cherry-bootstrap@ubuntu:noble:mybox     # debootstrap, with Ubuntu's keyring and archive
 systemctl start cherry-bootstrap@fedora:44:mybox        # rpmstrap, any of its profiles
 systemctl start cherry-bootstrap@arch::mybox            # pacstrap
 machinectl start mybox
@@ -586,8 +588,10 @@ machinectl shell trixie
 - The default mirror is `http://deb.debian.org/debian`. To use another one,
   HTTP or HTTPS, pass it as the third argument.
 - The tree above uses about 240 MB of RAM.
-- Ubuntu and other derivatives need their own keyring: pass
-  `--keyring=<file>`.
+- Ubuntu needs its own keyring and archive, both on the image:
+  `--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg noble <dir>
+  http://archive.ubuntu.com/ubuntu`, as `cherry-bootstrap@ubuntu:noble:<name>`
+  runs it. Other derivatives need theirs.
 
 ### RPM-based containers with rpmstrap
 
@@ -701,23 +705,51 @@ machinectl poweroff web
   could not reset: the log is the record.
 - **Space:** images live on `/var`, the machine's disk or RAM.
 
-**OpenCode's tools:** `/etc/opencode`, OpenCode's system configuration
-directory, gives the agent an MCP server, `machines`
-(`/usr/lib/cherry/machines-mcp.js`, run on Bun), and a skill,
-`machine-images`, with the recipe format and the workflow. The tools, run as
-the `cherry` user with its privileges alone:
+### Environments
+
+An environment is an image built from a **profile**: a recipe as above,
+written by a person, plus `profile.conf` with a `Title=` and a
+`Description=`. The image ships profiles in `/usr/lib/cherry/profiles/`, one
+per distribution it can bootstrap (`debian-trixie`, `ubuntu-noble`,
+`fedora-44`, `arch`, `almalinux-10`, `rocky-10`, `centos-stream-10`), each
+booting with its veth link configured; the machine's administrator adds
+their own under `/var/lib/cherry/profiles/`, which win over the image's by
+id, and persist with `/var`. Creating an environment copies the profile to
+`/var/lib/cherry/images/<name>/`, notes the profile's id in its
+`profile.conf`, and runs `cherry-image@build:<name>`. That is the whole
+interface: a name and a profile. No package list, file or script comes from
+the person or the agent asking; a new need is a new profile.
+
+The verbs are one module, `/usr/lib/cherry/environments.js`, behind two
+front ends that run as the `cherry` user with its privileges alone:
+
+- **OpenChamber's Environments extension** (see [OpenChamber](#openchamber)):
+  a panel in the rail with the list, a create form, start, stop, remove and
+  each environment's status and build log; the `/env` command in the chat
+  (`/env create ubuntu-noble yarp`, `/env status yarp`); and a box that
+  reads a sentence ("create a new ubuntu environment named yarp") into one
+  of those, shown back before it runs. No model is involved: a small parser
+  does it, and asks when a word is missing. The panel talks to a service
+  OpenChamber starts on loopback inside `cherry.service`, which holds the
+  verbs and follows builds, starts and stops as jobs.
+- **OpenCode's MCP server**, `machines` (`/usr/lib/cherry/machines-mcp.js`,
+  run on Bun), named by `/etc/opencode/opencode.json`, OpenCode's system
+  configuration, with a skill, `machine-images`, for the workflow. Its tools:
 
 | Tool | Does |
 |---|---|
-| `list` | the images, running containers and recipes |
-| `build` | writes the recipe from its arguments (distribution, release, packages, files, `postinst`, settings) and runs `cherry-image@build:<name>`, after `machinectl remove` with `replace` |
+| `list` | the images (with the profile each came from), the containers running, and the profiles |
+| `create` | an image from a profile: copies it to the recipe and runs `cherry-image@build:<name>`, after `machinectl remove` with `replace` |
 | `start`, `stop` | `machinectl start`, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
-| `exec` | a command in a running container, as root, through `machinectl shell`: its output and exit status |
+| `status` | through `machinectl shell`, a fixed script: systemd's state, the address of `host0`, the failed units |
+| `log` | the end of the build log |
 | `remove` | `machinectl remove` |
 
-The system configuration outranks the user's, so the server stays configured;
-to keep the agent from it, deny its tools in the user's configuration
-(`permissions`, action `machines_*`).
+The same configuration denies the agent every other tool (`permission`:
+`*` is `deny`; `machines_*`, `skill` and `question` are allowed), so the
+agent on the host manages environments and nothing else: no shell, no
+files, no web. The system configuration outranks the user's, so neither
+the server nor the lockdown can be undone from a session.
 
 ## OpenCode
 
@@ -736,10 +768,11 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   (`BR2_STRIP_EXCLUDE_FILES`) and `post-build.sh` checks that. It is 202 MiB,
   about 98 MB in the image, and the idle server uses about 170 MB of RAM.
   Automatic updates are off: a new version comes with a new image.
-- **Tools:** the bash tool runs `bash`, the grep tool the image's ripgrep, and
-  git is on the image for its snapshots and worktrees. The `cherry` package
-  adds tools for container images, an MCP server and a skill in
-  `/etc/opencode` (see [Building images](#building-images)).
+- **Tools:** on Cherry, the agent has the `cherry` package's MCP server for
+  environments and nothing else: its own tools are denied in `/etc/opencode`
+  (see [Environments](#environments)). bash, the image's ripgrep and git stay
+  on the image for OpenChamber's terminals and git panel, and for OpenCode
+  elsewhere.
 - **Providers:** none are configured; nothing on the machine holds a key.
   Connect one at runtime, in OpenChamber. The credential lands under
   `/var/lib/cherry`: on the machine's encrypted disk if it has one, and
@@ -766,6 +799,16 @@ serves the browser UI.
   plus models downloaded at run time), and tunnels (no cloudflared or ngrok on
   the image). Update checks are off and `openchamber update` says so, as the
   image is read-only; the device-pairing relay reaches the network.
+- **Environments:** Cherry's extension for its container environments, a
+  built-in of the package (`server/built-in-extensions/cherry-environments`,
+  named by the registry there), so it is installed and granted on every boot
+  with nothing to click: Settings, Extensions shows it as bundled, to pause
+  but not remove. Its service runs as the `cherry` user inside
+  `cherry.service`; OpenChamber's grant card says such a service has the
+  user's access, which the unit confines (see
+  [Environments](#environments)). Extensions load in the web UI and the
+  desktop app, over the relay too; the mobile app and VS Code do not load
+  them.
 - **Size:** Bun is 85 MiB, about 42 MB in the image; the npm tree 178 MiB,
   about 42 MB. The idle server uses about 115 MB of RAM.
 
@@ -820,6 +863,11 @@ This is a development image:
 - OpenChamber's browser UI has no password unless the machine was given one
   as a credential: any local user can use it, and so run commands as the
   `cherry` user. It is on loopback only, as is the OpenCode behind it.
+- The OpenCode agent on the host has no tool but the environment verbs (see
+  [Environments](#environments)): it cannot run a command, read or write a
+  file, or reach the web, and nothing it is asked turns into a package list
+  or a script. OpenChamber's terminals are the human's, and still run as the
+  `cherry` user.
 - The `cherry` user creates, starts, enters and removes containers through
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with

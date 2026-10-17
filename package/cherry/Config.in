@@ -9,6 +9,7 @@ config BR2_PACKAGE_CHERRY
 	depends on BR2_USE_WCHAR # coreutils, tar
 	select BR2_PACKAGE_COREUTILS # cherry-image: mv -T
 	select BR2_PACKAGE_TAR # cherry-image: the recipe
+	select BR2_PACKAGE_UBUNTU_KEYRING if BR2_PACKAGE_DEBOOTSTRAP # the ubuntu-noble profile
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
@@ -23,8 +24,15 @@ config BR2_PACKAGE_CHERRY
 	  stop, enter and remove them with machinectl, and start
 	  cherry-bootstrap@.service, which creates one as root with
 	  debootstrap, rpmstrap or pacstrap, and cherry-image@.service,
-	  which builds an image from the user's recipe (packages, files,
-	  a script run in it under systemd-nspawn). Images stay on the
-	  machine that built them. OpenCode gets tools for all of it:
-	  an MCP server, cherry-machines-mcp, and a skill, in
-	  /etc/opencode.
+	  which builds an image from a recipe (packages, files, a
+	  script run in it under systemd-nspawn). Images stay on the
+	  machine that built them.
+
+	  On those, environments: images built from the profiles in
+	  /usr/lib/cherry/profiles (recipes written by a person, one
+	  per distribution) and /var/lib/cherry/profiles. OpenChamber
+	  gets a built-in extension for them, Environments: a panel,
+	  the /env command and a service with the verbs; the OpenCode
+	  agent gets the same verbs as the tools of an MCP server,
+	  cherry-machines-mcp, with a skill, in /etc/opencode, and
+	  nothing else: its other tools are denied there.
