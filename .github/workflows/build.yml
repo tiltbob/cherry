@@ -33,6 +33,7 @@ on:
       - 'tests/secureboot.sh'
       - 'tests/syntax.sh'
       - 'tests/units.sh'
+      - 'tests/var.sh'
       - '.shellcheckrc'
   pull_request:
   merge_group:
@@ -83,7 +84,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi

@@ -23,8 +23,9 @@ EOT
 # the hostname instead.
 sed -i '/^127\.0\.1\.1[[:space:]]/d' "$TARGET_DIR/etc/hosts"
 
-# The root filesystem is read-only: root's home lives on /var (a tmpfs for
-# now), so e.g. systemd's ssh.authorized_keys.root credential can be applied.
+# The root filesystem is read-only: root's home lives on /var (the machine's
+# disk, or a tmpfs), so e.g. systemd's ssh.authorized_keys.root credential can
+# be applied.
 # The target must exist at build time for makedevs; Buildroot's VAR_FACTORY
 # turns it into a factory default copied into /var at boot.
 mkdir -p "$TARGET_DIR/var/roothome"

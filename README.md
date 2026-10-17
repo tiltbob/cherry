@@ -21,8 +21,10 @@ Once booted:
   releases are signed for it (see [Secure Boot](#secure-boot)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
-- **`/var`:** a tmpfs of up to half the RAM, so nothing persists yet. Disks
-  for `/var` and containers come later.
+- **`/var`:** the machine's encrypted disk, unlocked by the TPM at boot,
+  where containers persist. A machine without one gets one on its first
+  blank disk; one without a blank disk keeps `/var` in a tmpfs of up to half
+  the RAM, so nothing persists (see [Disks](#disks)).
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Firewall:** nothing comes in unasked but ping, to the host or to its
   containers (see [Firewall](#firewall)).
@@ -99,12 +101,13 @@ the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `post-build.sh`'s check of `opencode`, the
 firewall's rules, in network namespaces standing in for a host, its LAN and
 its containers, the Secure Boot keys in `board/x86_64/secureboot/` and what
-`cherry-secureboot` enrolls from them, and the key ceremony on a SoftHSM
-token. `make -k check` runs on after a failure; `make check-<name>` runs
-one. They need shellcheck, flake8, python3-magic, python3-yaml, systemd's
-`systemd-analyze` and openssl; node for the polkit rules, nft, ip, busybox
-and user namespaces for the firewall, and softhsm2, opensc and pkcs11-provider
-for the ceremony (each skipped without them).
+`cherry-secureboot` enrolls from them, the key ceremony on a SoftHSM token,
+and `cherry-var.service`'s choice of disk. `make -k check` runs on after a
+failure; `make check-<name>` runs one. They need shellcheck, flake8,
+python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
+the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
+softhsm2, opensc and pkcs11-provider for the ceremony (each skipped without
+them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -189,7 +192,9 @@ ssh -p 2222 root@localhost
    - starts systemd with that machine ID, or, without a usable TPM, with
      `cherry-no-tpm.target` instead of the default target
 5. **systemd:**
-   - mounts a tmpfs on `/var` and fills it from the image's factory defaults
+   - mounts `/var`: the machine's encrypted disk, which the TPM unlocks, or
+     else a tmpfs (see [Disks](#disks))
+   - fills `/var` with what it lacks of the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
    - sets up compressed swap in RAM (see [Memory](#memory))
    - loads the firewall before networkd configures any link (see
@@ -199,13 +204,14 @@ ssh -p 2222 root@localhost
 
 Because `/etc` is read-only:
 - SSH host keys are generated under `/var/lib/sshd`, so they change on every
-  boot for now
+  boot unless `/var` is on a disk
 - `/root` is a symlink into `/var`
 
 ## Memory
 
-Everything lives in RAM: the root filesystem, `/var` with its containers, and
-the memory processes allocate.
+Everything lives in RAM: the root filesystem, `/var` with its containers
+unless the machine has a disk for it (see [Disks](#disks)), and the memory
+processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
 initramfs: 62 MB for 139 MiB of files before OpenCode, OpenChamber and Bun,
@@ -275,6 +281,66 @@ cannot create its EK. `/init` writes the reason to
 instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
 Networking, sshd and containers never start.
+
+## Disks
+
+A machine keeps `/var` on an encrypted disk of its own, and with it the
+containers, the SSH host keys and the `cherry` user's state. That disk is a
+GPT partition labelled `cherry-var`: a LUKS2 volume holding ext4, whose key
+the machine's TPM seals. The machine unlocks it at boot without a
+passphrase; elsewhere, it is unreadable.
+
+`cherry-var.service` ([`/usr/lib/cherry/var`](board/x86_64/rootfs-overlay/usr/lib/cherry/var))
+sets it up before systemd mounts `/var`, and only on a machine with a usable
+TPM:
+
+- **Unlock:** given a partition labelled `cherry-var`, it unlocks it with the
+  TPM (`systemd-cryptsetup`) as `/dev/mapper/cherry-var`, checks its
+  filesystem (`e2fsck -p`) and mounts it on `/var`.
+- **First boot:** without one, it claims the first blank disk, in the order
+  of the kernel's names (`nvme0n1`, `sda`, `vda`, ...). `systemd-repart`
+  writes a GPT and makes all of the disk the `cherry-var` partition, with a
+  new key that the TPM seals
+  ([`repart.d`](board/x86_64/rootfs-overlay/usr/lib/cherry/repart.d)).
+  systemd then fills the new `/var` from the image's factory defaults.
+- **Blank:** a whole disk of at least 1 GiB on which `wipefs` finds no
+  signature: no partition table, filesystem, or RAID or volume manager
+  member. Never a removable, read-only or USB disk. `wipefs -a /dev/<disk>`
+  makes a disk blank.
+- **Without either,** `/var` is a tmpfs, so nothing persists.
+
+Nothing erases a disk:
+
+- If the `cherry-var` partition can't be unlocked (another machine's disk,
+  or a cleared TPM) or its filesystem can't be repaired,
+  `cherry-var.service` fails and `/var` is a tmpfs for that boot. The disk
+  stays as it was.
+- With more than one `cherry-var` partition, it uses none, and fails.
+- A machine with a `cherry-var` partition never claims a blank disk, even
+  if it can't unlock that partition.
+
+To repair a filesystem that `e2fsck -p` left with errors, unlock it by hand
+(`systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto`), run
+`e2fsck /dev/mapper/cherry-var`, then
+`systemd-cryptsetup detach cherry-var`, and reboot.
+
+To start over with an empty `/var`, erase the `cherry-var` partition, then
+its disk (`wipefs --all --force /dev/vda1 /dev/vda`), and reboot: the disk is
+blank again, so the next boot makes a new volume, with a new key.
+
+The TPM is the key's only holder: there is no passphrase or recovery key.
+Clearing the TPM (in the firmware setup, or `tpm2_clear`) loses the key, and
+the data with it, though not the machine's identity, which comes from the
+endorsement seed. The key isn't bound to the boot state yet (see
+[Security notes](#security-notes)).
+
+`make qemu` gives the VM no disk. `--disk 8G` attaches
+`output/cherry_x86_64/qemu/disk.img`, created blank and sparse at the first
+run, which the VM then keeps along with its TPM:
+
+```sh
+python3 scripts/run_qemu.py --disk 8G
+```
 
 ## Firewall
 
@@ -434,8 +500,9 @@ With `--network-veth` (or `VirtualEthernet=yes`), systemd-networkd serves DHCP
 to the container and masquerades its traffic. The firewall lets the container
 out, but nothing in unasked (see [Firewall](#firewall)).
 
-Everything lives in memory for now. Containers and their configuration are
-gone after a reboot.
+On a machine with its encrypted disk (see [Disks](#disks)), containers and
+their configuration persist. Without one, they live in memory and are gone
+after a reboot.
 
 ### As the cherry user
 
@@ -574,7 +641,8 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   git is on the image for its snapshots and worktrees.
 - **Providers:** none are configured; nothing on the machine holds a key.
   Connect one at runtime, in OpenChamber. The credential lands under
-  `/var/lib/cherry`, so it is gone at the next boot.
+  `/var/lib/cherry`: on the machine's encrypted disk if it has one, and
+  otherwise in RAM, gone at the next boot.
 
 ## OpenChamber
 
@@ -610,7 +678,8 @@ on a machine with a TPM.
   it starts, and the agent's tools and terminals. Their data is under
   `/var/lib/cherry` (OpenChamber's in `.config/openchamber`), and the agent
   works in `/var/lib/cherry/work` unless a project picks another directory.
-  `/var` is a tmpfs, so all of it is new at every boot, and `/var/lib/cherry`
+  All of it persists if `/var` is on the machine's disk, and is new at every
+  boot otherwise (see [Disks](#disks)). `/var/lib/cherry`
   is the only place the service can write: it sees the rest of the system
   read-only, with a private `/tmp`, and runs without capabilities.
 - **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
@@ -652,6 +721,10 @@ This is a development image:
   polkit (see [As the cherry user](#as-the-cherry-user)): root inside any
   container, and the bootstrap tools run as root on the host for it, with
   checked arguments.
+- The TPM unseals the key of the encrypted `/var` disk whatever the machine
+  boots: it isn't bound to the boot state (PCRs) yet. The disk is unreadable
+  away from its machine, but anything that boots the machine (an HTTP boot
+  server, a USB stick) can unlock it.
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
   signed. With Secure Boot on, the kernel still loads unsigned modules: its
