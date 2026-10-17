@@ -27,6 +27,8 @@ on:
       - 'tests/bootstrap.sh'
       - 'tests/ceremony.sh'
       - 'tests/firewall.sh'
+      - 'tests/image.sh'
+      - 'tests/mcp.js'
       - 'tests/polkit.js'
       - 'tests/postbuild.sh'
       - 'tests/scenarios.py'
@@ -95,7 +97,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(polkit\.js|scenarios\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(mcp\.js|polkit\.js|scenarios\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -126,10 +128,10 @@ jobs:
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
       # flake8 and python3-magic; the others python3-yaml, systemd-analyze and
-      # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit
-      # test node, which the runner has; the firewall test nft, busybox and
-      # user namespaces, which Ubuntu's AppArmor keeps from unprivileged users
-      # unless told otherwise.
+      # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit and
+      # MCP tests node, which the runner has; the firewall and cherry-image
+      # tests busybox and user namespaces, which Ubuntu's AppArmor keeps from
+      # unprivileged users unless told otherwise, and the firewall test nft.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 

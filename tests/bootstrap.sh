@@ -114,4 +114,16 @@ esac
 [ "$(wc -l <"$CALLS")" -eq 3 ] || die "arch::a1 called more: $(cat "$CALLS")"
 [ -d "$machines/a1" ] || die "arch::a1 left no tree"
 
+# Without LOGS_DIRECTORY, as cherry-image runs it: everything on stdout, no log file.
+logs=$LOGS_DIRECTORY
+LOGS_DIRECTORY=
+run 'debian:trixie:quiet'
+LOGS_DIRECTORY=$logs
+[ "$rc" -eq 0 ] || die "debian:trixie:quiet failed: $out"
+expected="bootstrapping $machines/quiet
+debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie $machines/quiet"
+[ "$out" = "$expected" ] || die "without LOGS_DIRECTORY, unexpected output: $out"
+[ ! -e "$LOGS_DIRECTORY/debian:trixie:quiet.log" ] || die "without LOGS_DIRECTORY, a log was written"
+[ -d "$machines/quiet" ] || die "without LOGS_DIRECTORY, no tree"
+
 echo "bootstrap: $n cases passed"

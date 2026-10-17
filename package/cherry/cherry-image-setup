@@ -1,0 +1,89 @@
+#!/bin/sh
+# cherry-image-setup: the steps of `cherry-image build` inside the new image,
+# run by systemd-nspawn as the image's root, once it is bootstrapped.
+# /.cherry-image holds what cherry-image staged there: packages, the extra
+# packages on one line, and recipe/, the cherry user's recipe. In turn:
+#   1. remove /etc/hostname, which debootstrap copies from the host, so that
+#      each container takes its machine's name, unless the recipe sets one
+#   2. install the packages with the image's package manager: apt-get, dnf or
+#      pacman
+#   3. copy recipe/extra/ onto the root
+#   4. run recipe/postinst
+#   5. leave the image generic: an empty /etc/machine-id, so that each
+#      container of it gets its own, and no package caches
+set -eu
+
+staged=/.cherry-image
+recipe=$staged/recipe
+
+# copy_tree <from> <to>: as cp -a <from>/. <to>, but into the directories that
+# <to> has, links to directories included (/bin -> usr/bin), where cp -a would
+# refuse. Anything else in the way is replaced; a directory by a file is an
+# error.
+copy_tree() {
+	for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+		if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+			continue
+		fi
+		target=$2/${entry##*/}
+		if [ -d "$entry" ] && [ ! -L "$entry" ] && [ -d "$target" ]; then
+			copy_tree "$entry" "$target"
+		else
+			if [ -e "$target" ] || [ -L "$target" ]; then
+				rm -f "$target"
+			fi
+			cp -a "$entry" "$target"
+		fi
+	done
+}
+
+rm -f /etc/hostname
+
+set -f
+# shellcheck disable=SC2046 # the packages are words; set -f, no globbing
+set -- $(cat "$staged/packages")
+set +f
+if [ $# -gt 0 ]; then
+	echo "installing $*"
+	if command -v apt-get >/dev/null; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update
+		apt-get install -y --no-install-recommends "$@"
+	elif command -v dnf >/dev/null; then
+		dnf -y --setopt=install_weak_deps=False install "$@"
+	elif command -v pacman >/dev/null; then
+		pacman -Syu --noconfirm --needed "$@"
+	else
+		echo "no apt-get, dnf or pacman in the image to install $* with" >&2
+		exit 1
+	fi
+fi
+
+if [ -d "$recipe/extra" ]; then
+	echo "copying extra/ onto /"
+	copy_tree "$recipe/extra" ""
+fi
+
+if [ -f "$recipe/postinst" ]; then
+	echo "running postinst"
+	if [ -x "$recipe/postinst" ]; then
+		"$recipe/postinst"
+	else
+		sh "$recipe/postinst"
+	fi
+fi
+
+if [ -s /etc/machine-id ]; then
+	: >/etc/machine-id
+fi
+if command -v apt-get >/dev/null; then
+	apt-get clean
+	rm -rf /var/lib/apt/lists/*
+fi
+if command -v dnf >/dev/null; then
+	dnf clean all >/dev/null
+fi
+if command -v pacman >/dev/null; then
+	rm -rf /var/cache/pacman/pkg/*
+fi
+echo "set up"

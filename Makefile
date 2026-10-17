@@ -73,12 +73,13 @@ test:
 # all (`make -k check` goes on after a failure), `make check-<name>` one. CI
 # runs them before the build (.github/workflows/build.yml). They need
 # shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
-# openssl; node for the polkit rules (skipped without it); nft, ip, busybox
-# and user namespaces for the firewall, and softhsm2 and opensc for the key
-# ceremony (each skipped without them).
+# openssl; node for the polkit rules and the MCP server (skipped without it);
+# nft, ip, busybox and user namespaces for the firewall and cherry-image, and
+# softhsm2 and opensc for the key ceremony (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
-	check-scenarios check-polkit check-bootstrap check-postbuild check-firewall \
-	check-secureboot check-ceremony check-var check-version
+	check-scenarios check-polkit check-bootstrap check-image check-mcp \
+	check-postbuild check-firewall check-secureboot check-ceremony check-var \
+	check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -117,6 +118,17 @@ check-polkit:
 # cherry-bootstrap checks its instance and calls the tools right.
 check-bootstrap:
 	tests/bootstrap.sh
+
+# cherry-image builds an image from its recipe, and exports it, as it should
+# (skipped without a static busybox and user namespaces).
+check-image:
+	tests/image.sh
+
+# OpenCode's MCP server writes the recipe and drives cherry-image@ and
+# machinectl as it should (skipped without node).
+check-mcp:
+	@if command -v node >/dev/null 2>&1; then node tests/mcp.js; \
+	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-machines-mcp.js unchecked)"; fi
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:

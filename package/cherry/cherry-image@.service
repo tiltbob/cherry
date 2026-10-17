@@ -1,0 +1,17 @@
+[Unit]
+Description=Cherry: Container Image %i
+Documentation=https://github.com/tiltbob/cherry#building-images
+# For the cherry user, which may start this unit (see 50-cherry.rules) but not
+# write to /var/lib/machines or run systemd-nspawn; `systemctl start` returns
+# when the image is built or exported, and the log is readable at
+# /var/log/cherry-image/<instance>.log.
+After=network.target
+# The log is the record: a failed build is not left among the failed units,
+# which the cherry user could not reset.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cherry-image %i
+LogsDirectory=cherry-image
+LogsDirectoryMode=0755

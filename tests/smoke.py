@@ -30,20 +30,27 @@
      Bun), and only the binary: no opencode user, state directory or service
   8. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
      UI and running the packaged OpenCode as that user too, both on loopback
-     only; once it was online, cherry-connect-url.service
-     showed the pairing link and its QR code on the console, as that user; the
-     user's polkit privileges cover machinectl and cherry-bootstrap@ and
-     nothing else; no openchamber user, state directory or service
-  9. zram is the swap device, and under memory pressure tmpfs pages go to it,
+     only and under its system call filter; once it was online,
+     cherry-connect-url.service showed the pairing link and its QR code on the
+     console, as that user; the user's polkit privileges cover machinectl and
+     cherry-bootstrap@ and nothing else; no openchamber user, state directory
+     or service
+  9. OpenCode reads its system configuration, /etc/opencode, and through the
+     MCP server it names, as the cherry user in cherry.service's sandbox, a
+     Debian image is built from a recipe (cherry-image@.service), booted with
+     its network up, entered, stopped, and exported as a tarball and a raw
+     disk image that systemd-nspawn runs, then removed (skipped when the guest
+     cannot reach deb.debian.org)
+  10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
-  10. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+  11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
      console: no network, no sshd, no OpenChamber, no containers
-  11. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
+  12. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
      the image's keys and the option ROM driver the firmware loaded (QEMU's
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
      unsigned, but boots it with Secure Boot on once signed by a CA the test
      adds to db (skipped when the image has no keys)
-  12. with disks, the machine makes its blank one its /var: a LUKS2 volume
+  13. with disks, the machine makes its blank one its /var: a LUKS2 volume
      whose key the TPM seals, holding ext4, and leaves the disk with a
      partition table alone; after a poweroff, which unmounts it cleanly, the
      TPM unlocks it and /var kept its files and the SSH host key; another TPM
@@ -85,6 +92,13 @@ HOSTNAME_KEY = bytes.fromhex("9810addf8d7d4fb5891b4b56acc2268f")
 NO_TPM_BANNER = "Cherry stopped: no usable TPM 2.0."
 # Run a command as the cherry user, from the root shell on the console.
 AS_CHERRY = "systemd-run -q --wait --pipe --collect -p User=cherry"
+# As cherry.service runs OpenCode, and the MCP servers it starts: the parts of its sandbox that could stop them.
+IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectSystem=strict "
+                     "-p ReadWritePaths=/var/lib/cherry -p PrivateTmp=yes -p PrivateDevices=yes "
+                     "-p CapabilityBoundingSet= -p RestrictNamespaces=yes "
+                     "-p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "
+                     "-p SystemCallFilter=@system-service -p 'SystemCallFilter=~@privileged' "
+                     "-p SystemCallErrorNumber=EPERM")
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
@@ -725,6 +739,9 @@ class Smoke:
         check(vm.run(f"readlink /proc/{pid}/exe") == "/usr/bin/bun", "the OpenChamber server does not run on Bun")
         check(vm.run(f"readlink /proc/{pid}/cwd") == "/var/lib/cherry/work",
               "the OpenChamber server does not work in /var/lib/cherry/work")
+        # Its system call filter applies (systemd built with seccomp): mode 2, a filter.
+        check(vm.run(f"awk '/^Seccomp:/ {{ print $2 }}' /proc/{pid}/status") == "2",
+              "the OpenChamber server runs without cherry.service's system call filter")
         url = "http://127.0.0.1:3000"
         health = vm.run(f"for i in $(seq 120); do wget -q -O - {url}/health && exit 0; sleep 1; done; "
                         "journalctl -b -u cherry --no-pager | tail -n 20; exit 1", timeout=240)
@@ -811,7 +828,104 @@ class Smoke:
         rss_kb = int(vm.run(f"awk '/^VmRSS:/ {{ print $2 }}' /proc/{pid}/status"))
         log(f"OpenChamber {version}: {rss_kb >> 10} MiB resident")
 
-    def s9_zram(self):
+    def mcp(self, tool, arguments, timeout=120):
+        """Call a tool of OpenCode's MCP server, /etc/opencode's machines, as OpenCode in cherry.service would:
+        the reply's text, which must not be an error."""
+        messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                                "clientInfo": {"name": "cherry-smoke", "version": "1"}}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": tool, "arguments": arguments}}]
+        requests = base64.b64encode("".join(json.dumps(m) + "\n" for m in messages).encode()).decode()
+        # The console's shell takes lines of up to 1024 characters: the requests go in pieces.
+        for i in range(0, len(requests), 600):
+            self.vm.run(f"printf %s {requests[i:i + 600]} {'>' if i == 0 else '>>'}/tmp/mcp-requests.b64")
+        out = self.vm.run(f"base64 -d /tmp/mcp-requests.b64 >/tmp/mcp-requests && {AS_CHERRY} {IN_CHERRY_SERVICE} "
+                          "/usr/bin/bun /usr/lib/cherry/machines-mcp.js </tmp/mcp-requests", timeout=timeout)
+        for line in out.splitlines():
+            if line.startswith("{") and json.loads(line).get("id") == 2:
+                result = json.loads(line)["result"]
+                text = result["content"][0]["text"]
+                check(not result["isError"], f"the MCP tool {tool} failed:\n{text}")
+                return text
+        raise TestFailure(f"no reply from the MCP tool {tool}:\n{out}")
+
+    def s9_images(self):
+        vm = self.vm
+        mirror = "http://deb.debian.org/debian"
+        # As in s4_debootstrap.
+        rc, out = vm.run(f"for i in $(seq 12); do wget -q -T 10 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease "
+                         "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1",
+                         timeout=240, check_rc=False)
+        if rc != 0:
+            log(f"skipped: the guest cannot reach {mirror}: {out}")
+            return SKIPPED
+        # OpenCode's system configuration names the MCP server; the skill comes with it. (A home of its own, apart
+        # from the OpenCode that OpenChamber runs.)
+        config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
+        check('"path": "/etc/opencode/opencode.json"' in config and "machines-mcp.js" in config,
+              f"OpenCode does not read /etc/opencode/opencode.json:\n{config}")
+        vm.run("test -s /etc/opencode/skills/machine-images.md")
+
+        name, root = "smoke-image", "/var/lib/machines/smoke-image"
+        motd = "built by cherry-image for the smoke test"
+        text = self.mcp("build", {
+            "name": name, "distribution": "debian", "release": "trixie", "packages": ["iproute2"],
+            "files": [{"path": "/etc/motd", "content": motd + "\n"},
+                      {"path": "/usr/bin/smoke-hello", "mode": "0755",
+                       "content": "#!/bin/sh\necho hello from $(cat /proc/sys/kernel/hostname)\n"}],
+            "postinst": "systemctl enable systemd-networkd\necho postinst ran >/var/postinst-ran",
+            "nspawn": "[Exec]\nEnvironment=SMOKE=1"}, timeout=1800)
+        log("build:\n" + text)
+        check(f"built {root} " in text, f"the build's log does not end as it should:\n{text}")
+        check(vm.run(f"stat -c %a /var/log/cherry-image/build:{name}.log") == "644",
+              "the build log is not readable by the cherry user")
+        check(vm.run(f"stat -c %U /var/lib/cherry/images/{name}/image.conf") == "cherry",
+              "the recipe was not written as the cherry user")
+        check(vm.run(f"cat {root}.nspawn") == "[Exec]\nEnvironment=SMOKE=1", "the image's settings were not installed")
+        vm.run(f"test -e {root}/etc/machine-id && ! test -s {root}/etc/machine-id && "
+               f"test -z \"$(ls {root}/var/lib/apt/lists)\" && ! test -e {root}/.cherry-image")
+        log(f"{name}: " + vm.run(f"du -sh {root} | cut -f 1"))
+
+        check(self.mcp("start", {"name": name}, timeout=300) == f"{name} is running", f"{name} did not start")
+        # The command runs in a login session: its messages may come first.
+        text = self.mcp("exec", {"name": name, "command": "cat /etc/motd /var/postinst-ran; smoke-hello"})
+        check(text.startswith("exit status 0\n") and text.endswith(f"{motd}\npostinst ran\nhello from {name}"),
+              f"exec in {name} gave:\n{text}")
+        text = self.mcp("exec", {"name": name, "command": "systemctl status systemd-networkd; exit 3"})
+        check(text.startswith("exit status 3\n") and "Active: active" in text,
+              f"exec does not report the exit status, or systemctl paged:\n{text}")
+        # Its network: host0, configured by the image's networkd with DHCP from the host.
+        text = self.mcp("exec", {"name": name, "command": "for i in $(seq 60); do ip -4 -br addr show host0 | "
+                                 "grep -q / && break; sleep 1; done; ip -4 -br addr show host0"}, timeout=180)
+        check(re.search(r"^host0\S*\s+UP\s+\d+\.\d+\.\d+\.\d+/\d+", text, re.M), f"host0 has no address:\n{text}")
+        check(self.mcp("stop", {"name": name}, timeout=180) == f"{name} is stopped", f"{name} did not stop")
+
+        # The tarball: owned by the cherry user, the image's tree, which systemd-nspawn runs once unpacked.
+        export = json.loads(self.mcp("export", {"name": name, "format": "tar"}, timeout=900))
+        tarball = export["path"]
+        check(tarball == f"/var/lib/cherry/exports/{name}.tar.xz", f"unexpected export: {export}")
+        check(vm.run(f"stat -c %U {tarball}") == "cherry", "the tarball is not the cherry user's")
+        check(vm.run(f"sha256sum {tarball} | cut -d ' ' -f 1") == export["sha256"], "the tarball's SHA-256 is wrong")
+        copy = "/var/lib/machines/smoke-copy"
+        vm.run(f"mkdir {copy} && tar --numeric-owner --xattrs -C {copy} -xJf {tarball} && rm {tarball}", timeout=300)
+        check(vm.run(f"systemd-nspawn -q --pipe --register=no -D {copy} cat /etc/motd") == motd,
+              "the unpacked tarball does not run")
+        vm.run(f"rm -rf {copy}")
+        # The raw image: a disk image that systemd-nspawn runs as is.
+        raw = json.loads(self.mcp("export", {"name": name, "format": "raw"}, timeout=900))["path"]
+        check(vm.run(f"systemd-nspawn -q --pipe --register=no --image={raw} cat /etc/motd") == motd,
+              "the raw image does not run")
+        log(f"exported {name}: " + vm.run(f"du -h --apparent-size {raw} | cut -f 1") + " raw, sparse in "
+            + vm.run(f"du -h {raw} | cut -f 1"))
+
+        check(self.mcp("remove", {"name": name}) == f"{name} removed", f"{name} was not removed")
+        rc, _ = vm.run(f"test -e {root} || test -e {root}.nspawn", check_rc=False)
+        check(rc != 0, "the image or its settings are still there")
+        vm.run(f"rm -rf /var/lib/cherry/images/{name} {raw}")
+
+    def s10_zram(self):
         vm = self.vm
         mem_kb = int(vm.run("awk '/^MemTotal:/ { print $2 }' /proc/meminfo"))
         swaps = vm.run("tail -n +2 /proc/swaps")
@@ -834,7 +948,7 @@ class Smoke:
               "data that went through zram came back changed")
         vm.run("rm /var/tmp/zram-test")
 
-    def s10_no_tpm(self):
+    def s11_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -857,7 +971,7 @@ class Smoke:
         with open(path) as f:
             return {v["name"]: bytes.fromhex(v["data"]) for v in json.load(f)["variables"]}
 
-    def s11_secure_boot(self):
+    def s12_secure_boot(self):
         vm = self.vm
         keys = "/usr/share/cherry/secureboot"
         rc, _ = vm.run(f"test -s {keys}/PK.auth", check_rc=False)
@@ -920,7 +1034,7 @@ class Smoke:
         check(rc != 0, "the enrollment mark was not cleared")
         check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
 
-    def s12_encrypted_var(self):
+    def s13_encrypted_var(self):
         vm = self.vm
         # vda has a partition table, so it is in use; vdb is blank. Both are large enough to be claimed.
         used, blank = os.path.join(self.workdir, "used.img"), os.path.join(self.workdir, "blank.img")
