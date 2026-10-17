@@ -141,10 +141,15 @@ def lvm(state, args):
         else:
             vgs[words[0]]["active"] = "-ay" in args
     elif cmd == "lvcreate":
+        words = [w for w in words if w not in ("cache-pool", "n")]
         name, vg = args[args.index("-n") + 1], words[2] if "-L" in args or "-l" in args else words[1]
         targets = words[words.index(vg) + 1:]
-        lv = {"segtype": "linear", "alloc": {}, "hidden": False, "cvol": None, "mode": ""}
-        allocate(state, vg, lv, extents_of(args, state, vg, targets), targets)
+        pool = "--type" in args
+        if pool:
+            assert args[args.index("--type") + 1] == "cache-pool" and "--poolmetadataspare" in args, args
+        lv = {"segtype": "cache-pool" if pool else "linear", "alloc": {}, "hidden": False, "cvol": None, "mode": ""}
+        # A cache pool's metadata: 2 extents more.
+        allocate(state, vg, lv, extents_of(args, state, vg, targets) + (2 if pool else 0), targets)
         lvs[f"{vg}/{name}"] = lv
     elif cmd == "lvextend":
         key = next(w for w in words if "/" in w and not w.startswith("/dev/"))
@@ -162,9 +167,11 @@ def lvm(state, args):
             del lvs[f"{vg}/{lv['cvol']}"]
             lv.update(segtype="linear", cvol=None, mode="")
         else:
-            cvol = lvs.pop(f"{vg}/{args[args.index('--cachevol') + 1]}")
+            cpool = args[args.index("--cachepool") + 1]
+            cvol = lvs.pop(cpool)
+            assert cvol["segtype"] == "cache-pool", cvol
             cvol["hidden"] = True
-            name = f"[{args[args.index('--cachevol') + 1]}_cvol]"
+            name = f"[{cpool.split('/')[1]}_cpool]"
             lvs[f"{vg}/{name}"] = cvol
             lv.update(segtype="cache", cvol=name, mode=args[args.index("--cachemode") + 1])
     elif cmd == "lvremove":
@@ -478,6 +485,7 @@ def expect(name, result, rc, line, calls=None):
         check(got == calls, f"{name}: called\n  " + "\n  ".join(got) + "\nnot\n  " + "\n  ".join(calls))
 
 
+POOL = "--type cache-pool --poolmetadataspare n"
 REPART = ("systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/storage/repart.d "
           "--tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs=")
 
@@ -731,18 +739,19 @@ def tests():
         calls = m.calls()
         check(calls[:4] == [f"lvm vgextend tank {nvme0}", f"lvm pvchange --addtag cache {nvme0}",
                             f"lvm vgextend tank {nvme1}", f"lvm pvchange --addtag cache {nvme1}"], calls)
-        check(f"lvm lvcreate -y -n big_cache -l 2560 tank {nvme0} {nvme1}" in calls
-              and "lvm lvconvert -y --type cache --cachevol big_cache --cachemode writethrough tank/big" in calls
-              and f"lvm lvcreate -y -n small_cache -l 512 tank {nvme0} {nvme1}" in calls, calls)
-        check(volume("tank/big")["segtype"] == "cache" and volume("tank/[big_cache_cvol]")["hidden"], m.state()["lvs"])
+        check(f"lvm lvcreate -y {POOL} -n big_cache -l 2548 tank {nvme0} {nvme1}" in calls
+              and "lvm lvconvert -y --type cache --cachepool tank/big_cache --cachemode writethrough tank/big" in calls
+              and f"lvm lvcreate -y {POOL} -n small_cache -l 500 tank {nvme0} {nvme1}" in calls, calls)
+        check(volume("tank/big")["segtype"] == "cache" and volume("tank/[big_cache_cpool]")["hidden"], m.state()["lvs"])
         # A new volume is cached too, in the same proportion; writeback once the pool is.
         expect("writeback", m.run("cache:tank:writeback:nvme0n1:nvme1n1"), 0, "cached on")
         calls = m.calls()
         check(calls[:2] == ["lvm lvconvert -y --uncache tank/big", "lvm lvconvert -y --uncache tank/small"]
               and "lvm vgchange --addtag writeback tank" in calls
-              and "lvm lvconvert -y --type cache --cachevol big_cache --cachemode writeback tank/big" in calls, calls)
+              and "lvm lvconvert -y --type cache --cachepool tank/big_cache --cachemode writeback tank/big" in calls,
+              calls)
         m.run("volume-create:tank:new:40G")
-        check(f"lvm lvcreate -y -n new_cache -l 1024 tank {nvme0} {nvme1}" in m.calls()
+        check(f"lvm lvcreate -y {POOL} -n new_cache -l 1012 tank {nvme0} {nvme1}" in m.calls()
               and volume("tank/new")["mode"] == "writeback", m.calls())
         # Too small a share for a cache: none.
         rc, out = m.run("volume-create:tank:tiny:100M")
@@ -752,7 +761,7 @@ def tests():
                f"the pool tank is cached on {nvme0}, writethrough")
         calls = m.calls()
         check(f"lvm vgreduce tank {nvme1}" in calls and "lvm vgchange --deltag writeback tank" in calls
-              and f"lvm lvcreate -y -n big_cache -l 1280 tank {nvme0}" in calls, calls)
+              and f"lvm lvcreate -y {POOL} -n big_cache -l 1268 tank {nvme0}" in calls, calls)
         check(m.state()["pvs"][nvme1]["vg"] == "", "the cache disk left is still in the pool")
         # A data disk is not a cache disk, nor is another pool's.
         expect("data as cache", m.run("cache:tank:writethrough:sda"), 1, "/dev/sda is in the pool tank")
@@ -901,7 +910,7 @@ def tests():
         names = [p["pv_name"] for p in facts["pvs"]["report"][0]["pv"]]
         check(names[:2] == ["/dev/mapper/cherry-pv-nvme0n1p1", "/dev/mapper/cherry-pv-nvme1n1p1"], facts)
         check([v["vg_name"] for v in facts["vgs"]["report"][0]["vg"]] == ["tank"], facts["vgs"])
-        check(sorted(lv["lv_name"] for lv in facts["lvs"]["report"][0]["lv"]) == ["[web_cache_cvol]", "web"],
+        check(sorted(lv["lv_name"] for lv in facts["lvs"]["report"][0]["lv"]) == ["[web_cache_cpool]", "web"],
               facts["lvs"])
         check(facts["mounts"] == [{"path": f"{tmp()}/home/volumes/tank/web", "size": 10737418240,
                                    "used": 1073741824, "available": 9663676416}], facts["mounts"])

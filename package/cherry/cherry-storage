@@ -31,7 +31,7 @@
 # cache is. A volume is a linear logical volume on the pool's data disks,
 # holding ext4 whose root the cherry user owns, mounted on
 # /var/lib/cherry/volumes/<pool>/<volume>; on a pool with cache disks, it is
-# cached on them (dm-cache, a cachevol), in proportion to its share of the
+# cached on them (dm-cache, a cache pool), in proportion to its share of the
 # data disks. Sizes are a number and M, G or T (MiB, GiB, TiB), or all: the
 # pool's free space.
 #
@@ -60,8 +60,10 @@ lock=${CHERRY_STORAGE_LOCK:-/run/cherry-storage.lock}
 definitions=/usr/lib/cherry/storage/repart.d
 # 1 GiB, in the 512-byte sectors of /sys/class/block/*/size.
 min_sectors=2097152
-# The smallest cache worth making for a volume.
+# The smallest cache worth making for a volume, and the most its metadata
+# takes (see cache_volume).
 min_cache_bytes=67108864
+cache_meta_bytes=50331648
 # lvm runs with the lock's file descriptor open (one operation at a time): no
 # warning about it at every call.
 export LVM_SUPPRESS_FD_WARNINGS=1
@@ -292,7 +294,7 @@ pool_mode() {
 }
 
 # The pool's volumes, one per line: name|size in bytes|segment type|active.
-# Its cachevols are hidden, and the names of volumes have no '_' (check_name).
+# Its cache pools are hidden, and the names of volumes have no '_' (check_name).
 volume_table() {
 	lvm lvs --noheadings --separator '|' --units b --nosuffix -o lv_name,lv_size,segtype,lv_active "$1" |
 		sed 's/^[[:space:]]*//' | awk -F '|' '$1 !~ /_/'
@@ -408,15 +410,24 @@ cache_volume() {
 	if [ "$want" -gt "$free" ]; then
 		want=$free
 	fi
-	if [ "$((want * extent))" -lt "$min_cache_bytes" ]; then
-		echo "no cache for $1/$2: its share of the pool's cache disks, or what is left of them, is under $((min_cache_bytes >> 20)) MiB"
+	if [ "$((want * extent))" -lt "$((min_cache_bytes + cache_meta_bytes))" ]; then
+		echo "no cache for $1/$2: its share of the pool's cache disks, or what is left of them, is under $(((min_cache_bytes + cache_meta_bytes) >> 20)) MiB"
 		return 0
 	fi
 	mode=$(pool_mode "$1")
 	echo "caching $1/$2 on $((want * extent >> 20)) MiB of the pool's cache disks, $mode"
+	# A cache pool: its data LV takes the share but what its metadata LV
+	# needs, which LVM sizes at 4 MiB and 44 bytes for each of at most a
+	# million chunks (_cache_min_metadata_size(), lib/metadata/
+	# cache_manip.c): 48 MiB at most. No spare of that metadata elsewhere in
+	# the pool. Not a cachevol: LVM 2.03.31 makes one, but cannot activate it
+	# ("Missing cache's data uuid ...-cdata"), attached to an active volume
+	# or later.
+	meta=$(((cache_meta_bytes + extent - 1) / extent))
 	# shellcheck disable=SC2046 # PV paths, one word each
-	lvm lvcreate -y -n "$2_cache" -l "$want" "$1" $(printf '%s\n' "$pvt" | tagged "$1" cache | cut -d '|' -f 1)
-	if ! lvm lvconvert -y --type cache --cachevol "$2_cache" --cachemode "$mode" "$1/$2"; then
+	lvm lvcreate -y --type cache-pool --poolmetadataspare n -n "$2_cache" -l "$((want - meta))" \
+		"$1" $(printf '%s\n' "$pvt" | tagged "$1" cache | cut -d '|' -f 1)
+	if ! lvm lvconvert -y --type cache --cachepool "$1/$2_cache" --cachemode "$mode" "$1/$2"; then
 		lvm lvremove -y "$1/$2_cache"
 		fail "cannot cache $1/$2"
 	fi
