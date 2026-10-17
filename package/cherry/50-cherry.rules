@@ -1,23 +1,35 @@
 // The cherry user, which cherry.service runs OpenChamber and the OpenCode
-// agent as, manages containers with machinectl: start, poweroff, terminate,
-// kill, remove, clone, shell and login (not the host's own shell, login or
-// pty), creates them with cherry-bootstrap@.service, and builds and exports
-// images with cherry-image@.service. machinectl start goes to systemd, not
-// machined: it starts systemd-nspawn@<name>.service, so those units it may
-// start, stop and restart; cherry-bootstrap@ and cherry-image@ units it may
-// start; no other unit. Everyone else keeps polkit's defaults.
+// agent as, manages containers with machinectl: start, poweroff, reboot,
+// terminate, kill, remove, clone, rename, read-only, set-limit (of an image),
+// shell and login (not the host's own shell, login or pty), creates them with
+// cherry-bootstrap@.service, and builds and exports images with
+// cherry-image@.service. machined's manage-machines and manage-images actions
+// cover more than that, so they are allowed by the verb detail machined
+// passes for each call (systemd 258's src/machine/*-dbus.c and
+// *-varlink.c): not copy (machinectl copy-to, copy-from) or bind, which
+// machined does as root on any host path; nor open_root_directory,
+// unregister, clean_pool or set_pool_limit. machinectl start goes to systemd,
+// not machined: it starts systemd-nspawn@<name>.service, so those units it
+// may start, stop and restart; cherry-bootstrap@ and cherry-image@ units it
+// may start; no other unit. Everyone else keeps polkit's defaults.
 polkit.addRule(function(action, subject) {
     if (subject.user != "cherry")
         return polkit.Result.NOT_HANDLED;
-    if (action.id == "org.freedesktop.machine1.manage-machines" ||
-        action.id == "org.freedesktop.machine1.manage-images" ||
-        action.id == "org.freedesktop.machine1.shell" ||
+    if (action.id == "org.freedesktop.machine1.shell" ||
         action.id == "org.freedesktop.machine1.login" ||
         action.id == "org.freedesktop.machine1.open-pty")
         return polkit.Result.YES;
+    var verb = action.lookup("verb");
+    // poweroff and reboot are a kill too, of the container's init.
+    if (action.id == "org.freedesktop.machine1.manage-machines" &&
+        (verb == "terminate" || verb == "kill"))
+        return polkit.Result.YES;
+    // update is rename, read-only and set-limit at once, over varlink.
+    if (action.id == "org.freedesktop.machine1.manage-images" &&
+        ["remove", "clone", "rename", "mark_read_only", "set_limit", "update"].indexOf(verb) >= 0)
+        return polkit.Result.YES;
     if (action.id == "org.freedesktop.systemd1.manage-units") {
         var unit = action.lookup("unit") || "";
-        var verb = action.lookup("verb");
         if (unit.indexOf("systemd-nspawn@") == 0 &&
             (verb == "start" || verb == "stop" || verb == "restart"))
             return polkit.Result.YES;

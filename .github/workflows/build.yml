@@ -48,11 +48,17 @@ on:
         type: string
         default: ''
 
+# The jobs read the repository; only the release job below writes to it.
+permissions:
+  contents: read
+
 # A build takes one to two hours; a newer push to the same branch or pull
-# request replaces the running build instead of queueing behind it.
+# request replaces the running build instead of queueing behind it. A release
+# by hand has a group of its own and runs to the end: in main's, the next push
+# to main would cancel it (and it a push's build).
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.ref }}-${{ inputs.release }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 jobs:
   # A required check must report on every pull request, which paths-ignore
@@ -65,7 +71,7 @@ jobs:
     outputs:
       build: ${{ steps.diff.outputs.build }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -136,10 +142,11 @@ jobs:
 
   build:
     needs: changes
-    # Also when the changes job failed, leaving its output empty: a required
-    # check must not pass without a build, and a skipped job would. The first
-    # step then fails the job at once instead of building (make check failed).
-    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
+    # Also whenever the changes job failed, even with nothing to build: it sets
+    # its output before `make check` runs, and a required check must not pass
+    # when the checks failed, which a skipped job would. The first step then
+    # fails the job at once instead of building (make check failed).
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.build != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     env:
@@ -161,7 +168,7 @@ jobs:
           df -h /
           sudo sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; docker image prune --all --force' >/dev/null 2>&1 </dev/null &
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # git describe provides the image version
 
@@ -192,7 +199,7 @@ jobs:
 
       - name: Restore download cache
         id: dl
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
@@ -200,10 +207,10 @@ jobs:
 
       - name: Restore ccache
         id: ccache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
+          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ steps.keys.outputs.ccache }}-
             ${{ steps.keys.outputs.ccache-toolchain }}-
@@ -231,26 +238,29 @@ jobs:
 
       - name: Save download cache
         if: github.ref == 'refs/heads/main' && steps.dl.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: dl
           key: ${{ steps.keys.outputs.dl }}
 
-      # A release by hand names the image after itself (os-release, the boot
-      # banner), as `git describe` would once the release job has created the
-      # tag on this commit.
+      # A release names the image after itself (os-release, the boot banner):
+      # Buildroot versions the tree with a plain `git describe`, which sees
+      # only annotated tags, and GitHub makes a release's tag (on the website,
+      # or in the release job below) a lightweight one.
       - name: Build
         env:
-          RELEASE: ${{ inputs.release }}
+          RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}
         run: make ${RELEASE:+BR2_EXTERNAL_CHERRY_VERSION=$RELEASE}
 
       # Also after a failed or cancelled build, so the next run resumes warm.
+      # Each attempt saves under a key of its own: a saved cache can't be
+      # replaced, so a re-run's would be dropped.
       - name: Save ccache
         if: always() && github.ref == 'refs/heads/main' && steps.ccache.outcome == 'success'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .ccache
-          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}
+          key: ${{ steps.keys.outputs.ccache }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build statistics
         if: always() && steps.ccache.outcome == 'success'
@@ -275,7 +285,7 @@ jobs:
           cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
           cp output/cherry_x86_64/test/serial.log artifacts/ || true
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: cherry-x86_64
@@ -296,11 +306,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: board/x86_64/secureboot
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cherry-x86_64
           path: artifacts
