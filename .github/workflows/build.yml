@@ -69,9 +69,13 @@ jobs:
     outputs:
       build: ${{ steps.diff.outputs.build }}
     steps:
+      # No token left in the git configuration for `make check` to read:
+      # nothing here needs one, the repository being public (ls-remote below
+      # reads it without) and Buildroot on gitlab.com.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - id: diff
         env:
@@ -97,7 +101,8 @@ jobs:
           echo "build=$build" | tee -a "$GITHUB_OUTPUT"
 
       # A release by hand is named v<version>, cut from main, and new: a bad
-      # name fails here, not after the build.
+      # name fails here, not after the build. An origin that can't be read
+      # fails here rather than pass as no tag.
       - name: Check the release name
         if: inputs.release != ''
         env:
@@ -112,7 +117,8 @@ jobs:
             echo "::error::a release is cut from main, not from $GITHUB_REF_NAME"
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE" >/dev/null; then
+          tags=$(git ls-remote --tags origin "refs/tags/$RELEASE")
+          if [ -n "$tags" ]; then
             echo "::error::the tag $RELEASE exists already"
             exit 1
           fi
@@ -165,9 +171,13 @@ jobs:
           df -h /
           sudo sh -c 'rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup; docker image prune --all --force' >/dev/null 2>&1 </dev/null &
 
+      # No token left in the git configuration for the build's scripts to
+      # read, as in sdk.yml: nothing here needs one, the repository being
+      # public and Buildroot on gitlab.com.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # git describe provides the image version
+          persist-credentials: false
 
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
@@ -303,9 +313,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The keys only, and no token in the git configuration: the release
+      # goes out through gh, with GH_TOKEN, and nothing here pushes.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: board/x86_64/secureboot
+          persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
