@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "extensions": [
+    { "id": "openchamber-builtin-cherry-environments", "directory": "cherry-environments" }
+  ]
+}

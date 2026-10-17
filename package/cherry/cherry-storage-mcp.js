@@ -107,7 +107,7 @@ function view(facts) {
     const volumes = lvs.filter((lv) => lv.vg_name === vg.vg_name && !/[_[]/.test(lv.lv_name)).map((lv) => {
       const mountpoint = path.join(VOLUMES, vg.vg_name, lv.lv_name);
       const mounted = mounts.get(mountpoint);
-      const cvol = lvs.find((c) => c.vg_name === vg.vg_name && c.lv_name === `[${lv.lv_name}_cache_cvol]`);
+      const cvol = lvs.find((c) => c.vg_name === vg.vg_name && c.lv_name === `[${lv.lv_name}_cache_cpool]`);
       return {
         name: lv.lv_name, size: human(Number(lv.lv_size)), path: mountpoint, mounted: Boolean(mounted),
         ...(mounted && { used: human(mounted.used), available: human(mounted.available) }),

@@ -1,72 +1,22 @@
 #!/usr/bin/env node
-// package/cherry/cherry-machines-mcp.js speaks MCP over stdio, writes the
-// recipe that cherry-image reads, and drives cherry-image@.service and
-// machinectl as the README says: run with stand-ins for systemctl, machinectl
-// and busctl on PATH, which log their arguments and keep the machine's state
-// (images, running containers) in files, and the recipe and log directories
-// in a temporary one. Needs node, sh and coreutils' timeout; the server runs
-// on node too, or on $MCP_RUNTIME (e.g. bun, as on the image).
+// package/cherry/cherry-machines-mcp.js speaks MCP over stdio, offers the
+// image and environment verbs and nothing free-form, copies the profile into
+// the recipe that cherry-image reads, clones images into environments and
+// records them, and drives cherry-image@.service and machinectl as the README
+// says: run with the stand-ins of tests/machines-standins.js. Needs node, sh
+// and coreutils' timeout; the server runs on node too, or on $MCP_RUNTIME
+// (e.g. bun, as on the image).
 "use strict";
 const assert = require("assert");
 const { spawn } = require("child_process");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const { standins } = require("./machines-standins.js");
 
 const server = path.join(__dirname, "..", "package", "cherry", "cherry-machines-mcp.js");
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cherry-mcp-"));
-const dirs = Object.fromEntries(["bin", "recipes", "logs", "state"].map((d) => [d, path.join(tmp, d)]));
-Object.values(dirs).forEach((d) => fs.mkdirSync(d));
-const calls = path.join(tmp, "calls");
-
-// The machine's state, in files of $STATE with a name per line: images,
-// running containers, and dead ones (running, but never letting a shell in).
-const STANDINS = {
-  // cherry-image@<verb>:<name>.service: a log, and a failure for $FAIL_UNIT.
-  systemctl: `
-echo "systemctl $*" >>"$CALLS"
-unit=$3 instance=\${3#cherry-image@}; instance=\${instance%.service}
-printf 'line %s\\n' $(seq 1 100) >"$LOGS/$instance.log"
-echo "end of $instance" >>"$LOGS/$instance.log"
-[ "$unit" != "$FAIL_UNIT" ] || { echo "Job for $unit failed." >&2; exit 1; }`,
-  // shell runs the command here, through a stand-in pty: CRLF line ends, an
-  // escape sequence first, and nothing at all once stdin is at EOF, as
-  // systemd's pty forwarder ends then.
-  machinectl: `
-echo "machinectl $*" >>"$CALLS"
-[ "$1" != --no-ask-password ] || shift
-while case $1 in --setenv=*) export "\${1#--setenv=}" ;; *) false ;; esac; do shift; done
-case $1 in
-show-image) grep -qxF "$2" "$STATE/images" ;;
-remove) grep -qxF "$2" "$STATE/images" || { echo "No image '$2' known" >&2; exit 1; }
-	grep -qxF "$2" "$STATE/running" && { echo "$2 is running" >&2; exit 1; }
-	grep -vxF "$2" "$STATE/images" >"$STATE/i"; mv "$STATE/i" "$STATE/images" ;;
-start) grep -qxF "$2" "$STATE/images" || { echo "No image '$2' known" >&2; exit 1; }
-	echo "$2" >>"$STATE/running" ;;
-poweroff) [ -n "$KEEP_RUNNING" ] || { grep -vxF "$2" "$STATE/running" >"$STATE/r"; mv "$STATE/r" "$STATE/running"; } ;;
-terminate) grep -vxF "$2" "$STATE/running" >"$STATE/r"; mv "$STATE/r" "$STATE/running" ;;
--q) [ "$2" = shell ] && [ "$4" = /bin/sh ] && [ "$5" = -c ] || exit 1
-	grep -qxF "$3" "$STATE/running" && ! grep -qxF "$3" "$STATE/dead" ||
-		{ echo "Failed to get shell PTY: machine $3 is not up" >&2; exit 1; }
-	if timeout 0.5 cat >/dev/null; then exit 0; fi
-	printf '\\033]3008;start=x\\033\\\\'
-	/bin/sh -c "$6" "$7" "$8" 2>&1 | sed 's/$/\\r/' ;;
-*) exit 1 ;;
-esac`,
-  busctl: `
-echo "busctl $*" >>"$CALLS"
-case $6 in
-ListImages) printf '{"type":"a(ssbttto)","data":[[["web","directory",false,1,1700000000000000,123456,"/i/web"],["arch","directory",true,1,0,18446744073709551615,"/i/arch"]]]}\\n' ;;
-ListMachines) printf '{"type":"a(ssso)","data":[[[".host","host","","/m/host"]'
-	while read -r m; do printf ',["%s","container","nspawn","/m/%s"]' "$m" "$m"; done <"$STATE/running"
-	printf ']]}\\n' ;;
-*) exit 1 ;;
-esac`,
-};
-for (const [name, body] of Object.entries(STANDINS)) {
-  fs.writeFileSync(path.join(dirs.bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-}
+const world = standins("cherry-mcp-");
+const { dirs, reset, called, markImage, markEnvironment } = world;
 
 let failures = 0;
 let cases = 0;
@@ -77,8 +27,7 @@ function test(name, fn) {
 class Client {
   constructor() {
     this.child = spawn(process.env.MCP_RUNTIME || process.execPath, [server], {
-      env: { ...process.env, PATH: `${dirs.bin}:${process.env.PATH}`, CALLS: calls, STATE: dirs.state, LOGS: dirs.logs,
-        CHERRY_IMAGES_DIR: dirs.recipes, CHERRY_IMAGE_LOGS: dirs.logs },
+      env: { ...process.env, ...world.env },
       stdio: ["pipe", "pipe", "inherit"],
     });
     this.id = 0;
@@ -94,9 +43,7 @@ class Client {
     const id = ++this.id;
     return new Promise((resolve) => { this.pending.set(id, resolve); this.send({ jsonrpc: "2.0", id, method, params }); });
   }
-  async call(name, args, env) {
-    // Stand-ins read their switches from files, as the server's environment is fixed.
-    for (const key of ["FAIL_UNIT", "KEEP_RUNNING"]) fs.writeFileSync(path.join(dirs.state, key), env?.[key] ?? "");
+  async call(name, args) {
     const m = await this.request("tools/call", { name, arguments: args });
     assert(m.result, `no result: ${JSON.stringify(m)}`);
     return { text: m.result.content[0].text, isError: m.result.isError };
@@ -104,21 +51,8 @@ class Client {
   close() { this.child.stdin.end(); }
 }
 
-// The switches the stand-ins take from the state directory.
-for (const name of ["systemctl", "machinectl"]) {
-  const file = path.join(dirs.bin, name);
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("#!/bin/sh\n",
-    '#!/bin/sh\nFAIL_UNIT=$(cat "$STATE/FAIL_UNIT") KEEP_RUNNING=$(cat "$STATE/KEEP_RUNNING")\n'));
-}
-
-function reset(state = {}) {
-  fs.writeFileSync(calls, "");
-  for (const key of ["images", "running", "dead"]) {
-    fs.writeFileSync(path.join(dirs.state, key), (state[key] ?? []).map((i) => i + "\n").join(""));
-  }
-}
-const called = () => fs.readFileSync(calls, "utf8").trim().split("\n").filter(Boolean);
 const recipe = (...p) => path.join(dirs.recipes, ...p);
+const record = (name) => path.join(dirs.environments, name, "environment.conf");
 
 async function main() {
   const c = new Client();
@@ -135,46 +69,69 @@ async function main() {
     assert.deepStrictEqual((await c.request("ping")).result, {});
   });
 
-  await test("tools/list", async () => {
+  await test("tools/list: the verbs, nothing free-form", async () => {
     const { tools } = (await c.request("tools/list")).result;
-    assert.deepStrictEqual(tools.map((t) => t.name), ["list", "build", "start", "stop", "exec", "remove"]);
+    assert.deepStrictEqual(tools.map((t) => t.name),
+      ["list", "build", "remove_image", "log", "create", "start", "stop", "status", "remove"]);
     for (const t of tools) {
       assert.strictEqual(t.inputSchema.type, "object", t.name);
+      assert.strictEqual(t.inputSchema.additionalProperties, false, t.name);
       assert(t.description.length > 40, t.name);
       for (const key of t.inputSchema.required ?? []) assert(key in t.inputSchema.properties, `${t.name}: ${key}`);
     }
+    const build = tools.find((t) => t.name === "build");
+    assert.deepStrictEqual(Object.keys(build.inputSchema.properties).sort(), ["name", "profile", "replace"]);
+    assert.deepStrictEqual(build.inputSchema.required, ["name", "profile"]);
+    const create = tools.find((t) => t.name === "create");
+    assert.deepStrictEqual(Object.keys(create.inputSchema.properties).sort(), ["image", "name", "profile"]);
+    assert.deepStrictEqual(create.inputSchema.required, ["name"]);
   });
 
-  await test("errors", async () => {
+  await test("errors, and the tools that are gone", async () => {
     assert.strictEqual((await c.request("tools/call", { name: "nope", arguments: {} })).error.code, -32602);
     assert.strictEqual((await c.request("nope/nope")).error.code, -32601);
+    for (const gone of ["exec", "export", "shell"]) {
+      const m = await c.request("tools/call", { name: gone, arguments: { name: "web", command: "id" } });
+      assert.strictEqual(m.error?.code, -32602, `${gone}: ${JSON.stringify(m)}`);
+    }
+    assert.deepStrictEqual(called(), []);
   });
 
-  const full = {
-    name: "web", distribution: "debian", release: "trixie", packages: ["nginx-light", "curl"],
-    files: [
-      { path: "/etc/motd", content: "hello\n" },
-      { path: "//usr/bin/hi", content: "#!/bin/sh\necho hi\n", mode: "0755" },
-      { path: "/usr/share/blob", content: Buffer.from([0, 1, 255]).toString("base64"), encoding: "base64" },
-      { path: "/etc/systemd/system/multi-user.target.wants/nginx.service", symlink: "/usr/lib/systemd/system/nginx.service" },
-    ],
-    postinst: "systemctl enable systemd-networkd",
-    nspawn: "[Exec]\nEnvironment=MODE=test",
-  };
+  await test("list: images with their environments, environments with their image, the other machines", async () => {
+    reset({ images: ["base", "yarp", "handmade"], running: ["yarp"] });
+    markImage("base", "web");
+    markEnvironment("yarp", "base");
+    const r = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(Object.keys(r), ["images", "environments", "other", "running", "profiles"]);
+    assert.deepStrictEqual(r.images, [{ name: "base", type: "directory", readOnly: false, modified: "2023-11-14T22:13:20.000Z",
+      bytes: 123456, running: false, profile: { id: "web", title: "web title" }, environments: ["yarp"] }]);
+    assert.deepStrictEqual(r.environments, [{ name: "yarp", type: "directory", readOnly: false,
+      modified: "2023-11-14T22:13:20.000Z", bytes: 123456, running: true, image: "base", created: "2026-01-01T00:00:00.000Z" }]);
+    assert.deepStrictEqual(r.other, [{ name: "handmade", type: "directory", readOnly: false,
+      modified: "2023-11-14T22:13:20.000Z", bytes: 123456, running: false }]);
+    assert.deepStrictEqual(r.running, [{ name: "yarp", kind: "environment" }]);
+    assert.deepStrictEqual(r.profiles, [
+      { id: "plain", title: "plain", description: "", distribution: "arch", release: "", packages: [] },
+      { id: "web", title: "Web (local)", description: "", distribution: "debian", release: "trixie", packages: [] },
+    ]);
+  });
 
-  await test("build writes the recipe and starts cherry-image@build:", async () => {
+  await test("build copies the profile into the recipe and starts cherry-image@build:", async () => {
     reset();
+    fs.rmSync(path.join(dirs.local, "web"), { recursive: true });
     fs.mkdirSync(recipe("web", "extra", "old"), { recursive: true });
-    const r = await c.call("build", full);
+    const r = await c.call("build", { name: "web", profile: "web" });
     assert(!r.isError, r.text);
+    assert.match(r.text, /^Built the image web from the profile web\./);
     assert.match(r.text, /end of build:web/);
     assert.doesNotMatch(r.text, /line 50\n/, "more than the log's end");
     assert.strictEqual(fs.readFileSync(recipe("web", "image.conf"), "utf8"),
       "Distribution=debian\nRelease=trixie\nPackages=nginx-light curl\n");
+    assert.strictEqual(fs.readFileSync(recipe("web", "profile.conf"), "utf8"),
+      "Title=Web (image)\nDescription=nginx on Debian\nProfile=web\n");
     assert.strictEqual(fs.readFileSync(recipe("web", "extra", "etc", "motd"), "utf8"), "hello\n");
     assert.strictEqual(fs.statSync(recipe("web", "extra", "etc", "motd")).mode & 0o7777, 0o644);
     assert.strictEqual(fs.statSync(recipe("web", "extra", "usr", "bin", "hi")).mode & 0o7777, 0o755);
-    assert.deepStrictEqual([...fs.readFileSync(recipe("web", "extra", "usr", "share", "blob"))], [0, 1, 255]);
     assert.strictEqual(fs.readlinkSync(recipe("web", "extra", "etc", "systemd", "system", "multi-user.target.wants",
       "nginx.service")), "/usr/lib/systemd/system/nginx.service");
     assert.strictEqual(fs.readFileSync(recipe("web", "postinst"), "utf8"),
@@ -183,34 +140,31 @@ async function main() {
     assert.strictEqual(fs.readFileSync(recipe("web", "image.nspawn"), "utf8"), "[Exec]\nEnvironment=MODE=test\n");
     assert(!fs.existsSync(recipe("web", "extra", "old")), "the old recipe was not replaced");
     assert.deepStrictEqual(called(), ["systemctl start --no-ask-password cherry-image@build:web.service"]);
-  });
-
-  await test("build keeps a postinst's own #! line, and leaves out what is not given", async () => {
-    reset();
-    const r = await c.call("build", { name: "a1", distribution: "arch", postinst: "#!/bin/bash\necho hi" });
-    assert(!r.isError, r.text);
-    assert.strictEqual(fs.readFileSync(recipe("a1", "image.conf"), "utf8"), "Distribution=arch\nRelease=\n");
-    assert.strictEqual(fs.readFileSync(recipe("a1", "postinst"), "utf8"), "#!/bin/bash\necho hi\n");
-    assert(!fs.existsSync(recipe("a1", "image.nspawn")));
+    const list = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(list.images.map((i) => [i.name, i.profile]), [["web", { id: "web", title: "Web (image)" }]]);
+    const plain = await c.call("build", { name: "a1", profile: "plain" });
+    assert(!plain.isError, plain.text);
+    assert.strictEqual(fs.readFileSync(recipe("a1", "profile.conf"), "utf8"), "Profile=plain\n");
+    assert(!fs.existsSync(recipe("a1", "postinst")));
   });
 
   await test("build refuses bad arguments before writing anything", async () => {
     const bad = [
-      [{ ...full, name: "my_web" }, /bad image name/],
-      [{ ...full, name: "-web" }, /bad image name/],
-      [{ ...full, name: "w".repeat(49) }, /bad image name/],
-      [{ ...full, name: "bad1", distribution: "" }, /bad distribution/],
-      [{ ...full, name: "bad2", release: "-x" }, /bad release/],
-      [{ ...full, name: "bad3", packages: ["-o", "x"] }, /bad packages/],
-      [{ ...full, name: "bad4", packages: ["a b"] }, /bad packages/],
-      [{ ...full, name: "bad5", files: [{ path: "etc/motd", content: "" }] }, /bad file path/],
-      [{ ...full, name: "bad6", files: [{ path: "/etc/../../x", content: "" }] }, /bad file path/],
-      [{ ...full, name: "bad7", files: [{ path: "/", content: "" }] }, /bad file path/],
-      [{ ...full, name: "bad8", files: [{ path: "/x", content: "", mode: "u+x" }] }, /bad mode/],
-      [{ ...full, name: "bad9", files: [{ path: "/x" }] }, /no content/],
+      [{ name: "my_web", profile: "web" }, /bad name/],
+      [{ name: "-web", profile: "web" }, /bad name/],
+      [{ name: "w".repeat(49), profile: "web" }, /bad name/],
+      [{ name: "bad1", profile: "" }, /bad profile/],
+      [{ name: "bad2", profile: "Web" }, /bad profile/],
+      [{ name: "bad3", profile: "../web" }, /bad profile/],
+      [{ name: "bad4", profile: "nope" }, /no profile "nope"; the profiles are plain, web/],
+      [{ name: "bad5", profile: "empty" }, /no profile "empty"/],
+      [{ name: "bad6", profile: "web", packages: ["curl"] }, /build takes no packages/],
+      [{ name: "bad7", profile: "web", postinst: "id", files: [] }, /build takes no postinst, files/],
+      [{ name: "yarp", profile: "web" }, /yarp is an environment, not an image/],
     ];
     for (const [args, message] of bad) {
-      reset();
+      reset({ images: ["yarp"] });
+      markEnvironment("yarp", "base");
       const r = await c.call("build", args);
       assert(r.isError, `accepted: ${JSON.stringify(args)}`);
       assert.match(r.text, message);
@@ -219,85 +173,148 @@ async function main() {
     }
   });
 
-  await test("a failed build returns the log's end", async () => {
-    reset();
-    const r = await c.call("build", { ...full, name: "broken" }, { FAIL_UNIT: "cherry-image@build:broken.service" });
+  await test("a failed build returns the log's end, and log shows more", async () => {
+    reset({}, { FAIL_UNIT: "cherry-image@build:broken.service" });
+    const r = await c.call("build", { name: "broken", profile: "web" });
     assert(r.isError);
     assert.match(r.text, /cherry-image@build:broken\.service failed/);
     assert.match(r.text, new RegExp(`${dirs.logs}/build:broken\\.log`));
     assert.match(r.text, /line 99\nline 100\nend of build:broken/);
+    const l = await c.call("log", { name: "broken", lines: 3 });
+    assert(!l.isError, l.text);
+    assert.strictEqual(l.text, `${dirs.logs}/build:broken.log:\nline 99\nline 100\nend of build:broken`);
+    const none = await c.call("log", { name: "never" });
+    assert.strictEqual(none.text, `no log in ${dirs.logs}/build:never.log`);
+    assert((await c.call("log", { name: "../x" })).isError);
   });
 
-  await test("build with replace removes the image first", async () => {
+  await test("build with replace removes the image first, unless it has environments", async () => {
     reset({ images: ["web"] });
-    const r = await c.call("build", { ...full, replace: true });
+    markImage("web");
+    const r = await c.call("build", { name: "web", profile: "web", replace: true });
     assert(!r.isError, r.text);
     assert.deepStrictEqual(called(), ["machinectl show-image web", "machinectl --no-ask-password remove web",
       "systemctl start --no-ask-password cherry-image@build:web.service"]);
     reset({ images: ["web"], running: ["web"] });
-    const running = await c.call("build", { ...full, replace: true });
+    markImage("web");
+    const running = await c.call("build", { name: "web", profile: "web", replace: true });
     assert(running.isError && /web is running/.test(running.text), running.text);
     assert(!called().some((l) => l.startsWith("systemctl")), "built over a running image");
-  });
-
-  // Images never leave the machine: no tool writes one out.
-  await test("no export", async () => {
-    reset();
-    const m = await c.request("tools/call", { name: "export", arguments: { name: "web", format: "tar" } });
-    assert.strictEqual(m.error?.code, -32602, JSON.stringify(m));
-    assert.deepStrictEqual(called(), []);
-  });
-
-  await test("list", async () => {
-    reset({ running: ["web"] });
-    const r = JSON.parse((await c.call("list", {})).text);
-    assert.deepStrictEqual(r.images, [
-      { name: "web", type: "directory", readOnly: false, modified: "2023-11-14T22:13:20.000Z", bytes: 123456 },
-      { name: "arch", type: "directory", readOnly: true, modified: null, bytes: null },
-    ]);
-    assert.deepStrictEqual(r.running, [{ name: "web", class: "container", service: "nspawn" }]);
-    assert(r.recipes.includes("web") && r.recipes.includes("a1"), JSON.stringify(r.recipes));
-    assert.deepStrictEqual(Object.keys(r), ["images", "running", "recipes"]);
-  });
-
-  await test("start, exec, stop", async () => {
+    reset({ images: ["web", "yarp"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const held = await c.call("build", { name: "web", profile: "web", replace: true });
+    assert(held.isError && /web still has environments \(yarp\): remove them first/.test(held.text), held.text);
+    assert.deepStrictEqual(called().filter((l) => !l.includes("show-image")), []);
     reset({ images: ["web"] });
-    const started = await c.call("start", { name: "web" });
-    assert(!started.isError, started.text);
-    assert.strictEqual(started.text, "web is running");
-    assert(called().includes("machinectl --no-ask-password start web"), called().join("\n"));
+    markImage("web");
+    const kept = await c.call("build", { name: "web", profile: "web" });
+    assert(!kept.isError, kept.text);
+    assert(!called().some((l) => l.includes("remove")), "removed without replace");
+  });
 
-    const r = await c.call("exec", { name: "web", command: "echo one; echo two >&2; exit 3" });
+  await test("create clones an image into an environment, and records it", async () => {
+    reset({ images: ["web"] });
+    markImage("web");
+    const r = await c.call("create", { name: "yarp", image: "web" });
     assert(!r.isError, r.text);
-    assert.strictEqual(r.text, "exit status 3\none\ntwo");
-    const quoted = await c.call("exec", { name: "web", command: "printf '%s\\n' \"$0\" 'it'\"'\"'s'" });
-    assert.strictEqual(quoted.text, "exit status 0\nsh\nit's");
-    const env = await c.call("exec", { name: "web", command: "echo $TERM $SYSTEMD_PAGER $DEBIAN_FRONTEND" });
-    assert.strictEqual(env.text, "exit status 0\ndumb cat noninteractive");
-    const slow = await c.call("exec", { name: "web", command: "sleep 10", timeout: 1 });
-    assert(slow.isError && /timed out after 1 s/.test(slow.text), slow.text);
+    assert.strictEqual(r.text, "Created the environment yarp from the image web.");
+    assert(called().includes("machinectl --no-ask-password clone web yarp"), called().join("\n"));
+    assert(!called().some((l) => l.startsWith("systemctl")), "built an image that was there");
+    assert.match(fs.readFileSync(record("yarp"), "utf8"), /^Image=web\nCreated=\d{4}-.*\n$/);
+    const list = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(list.images.map((i) => [i.name, i.environments]), [["web", ["yarp"]]]);
+    assert.deepStrictEqual(list.environments.map((e) => [e.name, e.image]), [["yarp", "web"]]);
+    // From a machine made by hand, too.
+    reset({ images: ["handmade"] });
+    const other = await c.call("create", { name: "copy", image: "handmade" });
+    assert(!other.isError, other.text);
+    assert(fs.readFileSync(record("copy"), "utf8").startsWith("Image=handmade\n"));
+  });
 
-    const id = c.id + 1;
-    const pending = c.call("exec", { name: "web", command: "sleep 10" });
-    setTimeout(() => c.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }), 300);
-    const cancelled = await pending;
-    assert(cancelled.isError && /cancelled/.test(cancelled.text), cancelled.text);
+  await test("create from a profile builds the image first when there is none", async () => {
+    reset();
+    const r = await c.call("create", { name: "yarp", profile: "web" });
+    assert(!r.isError, r.text);
+    assert.match(r.text, /^Created the environment yarp from the image web\. The image was built first from the profile web\. Log, /);
+    assert.deepStrictEqual(called().filter((l) => !l.includes("show-image") && !l.startsWith("busctl")), [
+      "systemctl start --no-ask-password cherry-image@build:web.service",
+      "machinectl --no-ask-password clone web yarp",
+    ]);
+    assert.strictEqual(fs.readFileSync(recipe("web", "profile.conf"), "utf8"), "Title=Web (image)\nDescription=nginx on Debian\nProfile=web\n");
+    const before = called().length;
+    const again = await c.call("create", { name: "yarp2", profile: "web" });
+    assert.strictEqual(again.text, "Created the environment yarp2 from the image web.");
+    assert(!called().slice(before).some((l) => l.startsWith("systemctl")), "rebuilt an image that was there");
+  });
 
-    const stopped = await c.call("stop", { name: "web" });
-    assert.strictEqual(stopped.text, "web is stopped");
-    assert((await c.call("exec", { name: "web", command: "true" })).isError, "exec in a stopped container");
-    assert.strictEqual((await c.call("stop", { name: "web" })).text, "web is not running");
+  await test("create refuses what it must, before cloning", async () => {
+    reset({ images: ["web", "yarp", "busy"], running: ["busy"] });
+    markImage("web");
+    markImage("busy");
+    markEnvironment("yarp", "web");
+    const bad = [
+      [{ name: "yarp", image: "web" }, /yarp exists already/],
+      [{ name: "new", image: "ghost" }, /no image "ghost"/],
+      [{ name: "new", image: "yarp" }, /yarp is an environment, not an image/],
+      [{ name: "new", image: "busy" }, /busy is running/],
+      [{ name: "new" }, /give an image or a profile, not both/],
+      [{ name: "new", image: "web", profile: "web" }, /give an image or a profile, not both/],
+      [{ name: "new", profile: "nope" }, /no profile "nope"/],
+      [{ name: "bad name", image: "web" }, /bad name/],
+      [{ name: "new", image: "web", packages: [] }, /create takes no packages/],
+    ];
+    for (const [args, message] of bad) {
+      const r = await c.call("create", args);
+      assert(r.isError, `accepted: ${JSON.stringify(args)}`);
+      assert.match(r.text, message);
+      if (args.name !== "yarp") assert(!fs.existsSync(record(args.name)), `recorded ${args.name}`);
+    }
+    assert(!called().some((l) => l.includes("clone")), called().join("\n"));
+  });
+
+  await test("start, status, stop, on environments and not on images", async () => {
+    reset({ images: ["web", "yarp"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const image = await c.call("start", { name: "web" });
+    assert(image.isError && /web is an image: create an environment from it/.test(image.text), image.text);
+    assert(!called().some((l) => l.includes("start")), "started an image");
+
+    const started = await c.call("start", { name: "yarp" });
+    assert(!started.isError, started.text);
+    assert.strictEqual(started.text, "yarp is running");
+    assert(called().includes("machinectl --no-ask-password start yarp"), called().join("\n"));
+
+    const s = JSON.parse((await c.call("status", { name: "yarp" })).text);
+    assert.deepStrictEqual(s, { name: "yarp", kind: "environment", exists: true, running: true, image: "web",
+      created: "2026-01-01T00:00:00.000Z", system: "running", address: "10.0.0.5/28", failed: ["bad.service"] });
+    // The stand-in's echo unfolds the script's \n, so the call spans lines.
+    const calls = called().join("\n");
+    assert(calls.includes("--setenv=TERM=dumb") && calls.includes("-q shell yarp") && calls.includes("is-system-running"),
+      "status runs its fixed script through machinectl shell");
+    assert.deepStrictEqual(JSON.parse((await c.call("status", { name: "web" })).text),
+      { name: "web", kind: "image", exists: true, running: false, profile: { id: "web", title: "web title" } });
+    assert.deepStrictEqual(JSON.parse((await c.call("status", { name: "ghost" })).text),
+      { name: "ghost", kind: "other", exists: false, running: false });
+
+    const stopped = await c.call("stop", { name: "yarp" });
+    assert.strictEqual(stopped.text, "yarp is stopped");
+    assert.strictEqual((await c.call("stop", { name: "yarp" })).text, "yarp is not running");
+    assert.deepStrictEqual(JSON.parse((await c.call("status", { name: "yarp" })).text),
+      { name: "yarp", kind: "environment", exists: true, running: false, image: "web", created: "2026-01-01T00:00:00.000Z" });
+    assert((await c.call("status", { name: "-x" })).isError);
   });
 
   await test("stop terminates what does not shut down", async () => {
-    reset({ running: ["web"] });
-    const r = await c.call("stop", { name: "web", timeout: 1 }, { KEEP_RUNNING: "1" });
+    reset({ running: ["yarp"] }, { KEEP_RUNNING: "1" });
+    const r = await c.call("stop", { name: "yarp", timeout: 1 });
     assert.match(r.text, /terminated/);
     assert.deepStrictEqual(called().filter((l) => l.startsWith("machinectl")),
-      ["machinectl --no-ask-password poweroff web", "machinectl --no-ask-password terminate web"]);
+      ["machinectl --no-ask-password poweroff yarp", "machinectl --no-ask-password terminate yarp"]);
   });
 
-  await test("start fails for an image that is missing or does not come up", async () => {
+  await test("start fails for a machine that is missing or does not come up, and can be cancelled", async () => {
     reset({ images: ["dead"], dead: ["dead"] });
     const missing = await c.call("start", { name: "ghost" });
     assert(missing.isError && /No image 'ghost' known/.test(missing.text), missing.text);
@@ -306,21 +323,43 @@ async function main() {
     const bad = await c.call("start", { name: "-x" });
     assert(bad.isError && /bad machine name/.test(bad.text), bad.text);
     assert(!called().some((l) => l.includes("-x")), "called for -x");
+
+    const id = c.id + 1;
+    const pending = c.call("start", { name: "dead", timeout: 30 });
+    setTimeout(() => c.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }), 300);
+    const cancelled = await pending;
+    assert(cancelled.isError && /cancelled/.test(cancelled.text), cancelled.text);
   });
 
-  await test("remove", async () => {
-    reset({ images: ["web"] });
-    assert.strictEqual((await c.call("remove", { name: "web" })).text, "web removed");
-    assert.deepStrictEqual(called(), ["machinectl --no-ask-password remove web"]);
-    const again = await c.call("remove", { name: "web" });
-    assert(again.isError && /No image 'web' known/.test(again.text), again.text);
+  await test("remove takes environments and their records; remove_image takes images without environments", async () => {
+    reset({ images: ["web", "yarp"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const image = await c.call("remove", { name: "web" });
+    assert(image.isError && /web is an image: remove_image removes it/.test(image.text), image.text);
+    const held = await c.call("remove_image", { name: "web" });
+    assert(held.isError && /web still has environments \(yarp\): remove them first/.test(held.text), held.text);
+    const env = await c.call("remove_image", { name: "yarp" });
+    assert(env.isError && /yarp is an environment: remove removes it/.test(env.text), env.text);
+    assert(!called().some((l) => l.includes("remove ")), called().join("\n"));
+
+    assert.strictEqual((await c.call("remove", { name: "yarp" })).text, "yarp removed");
+    assert(!fs.existsSync(record("yarp")), "the record stayed");
+    assert.strictEqual((await c.call("remove_image", { name: "web" })).text, "web removed");
+    assert(fs.existsSync(recipe("web", "profile.conf")), "the recipe went with the image");
+    assert.deepStrictEqual(called().filter((l) => l.includes("remove ")),
+      ["machinectl --no-ask-password remove yarp", "machinectl --no-ask-password remove web"]);
+    const again = await c.call("remove", { name: "yarp" });
+    assert(again.isError && /No image 'yarp' known/.test(again.text), again.text);
+    reset({ images: ["handmade"] });
+    assert.strictEqual((await c.call("remove", { name: "handmade" })).text, "handmade removed");
   });
 
   c.close();
 }
 
 main().then(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+  world.remove();
   if (failures) {
     console.error(`mcp: ${failures} of ${failures + cases} cases failed`);
     process.exit(1);

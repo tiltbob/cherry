@@ -22,4 +22,5 @@ source "$BR2_EXTERNAL_CHERRY_PATH/package/rpm6/Config.in"
 source "$BR2_EXTERNAL_CHERRY_PATH/package/rpmstrap/Config.in"
 source "$BR2_EXTERNAL_CHERRY_PATH/package/shadow-useradd/Config.in"
 source "$BR2_EXTERNAL_CHERRY_PATH/package/toml11/Config.in"
+source "$BR2_EXTERNAL_CHERRY_PATH/package/ubuntu-keyring/Config.in"
 endmenu

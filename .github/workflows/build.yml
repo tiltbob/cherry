@@ -26,8 +26,10 @@ on:
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
       - 'tests/ceremony.sh'
+      - 'tests/extension.js'
       - 'tests/firewall.sh'
       - 'tests/image.sh'
+      - 'tests/machines-standins.js'
       - 'tests/mcp.js'
       - 'tests/storage-mcp.js'
       - 'tests/storage.py'
@@ -99,7 +101,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(mcp\.js|storage-mcp\.js|polkit\.js|scenarios\.py|storage\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(extension\.js|machines-standins\.js|mcp\.js|storage-mcp\.js|polkit\.js|scenarios\.py|storage\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi

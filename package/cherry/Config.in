@@ -19,6 +19,7 @@ config BR2_PACKAGE_CHERRY
 	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS # growing a volume
 	select BR2_PACKAGE_UTIL_LINUX
 	select BR2_PACKAGE_UTIL_LINUX_WIPEFS # claiming a disk
+	select BR2_PACKAGE_UBUNTU_KEYRING if BR2_PACKAGE_DEBOOTSTRAP # the ubuntu-noble profile
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
@@ -31,9 +32,17 @@ config BR2_PACKAGE_CHERRY
 	  stop, enter and remove them with machinectl, and start
 	  cherry-bootstrap@.service, which creates one as root with
 	  debootstrap, rpmstrap or pacstrap, and cherry-image@.service,
-	  which builds an image from the user's recipe (packages, files,
-	  a script run in it under systemd-nspawn). Images stay on the
+	  which builds an image from a recipe (packages, files, a
+	  script run in it under systemd-nspawn). Images stay on the
 	  machine that built them.
+
+	  On those, images and environments: an image is built from a
+	  profile in /usr/lib/cherry/profiles (recipes written by a
+	  person, one per distribution) or /var/lib/cherry/profiles,
+	  and never started; an environment is a clone of an image
+	  (machinectl clone), started, stopped and removed on its own.
+	  OpenChamber gets a built-in extension for them, Environments:
+	  a panel, the /env command and a service with the verbs.
 
 	  It manages storage too: cherry-storage@.service, which runs as
 	  root, claims disks for it, which erases them and makes each a
@@ -43,6 +52,7 @@ config BR2_PACKAGE_CHERRY
 	  /var/lib/cherry/volumes. cherry-storage.service unlocks,
 	  activates and mounts them at boot.
 
-	  OpenCode gets tools for all of it: MCP servers,
-	  cherry-machines-mcp and cherry-storage-mcp, and skills, in
-	  /etc/opencode.
+	  OpenCode gets tools for all of it, and nothing else: MCP
+	  servers, cherry-machines-mcp (the environment verbs) and
+	  cherry-storage-mcp, and skills, in /etc/opencode, whose
+	  permissions deny its other tools.

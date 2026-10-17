@@ -5,6 +5,7 @@
 # separated by colons, and the README's command for each tool does the rest:
 #
 #   systemctl start cherry-bootstrap@debian:trixie:mybox   # debootstrap
+#   systemctl start cherry-bootstrap@ubuntu:noble:mybox    # debootstrap, Ubuntu's keyring and archive
 #   systemctl start cherry-bootstrap@fedora:44:mybox       # rpmstrap, any profile
 #   systemctl start cherry-bootstrap@arch::mybox           # pacstrap
 #   machinectl start mybox
@@ -55,6 +56,9 @@ trap 'rm -rf "$dir"' EXIT
 case $distro in
 debian)
 	debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus "$release" "$dir" ;;
+ubuntu)
+	debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus \
+		--keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg "$release" "$dir" http://archive.ubuntu.com/ubuntu ;;
 arch)
 	systemctl start pacman-init.service
 	mkdir -p "$dir"

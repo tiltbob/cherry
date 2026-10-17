@@ -97,6 +97,12 @@ unset FAKE_FAIL
 [ ! -e "$machines/gone" ] || die "a failing debootstrap left its tree behind"
 grep -q "failing as told" "$LOGS_DIRECTORY/debian:trixie:gone.log" || die "the failing tool's output is not in the log"
 
+run 'ubuntu:noble:u1'
+[ "$rc" -eq 0 ] || die "ubuntu:noble:u1 failed: $out"
+expected="debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus --keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg noble $machines/u1 http://archive.ubuntu.com/ubuntu"
+[ "$(cat "$CALLS")" = "$expected" ] || die "ubuntu:noble:u1 called: $(cat "$CALLS")"
+[ -d "$machines/u1" ] || die "ubuntu:noble:u1 left no tree"
+
 run 'fedora:44:f1'
 [ "$rc" -eq 0 ] || die "fedora:44:f1 failed: $out"
 [ "$(cat "$CALLS")" = "rpmstrap fedora 44 $machines/f1" ] || die "fedora:44:f1 called: $(cat "$CALLS")"

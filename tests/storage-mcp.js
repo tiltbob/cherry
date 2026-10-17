@@ -66,7 +66,7 @@ const FACTS = {
   vgs: { report: [{ vg: [{ vg_name: "tank", vg_size: String(210 * GIB), vg_free: String(124 * GIB), vg_tags: "writeback",
     vg_extent_size: "4194304", pv_count: "3", lv_count: "2", vg_missing_pv_count: "0" }] }] },
   lvs: { report: [{ lv: [
-    { vg_name: "tank", lv_name: "[web_cache_cvol]", lv_size: String(6 * GIB), segtype: "linear", cache_mode: "" },
+    { vg_name: "tank", lv_name: "[web_cache_cpool]", lv_size: String(6 * GIB), segtype: "linear", cache_mode: "" },
     { vg_name: "tank", lv_name: "db", lv_size: String(20 * GIB), segtype: "linear", cache_mode: "" },
     { vg_name: "tank", lv_name: "web", lv_size: String(60 * GIB), segtype: "cache", cache_mode: "writeback" },
   ] }] },
