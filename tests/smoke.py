@@ -885,8 +885,14 @@ class Smoke:
         config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
         check('"path": "/etc/opencode/opencode.json"' in config and "machines-mcp.js" in config,
               f"OpenCode does not read /etc/opencode/opencode.json:\n{config}")
-        check('"*": "deny"' in config and '"machines_*": "allow"' in config,
-              f"OpenCode's permissions do not deny the agent's own tools:\n{config}")
+        # OpenCode reads the permission block into rules, printed in the file's order, and the last rule that matches
+        # wins: the deny of everything first, then what the agent may use.
+        documents = json.loads(config[config.index("["):])
+        system = next(d for d in documents if d.get("path") == "/etc/opencode/opencode.json")
+        rules = [(r["action"], r["resource"], r["effect"]) for r in system["info"]["permissions"]]
+        check(rules == [("*", "*", "deny"), ("machines_*", "*", "allow"), ("storage_*", "*", "allow"),
+                        ("skill", "*", "allow"), ("question", "*", "allow")],
+              f"OpenCode's permissions do not deny the agent's own tools:\n{rules}")
         vm.run("test -s /etc/opencode/skills/machine-images.md && test -s /usr/lib/cherry/environments.js")
         vm.run("test -s /usr/lib/cherry/profiles/debian-trixie/image.conf && "
                "test -x /usr/lib/cherry/profiles/debian-trixie/postinst")
