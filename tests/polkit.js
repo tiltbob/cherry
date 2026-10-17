@@ -29,6 +29,8 @@ function evaluate(user, id, details) {
 }
 
 const MACHINE1 = "org.freedesktop.machine1.";
+const MANAGE_MACHINES = MACHINE1 + "manage-machines";
+const MANAGE_IMAGES = MACHINE1 + "manage-images";
 const MANAGE_UNITS = "org.freedesktop.systemd1.manage-units";
 const NSPAWN = "systemd-nspawn@box.service";
 const BOOTSTRAP = "cherry-bootstrap@debian:trixie:box.service";
@@ -36,8 +38,44 @@ const yes = [];
 const notHandled = [];
 
 // machinectl, on the containers, but not on the host itself.
-for (const a of ["login", "shell", "open-pty", "manage-machines", "manage-images"]) yes.push(["cherry", MACHINE1 + a, {}]);
+for (const a of ["login", "shell", "open-pty"]) yes.push(["cherry", MACHINE1 + a, {}]);
 for (const a of ["host-login", "host-shell", "host-open-pty"]) notHandled.push(["cherry", MACHINE1 + a, {}]);
+// machined's manage-machines and manage-images, by the details it passes for each call (systemd 258's
+// src/machine/*-dbus.c; its *-varlink.c names the machine "name"). terminate, and kill: poweroff and reboot too.
+for (const machine of ["machine", "name"]) {
+  const m = (details) => Object.assign({ [machine]: "box" }, details);
+  for (const verb of ["terminate", "kill"]) yes.push(["cherry", MANAGE_MACHINES, m({ verb })]);
+  // Not copy or bind, which machined does as root on any host path: machinectl copy-to, a host file into the
+  // container to read there; copy-from, a container's file onto the host, e.g. root's authorized_keys; bind, a
+  // host directory into the container.
+  for (const [verb, src, dest] of [["copy", "/var/lib/sshd/etc/ssh/ssh_host_ed25519_key", "/key"],
+                                   ["copy", "/keys", "/var/roothome/.ssh/authorized_keys"],
+                                   ["bind", "/var/roothome", "/mnt"]]) {
+    notHandled.push(["cherry", MANAGE_MACHINES, m({ verb, src, dest })]);
+  }
+  // Nor its root directory's file descriptor, or unregistering it.
+  for (const verb of ["open_root_directory", "unregister"]) notHandled.push(["cherry", MANAGE_MACHINES, m({ verb })]);
+  // Nor a verb of manage-images, or none.
+  for (const verb of ["remove", "clone", undefined]) notHandled.push(["cherry", MANAGE_MACHINES, m({ verb })]);
+}
+// Nor the pool of images as a whole: machinectl clean, and set-limit with no image.
+notHandled.push(["cherry", MANAGE_MACHINES, { verb: "clean_pool", mode: "all" }]);
+notHandled.push(["cherry", MANAGE_MACHINES, { verb: "set_pool_limit" }]);
+notHandled.push(["cherry", MANAGE_MACHINES, {}]);
+// Images: remove, clone, rename, read-only and set-limit (whose details name the image "machine"), and update,
+// those three over varlink.
+yes.push(["cherry", MANAGE_IMAGES, { image: "box", verb: "remove" }]);
+yes.push(["cherry", MANAGE_IMAGES, { image: "box", verb: "clone", new_name: "box2" }]);
+yes.push(["cherry", MANAGE_IMAGES, { image: "box", verb: "rename", new_name: "box2" }]);
+yes.push(["cherry", MANAGE_IMAGES, { image: "box", verb: "mark_read_only", read_only: "1" }]);
+yes.push(["cherry", MANAGE_IMAGES, { machine: "box", verb: "set_limit" }]);
+yes.push(["cherry", MANAGE_IMAGES, { image: "box", verb: "update" }]);
+// But not the pool as a whole (over varlink), a verb of manage-machines, or none.
+notHandled.push(["cherry", MANAGE_IMAGES, { verb: "clean_pool", mode: "all" }]);
+notHandled.push(["cherry", MANAGE_IMAGES, { verb: "set_pool_limit" }]);
+for (const verb of ["copy", "bind", "kill", "terminate"]) notHandled.push(["cherry", MANAGE_IMAGES, { image: "box", verb }]);
+notHandled.push(["cherry", MANAGE_IMAGES, { image: "box" }]);
+notHandled.push(["cherry", MANAGE_IMAGES, {}]);
 // machinectl start/stop/restart: systemd-nspawn@ units.
 for (const verb of ["start", "stop", "restart"]) yes.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
 for (const verb of ["reload", "kill", "try-restart", "reload-or-restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
