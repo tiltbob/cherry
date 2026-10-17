@@ -51,6 +51,12 @@ grep -qx 'VERSION="test"' "$target/usr/lib/os-release" || die "os-release lacks 
 [ "$(readlink "$target/root")" = var/roothome ] || die "/root is not a symlink to var/roothome"
 [ "$(cat "$target/etc/hosts")" = "$(printf '127.0.0.1\tlocalhost')" ] ||
 	die "/etc/hosts is not just localhost: $(cat "$target/etc/hosts")"
+# Buildroot's own name lost its leading dash above; the Makefile's has none.
+BR2_EXTERNAL_CHERRY_VERSION=v0.0.1-3-g0123abc-dirty
+run
+[ "$rc" -eq 0 ] || die "a second run failed: $out"
+grep -qx 'VERSION="v0.0.1-3-g0123abc-dirty"' "$target/usr/lib/os-release" ||
+	die "os-release lacks the Makefile's version: $(cat "$target/usr/lib/os-release")"
 
 setup
 printf 'a bare Bun\n' >"$target/usr/bin/opencode"
