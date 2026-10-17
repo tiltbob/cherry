@@ -8,15 +8,18 @@
 # the firmware, which keeps a time-authenticated variable's data without its
 # signature, leaves setup mode once the PK is set (unless FAKE_STAY_SETUP), and
 # refuses the variable FAKE_FAIL names; chattr and systemctl record their calls.
+# Its scratch space is RUNTIME_DIRECTORY, as in the unit, left empty after
+# every run; without one it can make, it fails before anything else.
 set -eu
 cd "$(dirname "$0")/.."
 script=$PWD/package/cherry-secureboot/cherry-secureboot
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir "$tmp/bin" "$tmp/keys" "$tmp/expected"
+mkdir "$tmp/bin" "$tmp/keys" "$tmp/expected" "$tmp/run"
 export PATH="$tmp/bin:$PATH" CALLS="$tmp/calls" CHERRY_SECUREBOOT_KEYS="$tmp/keys" \
-	CHERRY_EFIVARS="$tmp/efivars" CHERRY_EVENTLOG="$tmp/binary_bios_measurements" FAKE_EVENTLOG="$tmp/eventlog"
+	CHERRY_EFIVARS="$tmp/efivars" CHERRY_EVENTLOG="$tmp/binary_bios_measurements" FAKE_EVENTLOG="$tmp/eventlog" \
+	RUNTIME_DIRECTORY="$tmp/run"
 efivars=$CHERRY_EFIVARS
 global=8be4df61-93ca-11d2-aa0d-00e098032b8c
 security=d719b2cb-3d3a-4596-a3bc-dad00e67656f
@@ -176,6 +179,7 @@ run() {
 	rc=$?
 	set -e
 	n=$((n + 1))
+	[ -z "$(ls -A "$RUNTIME_DIRECTORY" 2>/dev/null)" ] || die "left behind in its runtime directory: $(ls -A "$RUNTIME_DIRECTORY")"
 }
 calls() {
 	[ "$(cat "$CALLS")" = "$1" ] || die "expected the calls:
@@ -319,5 +323,17 @@ run
 [ "$rc" -eq 0 ] || die "failed: $out"
 says "The firmware has no Secure Boot."
 calls ""
+
+# No scratch space (early in boot, /tmp is read-only): a failure, in setup
+# mode as out of it, with nothing set and no reboot.
+for mode in 1 0; do
+	firmware "$mode" 0 "PK-$global" "$tmp/expected/PK"
+	RUNTIME_DIRECTORY=$tmp/none run
+	[ "$rc" -ne 0 ] || die "succeeded without scratch space: $out"
+	calls ""
+	case $out in
+	*"Secure Boot is"* | *"enrolled"*) die "reported without scratch space: $out" ;;
+	esac
+done
 
 echo "secureboot: $n cases passed"

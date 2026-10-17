@@ -106,6 +106,10 @@ CONFIG_HW_RANDOM_VIRTIO=y
 CONFIG_TCG_TPM=y
 CONFIG_TCG_TIS=y
 CONFIG_TCG_CRB=y
+# securityfs, where the firmware's TPM event log shows (/sys/kernel/security/
+# tpm0/binary_bios_measurements): cherry-secureboot finds the option ROMs to
+# enroll in it. TCG_TPM only implies it, and x86_64_defconfig leaves it off.
+CONFIG_SECURITYFS=y
 
 # /var on a LUKS2 disk whose key the TPM seals (cherry-var.service): dm-crypt
 # with LUKS2's cipher, aes-xts-plain64, on AES-NI or else the generic AES and

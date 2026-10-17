@@ -14,6 +14,9 @@ Before=sysinit.target shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/cherry-secureboot
+# Its scratch space, /run/cherry-secureboot: this early, /tmp is not mounted
+# yet, and the root filesystem is read-only.
+RuntimeDirectory=cherry-secureboot
 
 [Install]
 WantedBy=sysinit.target
