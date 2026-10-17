@@ -5,14 +5,10 @@ config BR2_PACKAGE_CHERRY
 	depends on BR2_PACKAGE_SYSTEMD_NSPAWN # cherry-image
 	depends on BR2_PACKAGE_SYSTEMD_POLKIT # its machinectl privileges
 	depends on BR2_PACKAGE_BUSYBOX_SHOW_OTHERS # coreutils, tar
-	depends on BR2_USE_MMU # coreutils, e2fsprogs, tar
+	depends on BR2_USE_MMU # coreutils, tar
 	depends on BR2_USE_WCHAR # coreutils, tar
-	select BR2_PACKAGE_ATTR # tar: --xattrs, for file capabilities
-	select BR2_PACKAGE_COREUTILS # cherry-image: cp --sparse, mv -T
-	select BR2_PACKAGE_E2FSPROGS # cherry-image: mkfs.ext4 for raw images
-	select BR2_PACKAGE_SYSTEMD_REPART # cherry-image: raw images
-	select BR2_PACKAGE_TAR # cherry-image: tarballs, the recipe
-	select BR2_PACKAGE_XZ # cherry-image: .tar.xz
+	select BR2_PACKAGE_COREUTILS # cherry-image: mv -T
+	select BR2_PACKAGE_TAR # cherry-image: the recipe
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
@@ -26,7 +22,7 @@ config BR2_PACKAGE_CHERRY
 	  cherry-bootstrap@.service, which creates one as root with
 	  debootstrap, rpmstrap or pacstrap, and cherry-image@.service,
 	  which builds an image from the user's recipe (packages, files,
-	  a script run in it under systemd-nspawn) or exports one as a
-	  tarball or a raw disk image. OpenCode gets tools for all of
-	  it: an MCP server, cherry-machines-mcp, and a skill, in
+	  a script run in it under systemd-nspawn). Images stay on the
+	  machine that built them. OpenCode gets tools for all of it:
+	  an MCP server, cherry-machines-mcp, and a skill, in
 	  /etc/opencode.

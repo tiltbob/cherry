@@ -11,7 +11,7 @@
 # OpenChamber app with it on the console once it is online; the user's
 # container privileges: polkit rules for machinectl, cherry-bootstrap@.service,
 # which creates containers for it as root, and cherry-image@.service, which
-# builds and exports images for it as root; and the OpenCode agent's tools for
+# builds images for it as root; and the OpenCode agent's tools for
 # them, in the system configuration directory /etc/opencode: the MCP server
 # cherry-machines-mcp, run on Bun, and the machine-images skill.
 CHERRY_DEPENDENCIES = openchamber

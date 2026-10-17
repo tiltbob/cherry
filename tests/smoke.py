@@ -38,8 +38,8 @@
   9. OpenCode reads its system configuration, /etc/opencode, and through the
      MCP server it names, as the cherry user in cherry.service's sandbox, a
      Debian image is built from a recipe (cherry-image@.service), booted with
-     its network up, entered, stopped, and exported as a tarball and a raw
-     disk image that systemd-nspawn runs, then removed (skipped when the guest
+     its network up, entered, stopped, and removed; cherry-image@ writes
+     nothing out, as images never leave the machine (skipped when the guest
      cannot reach deb.debian.org)
   10. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
@@ -902,28 +902,17 @@ class Smoke:
         check(re.search(r"^host0\S*\s+UP\s+\d+\.\d+\.\d+\.\d+/\d+", text, re.M), f"host0 has no address:\n{text}")
         check(self.mcp("stop", {"name": name}, timeout=180) == f"{name} is stopped", f"{name} did not stop")
 
-        # The tarball: owned by the cherry user, the image's tree, which systemd-nspawn runs once unpacked.
-        export = json.loads(self.mcp("export", {"name": name, "format": "tar"}, timeout=900))
-        tarball = export["path"]
-        check(tarball == f"/var/lib/cherry/exports/{name}.tar.xz", f"unexpected export: {export}")
-        check(vm.run(f"stat -c %U {tarball}") == "cherry", "the tarball is not the cherry user's")
-        check(vm.run(f"sha256sum {tarball} | cut -d ' ' -f 1") == export["sha256"], "the tarball's SHA-256 is wrong")
-        copy = "/var/lib/machines/smoke-copy"
-        vm.run(f"mkdir {copy} && tar --numeric-owner --xattrs -C {copy} -xJf {tarball} && rm {tarball}", timeout=300)
-        check(vm.run(f"systemd-nspawn -q --pipe --register=no -D {copy} cat /etc/motd") == motd,
-              "the unpacked tarball does not run")
-        vm.run(f"rm -rf {copy}")
-        # The raw image: a disk image that systemd-nspawn runs as is.
-        raw = json.loads(self.mcp("export", {"name": name, "format": "raw"}, timeout=900))["path"]
-        check(vm.run(f"systemd-nspawn -q --pipe --register=no --image={raw} cat /etc/motd") == motd,
-              "the raw image does not run")
-        log(f"exported {name}: " + vm.run(f"du -h --apparent-size {raw} | cut -f 1") + " raw, sparse in "
-            + vm.run(f"du -h {raw} | cut -f 1"))
+        # Images never leave the machine: cherry-image@ takes no export verb, and writes nothing out.
+        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{name}.service", check_rc=False)
+        check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
+              f"cherry-image@tar:{name} as cherry did not fail on its instance alone: {out}")
+        rc, _ = vm.run("test -e /var/lib/cherry/exports", check_rc=False)
+        check(rc != 0, "cherry-image@ wrote an export")
 
         check(self.mcp("remove", {"name": name}) == f"{name} removed", f"{name} was not removed")
         rc, _ = vm.run(f"test -e {root} || test -e {root}.nspawn", check_rc=False)
         check(rc != 0, "the image or its settings are still there")
-        vm.run(f"rm -rf /var/lib/cherry/images/{name} {raw}")
+        vm.run(f"rm -rf /var/lib/cherry/images/{name}")
 
     def s10_zram(self):
         vm = self.vm
