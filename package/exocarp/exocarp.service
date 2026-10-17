@@ -1,0 +1,44 @@
+[Unit]
+# sshd's host key agent, started by exocarp.socket at sshd's first connection:
+# it creates the host key in the TPM again (a TPM command, from the TPM's seed;
+# nothing is stored) and signs sshd's key exchanges with it, in the ssh-agent
+# protocol. Only root reaches the socket.
+Description=Cherry SSH Host Key Agent
+Documentation=https://github.com/tiltbob/cherry#ssh-host-key
+Requires=exocarp.socket
+After=exocarp.socket
+
+[Service]
+Type=exec
+User=exocarp
+Group=exocarp
+ExecStart=/usr/libexec/exocarp
+
+# Hardening: the TPM, through the kernel's resource manager, is all it needs;
+# the socket comes from systemd.
+CapabilityBoundingSet=
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077

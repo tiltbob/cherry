@@ -38,7 +38,7 @@ checks it out).
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
 | `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys) |
-| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
+| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
 | `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`; each one's docstring is its manual |
 | `tests/` | the checks that `make check` runs, one file each, and `smoke.py`, the end-to-end test in QEMU |
@@ -76,8 +76,9 @@ is, what runs it and what it needs. Read that before the code.
   `io.systemd.nat`. What comes in is the README's list, and nothing more:
   `tests/firewall.sh` and the smoke test pin it.
 - **A TPM 2.0 is mandatory.** The machine ID and hostname come from its
-  endorsement key, in `/init`, before systemd starts. Without one, boot stops
-  at `cherry-no-tpm.target`.
+  endorsement key, in `/init`, before systemd starts, and sshd's host key is
+  its primary key, which `exocarp` signs with: no host key is stored. Without
+  one, boot stops at `cherry-no-tpm.target`.
 - **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
   committed public half of keys that live on a Nitrokey HSM 2 and in the
   `release` environment's secret. Never regenerate, edit or "fix" them;
@@ -128,17 +129,18 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
 | `var` | `cherry-var.service` claims only a blank disk, and unlocks the right partition | |
 | `storage` | `cherry-storage` claims only the disks it may, and drives LVM as it should, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
+| `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
-`image`, `firewall`, `ceremony`); `package`, `flake8` and `syntax` fail
-without theirs. CI installs all of them (`build.yml`, "Install check tools").
-An agent sandbox usually has python3, node, make, git, systemd and openssl,
-and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the submodule: then
-`make -k check` runs eleven checks, skips three and fails three for want of
-tools. Get the submodule with `git submodule update --init --depth 1
-buildroot` and install what you can; in the pull request, say which checks
-ran.
+`image`, `firewall`, `ceremony`, `exocarp`); `package`, `flake8` and `syntax`
+fail without theirs. CI installs all of them (`build.yml`, "Install check
+tools"). An agent sandbox usually has python3, node, make, git, systemd and
+openssl, and lacks shellcheck, busybox, `ip`, softhsm2, opensc, swtpm,
+libtss2-dev and the submodule: then `make -k check` runs eleven checks, skips
+four and fails three for want of tools. Get the submodule with
+`git submodule update --init --depth 1 buildroot` and install what you can;
+in the pull request, say which checks ran.
 
 ### The build and the smoke test
 
@@ -342,6 +344,7 @@ two defconfigs' toolchain options must stay the same.
 |---|---|---|---|
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
 | Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s3, s11 | Machine identity |
+| SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s3, s11, s13 | SSH host key |
 | `/var` on an encrypted disk | `usr/lib/cherry/var`, `cherry-var.service`, `usr/lib/cherry/repart.d/` | `tests/var.sh`, s13 | Disks |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |

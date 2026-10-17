@@ -26,6 +26,7 @@ on:
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
       - 'tests/ceremony.sh'
+      - 'tests/exocarp.py'
       - 'tests/firewall.sh'
       - 'tests/image.sh'
       - 'tests/mcp.js'
@@ -99,7 +100,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(mcp\.js|storage-mcp\.js|polkit\.js|scenarios\.py|storage\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(mcp\.js|storage-mcp\.js|polkit\.js|scenarios\.py|storage\.py|exocarp\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -133,7 +134,10 @@ jobs:
       # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit and
       # MCP tests node, which the runner has; the firewall and cherry-image
       # tests busybox and user namespaces, which Ubuntu's AppArmor keeps from
-      # unprivileged users unless told otherwise, and the firewall test nft.
+      # unprivileged users unless told otherwise, and the firewall test nft;
+      # the host key agent's test a C compiler, which the runner has, tpm2-tss's
+      # development files, swtpm, tpm2-tools and sshd, with the ssh client the
+      # runner has.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -142,7 +146,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static softhsm2 opensc
+            nftables busybox-static softhsm2 opensc \
+            libtss2-dev swtpm tpm2-tools openssh-server
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check

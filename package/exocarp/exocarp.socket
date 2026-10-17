@@ -1,0 +1,25 @@
+[Unit]
+# sshd's host key agent (/usr/libexec/exocarp): the host key is a key of the
+# TPM, which this socket's service signs with. Before the socket is bound, the
+# public key is written for sshd's HostKey, from the TPM; sshd.service requires
+# this socket and starts after it (sshd.service.d/10-exocarp.conf).
+Description=Cherry SSH Host Key Agent Socket
+Documentation=https://github.com/tiltbob/cherry#ssh-host-key
+# The TPM as udev set it up: /dev/tpmrm0 for the tss group, which the exocarp
+# user is in (tpm2-tss's tpm-udev.rules).
+After=tpm2.target
+
+[Socket]
+# For root alone: sshd connects as root. Whoever can connect can have the
+# machine's host key sign anything.
+ListenStream=/run/exocarp/socket
+SocketMode=0600
+# The public key, from the TPM, in OpenSSH's format: /run/exocarp is this
+# socket's, so it lasts as long as the socket, the whole boot.
+RuntimeDirectory=exocarp
+User=exocarp
+Group=exocarp
+ExecStartPre=/usr/libexec/exocarp -p /run/exocarp/ssh_host_ecdsa_key.pub
+
+[Install]
+WantedBy=sockets.target
