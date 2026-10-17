@@ -114,8 +114,7 @@ release tags. `make -k check` runs on after a
 failure; `make check-<name>` runs one. They need shellcheck, flake8,
 python3-magic, python3-yaml, systemd's `systemd-analyze` and openssl; node for
 the polkit rules, nft, ip, busybox and user namespaces for the firewall, and
-softhsm2, opensc and pkcs11-provider for the ceremony (each skipped without
-them).
+softhsm2 and opensc for the ceremony (each skipped without them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -415,7 +414,8 @@ enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
 **The ceremony,** once, on a computer with the Nitrokey plugged in:
 
 ```sh
-apt install opensc pkcs11-provider    # pkcs11-tool, sc-hsm-tool, OpenSSL's PKCS#11 provider
+# pkcs11-tool and sc-hsm-tool (dnf and pacman too)
+apt install opensc
 # Initialize the Nitrokey, which erases it, with a key share to back up its
 # keys with. It ships with the SO PIN 3537363231383830 and the PIN 648219:
 # change both afterwards, as Nitrokey's documentation shows.
@@ -424,23 +424,42 @@ sc-hsm-tool --create-dkek-share dkek-share.pbe
 sc-hsm-tool --import-dkek-share dkek-share.pbe
 # PK, KEK and the CA on the Nitrokey, their files in board/x86_64/secureboot/:
 scripts/secureboot.py init
+# The release environment, which will hold the release key, open to main and
+# the v* tags only (or Settings, Environments, in the repository on GitHub):
+gh api -X PUT repos/tiltbob/cherry/environments/release \
+  -F 'deployment_branch_policy[protected_branches]=false' \
+  -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name='v*' -f type=tag
 # The release key: its certificate in board/x86_64/secureboot/, the key itself
-# straight into the release environment's secret.
-scripts/secureboot.py issue --key-out - | gh secret set SECUREBOOT_KEY --env release
+# into the release environment's secret, through memory only, and only when
+# issue succeeded (in a pipe, gh would store nothing as the secret).
+key=$(scripts/secureboot.py issue --key-out -) && printf '%s\n' "$key" | gh secret set SECUREBOOT_KEY --env release
 git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
 ```
 
+- Everything on the Nitrokey goes through OpenSC's `pkcs11-tool`: it
+  generates the keys and makes their signatures, and the script puts the
+  certificates and signed updates together around them.
 - The PIN is asked once per command (or taken from `CHERRY_HSM_PIN`). With
   other tokens plugged in, pass `--token` with the Nitrokey's label as
   `pkcs11-tool -L` shows it; `--module` names another PKCS#11 module than
   OpenSC's.
+- `init` never reuses a key on the token. Should it stop partway, it removes
+  the files it wrote and prints the `pkcs11-tool` commands that delete what
+  it generated: run them, then `init` again.
+- A wrong PIN counts: the Nitrokey blocks it after three in a row
+  (`sc-hsm-tool` shows the tries left), and the SO PIN unblocks it. Both
+  commands check the PIN first, and `issue` that the token holds the CA's
+  key, before anything else.
 - **Back up** the three keys, wrapped by the key share: `sc-hsm-tool
   --wrap-key <file> --key-reference <n>` for each (`pkcs15-tool -D` lists
   their references). A second Nitrokey initialized with the same share takes
   them with `--unwrap-key`. Keep the share and the wrapped keys offline, and
   apart.
-- **The release environment** (Settings, Environments): limit its deployment
-  branches and tags to `main` and `v*`, so that only release runs see the key.
+- **The release environment** must exist before `gh secret set` can store
+  the key in it. Open to `main` and the `v*` tags only, it keeps the key
+  from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
 

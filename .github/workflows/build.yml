@@ -120,10 +120,10 @@ jobs:
 
       # The checks: Buildroot's check-package needs the submodule, shellcheck,
       # flake8 and python3-magic; the others python3-yaml, systemd-analyze and
-      # openssl; the key ceremony's a SoftHSM token, OpenSC and OpenSSL's
-      # pkcs11-provider; the polkit test node, which the runner has; the
-      # firewall test nft, busybox and user namespaces, which Ubuntu's
-      # AppArmor keeps from unprivileged users unless told otherwise.
+      # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit
+      # test node, which the runner has; the firewall test nft, busybox and
+      # user namespaces, which Ubuntu's AppArmor keeps from unprivileged users
+      # unless told otherwise.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -132,7 +132,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static softhsm2 opensc pkcs11-provider
+            nftables busybox-static softhsm2 opensc
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
