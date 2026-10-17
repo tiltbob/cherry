@@ -571,7 +571,11 @@ class Smoke:
         check(" - btrfs " in var, f"/var is not a btrfs: {var}")
         check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
         dm = vm.run("grep -lx cherry-var /sys/class/block/dm-*/dm/name | cut -d / -f 5")
-        check(var.split()[2] == vm.run(f"cat /sys/class/block/{dm}/dev"), f"/var is not on {dm}, cherry-var: {var}")
+        # The mount's device number is btrfs's own (an anonymous one per subvolume), not the block device's: the
+        # source names the device, which is the cherry-var mapping.
+        source = var.split(" - ")[1].split()[1]
+        check(source == "/dev/mapper/cherry-var", f"/var is not on /dev/mapper/cherry-var: {var}")
+        check(vm.run("readlink -f /dev/mapper/cherry-var") == f"/dev/{dm}", f"/dev/mapper/cherry-var is not {dm}")
         check(vm.run(f"cat /sys/class/block/{dm}/dm/uuid").startswith("CRYPT-LUKS2-"), "cherry-var is not LUKS2")
         check(vm.run(f"ls /sys/class/block/{dm}/slaves") == partition, f"cherry-var is not on {partition}")
         vm.run(f"grep -qx PARTNAME=cherry-var /sys/class/block/{partition}/uevent")
