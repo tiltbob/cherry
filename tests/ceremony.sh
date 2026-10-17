@@ -4,6 +4,8 @@
 # directory. Without OpenSSL's provider, init stops before it touches the
 # token; stopped after a key, it removes its files and prints the commands that
 # delete what it generated, which then refuses to run over until they ran.
+# issue refuses a wrong PIN, a token without the CA's key, and one whose key of
+# that name is not the CA's, before it hands out a key.
 # init writes the six files and check verifies them; init refuses
 # to run again, over the files or over the keys on the token; issue writes
 # release.crt and its key, to a new file or stdout; check catches a tampered
@@ -122,6 +124,22 @@ refused "the token holds cherry-pk, cherry-kek, cherry-db already"
 [ ! -e "$keys/PK.auth" ] || die "init over the token's keys wrote files"
 mv "$tmp/first" "$keys"
 
+# issue checks the PIN and that the token holds the CA's key; OpenSSL, that this is
+# the key of db.crt; all before the key goes out or release.crt is written.
+CHERRY_HSM_PIN=999999 token issue --key-out "$tmp/release.key"
+refused "cannot log in to the token"
+refused "CKR_PIN_INCORRECT"
+softhsm2-util --init-token --free --label Other --so-pin 12345678 --pin "$CHERRY_HSM_PIN" >/dev/null
+sb issue --module "$module" --token Other --key-out "$tmp/release.key"
+refused "the token holds no cherry-db"
+pkcs11-tool --module "$module" --token-label Other --login --pin "$CHERRY_HSM_PIN" --keypairgen \
+	--key-type rsa:2048 --label cherry-db --id "$(printf cherry-db | od -An -tx1 | tr -d ' \n')" >/dev/null 2>&1
+sb issue --module "$module" --token Other --key-out "$tmp/release.key"
+refused "Issuer CA certificate and key do not match"
+if [ -e "$tmp/release.key" ] || [ -e "$keys/release.crt" ]; then
+	die "a refused issue wrote the key or release.crt"
+fi
+
 token issue --key-out "$tmp/release.key"
 ok
 [ "$(stat -c %a "$tmp/release.key")" = 600 ] || die "the release key is not private to its owner"
@@ -135,7 +153,8 @@ case $out in *"issued release.crt"*) ;; *) die "check did not cover release.crt:
 token issue --key-out "$tmp/release.key"
 refused "exists"
 set +e
-python3 scripts/secureboot.py --dir "$keys" issue --module "$module" --key-out - >"$tmp/stdout.key" 2>/dev/null
+python3 scripts/secureboot.py --dir "$keys" issue --module "$module" --token "Cherry Secure Boot" --key-out - \
+	>"$tmp/stdout.key" 2>/dev/null
 rc=$?
 set -e
 ok

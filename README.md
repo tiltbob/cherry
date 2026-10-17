@@ -417,6 +417,13 @@ sc-hsm-tool --create-dkek-share dkek-share.pbe
 sc-hsm-tool --import-dkek-share dkek-share.pbe
 # PK, KEK and the CA on the Nitrokey, their files in board/x86_64/secureboot/:
 scripts/secureboot.py init
+# The release environment, which will hold the release key, open to main and
+# the v* tags only (or Settings, Environments, in the repository on GitHub):
+gh api -X PUT repos/tiltbob/cherry/environments/release \
+  -F 'deployment_branch_policy[protected_branches]=false' \
+  -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f name='v*' -f type=tag
 # The release key: its certificate in board/x86_64/secureboot/, the key itself
 # straight into the release environment's secret.
 scripts/secureboot.py issue --key-out - | gh secret set SECUREBOOT_KEY --env release
@@ -430,13 +437,18 @@ git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
 - `init` never reuses a key on the token. Should it stop partway, it removes
   the files it wrote and prints the `pkcs11-tool` commands that delete what
   it generated: run them, then `init` again.
+- A wrong PIN counts: the Nitrokey blocks it after three in a row
+  (`sc-hsm-tool` shows the tries left), and the SO PIN unblocks it. Both
+  commands check the PIN first, and `issue` that the token holds the CA's
+  key, before anything else.
 - **Back up** the three keys, wrapped by the key share: `sc-hsm-tool
   --wrap-key <file> --key-reference <n>` for each (`pkcs15-tool -D` lists
   their references). A second Nitrokey initialized with the same share takes
   them with `--unwrap-key`. Keep the share and the wrapped keys offline, and
   apart.
-- **The release environment** (Settings, Environments): limit its deployment
-  branches and tags to `main` and `v*`, so that only release runs see the key.
+- **The release environment** must exist before `gh secret set` can store
+  the key in it. Open to `main` and the `v*` tags only, it keeps the key
+  from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
 

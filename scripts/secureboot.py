@@ -219,12 +219,22 @@ class Token:
         with open(os.open(self.pin_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
             f.write(pin)
         self.env["CHERRY_HSM_PIN"] = pin
+        # The PIN, checked once by pkcs11-tool, which says why a login fails: OpenSSL only finds no key.
+        p = subprocess.run(self.command("--list-objects", "--type", "privkey"), capture_output=True, env=self.env)
+        if p.returncode != 0:
+            err = p.stderr.decode(errors="replace").strip()
+            hint = (" A Nitrokey HSM 2 blocks its PIN after three wrong ones in a row; sc-hsm-tool shows the tries "
+                    "left." if "CKR_PIN_" in err else "")
+            fail(f"cannot log in to the token.{hint}\n" + "\n".join(err.splitlines()[-3:]))
 
-    def tool(self, *args):
+    def command(self, *args):
         cmd = ["pkcs11-tool", "--module", self.module]
         if self.label:
             cmd += ["--token-label", self.label]
-        return run(cmd + ["--login", "--pin", "env:CHERRY_HSM_PIN", *args], env=self.env).decode()
+        return cmd + ["--login", "--pin", "env:CHERRY_HSM_PIN", *args]
+
+    def tool(self, *args):
+        return run(self.command(*args), env=self.env).decode()
 
     def labels(self, kind):
         """The labels of the token's objects of a kind: privkey, pubkey or cert."""
@@ -337,11 +347,15 @@ def cmd_issue(args):
         fail(f"{args.key_out} exists")
     with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
         token = Token(args, tmp)
+        label = KEYS["db"][0]
+        if label not in token.labels("privkey"):
+            fail(f"the token holds no {label}, the key of {ca}: is it the token init used? --token picks one, by "
+                 "its label as pkcs11-tool -L shows it")
         key = os.path.join(tmp, "release.key")
         run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key])
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         crt = os.path.join(tmp, "release.crt")
-        token.openssl("req", "-new", "-x509", "-key", key, "-CA", ca, "-CAkey", token.key_uri(KEYS["db"][0]),
+        token.openssl("req", "-new", "-x509", "-key", key, "-CA", ca, "-CAkey", token.key_uri(label),
                       "-subj", f"/CN=Cherry Release Signing {stamp}/", "-sha256", "-days", str(args.days),
                       "-config", write_config(tmp, RELEASE_EXTENSIONS), "-extensions", "ext", "-out", crt)
         with open(key, "rb") as f:
