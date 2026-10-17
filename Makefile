@@ -79,7 +79,7 @@ test:
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
 	check-postbuild check-firewall check-secureboot check-ceremony check-var \
-	check-version
+	check-storage check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -124,11 +124,12 @@ check-bootstrap:
 check-image:
 	tests/image.sh
 
-# OpenCode's MCP server writes the recipe and drives cherry-image@ and
-# machinectl as it should (skipped without node).
+# OpenCode's MCP servers: machines writes the recipe and drives cherry-image@
+# and machinectl as it should, storage starts the cherry-storage@ instances it
+# should and shows what they found (skipped without node).
 check-mcp:
-	@if command -v node >/dev/null 2>&1; then node tests/mcp.js; \
-	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-machines-mcp.js unchecked)"; fi
+	@if command -v node >/dev/null 2>&1; then node tests/mcp.js && node tests/storage-mcp.js; \
+	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-*-mcp.js unchecked)"; fi
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:
@@ -153,6 +154,10 @@ check-ceremony:
 # cherry-var.service claims only a blank disk, and unlocks the right partition.
 check-var:
 	tests/var.sh
+
+# cherry-storage claims only the disks it may, and drives LVM as it should.
+check-storage:
+	python3 tests/storage.py
 
 # The image is named after the nearest release tag, and a given name wins.
 check-version:

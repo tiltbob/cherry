@@ -122,6 +122,15 @@ CONFIG_CRYPTO_XTS=y
 CONFIG_CRYPTO_AES_NI_INTEL=y
 CONFIG_CRYPTO_USER_API_SKCIPHER=y
 
+# Storage pools (cherry-storage): LVM volume groups of claimed disks, each a
+# LUKS2 volume like /var's. Volumes are linear LVs; on a pool with SSDs, each
+# is cached on them (dm-cache, its smq policy, which also flushes a writeback
+# cache before it is detached). pvmove, which moves a disk's data off before
+# it leaves a pool, mirrors it (dm-mirror).
+CONFIG_DM_CACHE=y
+CONFIG_DM_CACHE_SMQ=y
+CONFIG_DM_MIRROR=y
+
 # Compressed swap in RAM (cherry-zram-swap.service). Everything, the root
 # filesystem and /var included, is in RAM; under memory pressure, the kernel
 # compresses cold pages, tmpfs ones too, into /dev/zram0 with zstd.

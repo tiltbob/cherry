@@ -1,0 +1,17 @@
+[Unit]
+Description=Cherry: Storage %i
+Documentation=https://github.com/tiltbob/cherry#storage
+# For the cherry user, which may start this unit (see 50-cherry.rules) but not
+# touch a disk; `systemctl start` returns when the operation is done, and the
+# log is readable at /var/log/cherry-storage/<instance>.log (list's JSON at
+# list.json). One operation at a time: another one fails at once.
+After=cherry-storage.service
+# The log is the record: a failed operation is not left among the failed
+# units, which the cherry user could not reset.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cherry-storage %i
+LogsDirectory=cherry-storage
+LogsDirectoryMode=0755

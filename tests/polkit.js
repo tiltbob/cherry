@@ -35,6 +35,7 @@ const MANAGE_UNITS = "org.freedesktop.systemd1.manage-units";
 const NSPAWN = "systemd-nspawn@box.service";
 const BOOTSTRAP = "cherry-bootstrap@debian:trixie:box.service";
 const IMAGE = "cherry-image@build:box.service";
+const STORAGE = "cherry-storage@claim:sdb:0123456789ab.service";
 const yes = [];
 const notHandled = [];
 
@@ -81,20 +82,23 @@ notHandled.push(["cherry", MANAGE_IMAGES, {}]);
 for (const verb of ["start", "stop", "restart"]) yes.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
 for (const verb of ["reload", "kill", "try-restart", "reload-or-restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN, verb }]);
 // Creating a container: starting cherry-bootstrap@, nothing else; building an image: starting cherry-image@,
-// nothing else.
-for (const unit of [BOOTSTRAP, IMAGE]) {
+// nothing else; storage: starting cherry-storage@, nothing else.
+for (const unit of [BOOTSTRAP, IMAGE, STORAGE]) {
   yes.push(["cherry", MANAGE_UNITS, { unit, verb: "start" }]);
   for (const verb of ["stop", "restart", "kill"]) notHandled.push(["cherry", MANAGE_UNITS, { unit, verb }]);
 }
 // No other unit, however it is named.
 for (const unit of ["sshd.service", "cherry.service", "cherry-connect-url.service", "systemd-nspawn.service",
                     "xsystemd-nspawn@box.service", "systemd-nspawnd@box.service", "cherry-bootstrap.service",
-                    "cherry-image.service", "xcherry-image@build:box.service"]) {
+                    "cherry-image.service", "xcherry-image@build:box.service",
+                    // The boot unit that mounts the volumes, which a stop would unmount.
+                    "cherry-storage.service", "xcherry-storage@list.service"]) {
   notHandled.push(["cherry", MANAGE_UNITS, { unit, verb: "start" }]);
 }
 notHandled.push(["cherry", MANAGE_UNITS, {}]);
 notHandled.push(["cherry", MANAGE_UNITS, { verb: "start" }]);
 notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN }]);
+for (const verb of ["stop", "restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: "cherry-storage.service", verb }]);
 // Nothing beyond containers: no unit files, no power.
 notHandled.push(["cherry", "org.freedesktop.systemd1.manage-unit-files", { unit: NSPAWN, verb: "enable" }]);
 notHandled.push(["cherry", "org.freedesktop.login1.power-off", {}]);
