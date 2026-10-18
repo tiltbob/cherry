@@ -49,7 +49,7 @@ change it, `manage-storage`.
   volume gets a share of the cache as large as its share of the data disks.
   The cache is **writethrough** unless the user chose **writeback**: faster
   writes, but a cache disk that dies loses what it had not written back yet.
-- **A volume** is a logical volume on the pool's data disks, holding ext4
+- **A volume** is a logical volume on the pool's data disks, holding btrfs
   that you own, mounted on `/var/lib/cherry/volumes/<pool>/<volume>` now and
   at every boot. Work in it as in any directory of yours. Volumes grow but
   do not shrink.

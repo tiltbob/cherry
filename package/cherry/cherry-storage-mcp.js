@@ -316,7 +316,7 @@ const TOOLS = [
   {
     name: "create_volume",
     description: "Make a volume in a pool: an LVM logical volume on its data disks, cached on its cache disks if it " +
-      `has any, holding ext4 that you own, mounted on ${VOLUMES}/<pool>/<name> now and at every boot.`,
+      `has any, holding btrfs that you own, mounted on ${VOLUMES}/<pool>/<name> now and at every boot.`,
     inputSchema: {
       type: "object",
       properties: {

@@ -2,7 +2,7 @@
 # cherry user): at boot, before var.mount, every claimed disk is unlocked with
 # the TPM, the pool cherry activated and its volume var mounted on /var, or the
 # pool made in RAM when it has no disks yet, then the other pools activated and
-# every volume checked and mounted on /var/lib/cherry/volumes/<pool>/<volume>.
+# every volume mounted on /var/lib/cherry/volumes/<pool>/<volume>.
 # var.mount pulls this in and starts after it (the overlay's
 # var.mount.d/10-cherry.conf): when this mounted var on /var, var.mount finds
 # it mounted; otherwise it mounts its tmpfs. At shutdown, once systemd has
@@ -29,8 +29,8 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/cherry-storage boot start
 ExecStop=-/usr/libexec/cherry-storage boot stop
-# Checking the volumes' filesystems can take a while after a crash.
-TimeoutStartSec=30min
+# The disks unlocked with the TPM, one by one, and the pools activated.
+TimeoutStartSec=10min
 
 [Install]
 WantedBy=multi-user.target

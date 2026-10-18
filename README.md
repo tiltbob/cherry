@@ -469,22 +469,23 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   nor repaired. For the same reason, no cache's metadata is checked when it is
   activated, which a writethrough cache can afford: the data disks under it
   hold all the data.
-- **A volume** holds ext4 owned by the `cherry` user, mounted `nodev,nosuid`
-  on `/var/lib/cherry/volumes/<pool>/<volume>`, which `cherry.service` sees
-  writable. Volumes grow, online (`resize2fs`), but don't shrink. `var` is
-  the exception: btrfs, mounted on `/var`, grown with `btrfs filesystem
-  resize`.
+- **A volume** holds btrfs, its root owned by the `cherry` user, mounted
+  `nodev,nosuid` on `/var/lib/cherry/volumes/<pool>/<volume>`, which
+  `cherry.service` sees writable; `var` is mounted on `/var`. Volumes grow,
+  online (`btrfs filesystem resize`), but don't shrink.
 - **Taking a data disk out** of a pool moves its data to the pool's other data
   disks first (`pvmove`), with the volumes' caches detached meanwhile.
 - **At boot,** before systemd mounts `/var`, `cherry-storage.service`
   (`cherry-storage boot start`) unlocks every `cherry-pv` partition with the
   TPM, brings up the pool `cherry` and `/var` (see [Disks](#disks)), then
   activates each other pool, which nothing else does (their volume groups
-  are made without autoactivation), and checks each volume's filesystem
-  (`e2fsck -p`) and mounts it. At shutdown, once systemd has unmounted the
+  are made without autoactivation), and mounts each volume as it is, as
+  systemd-fsck leaves btrfs too. At shutdown, once systemd has unmounted the
   volumes and `/var`, it deactivates the pools and closes the disks. A disk
-  the TPM cannot unlock, or a volume with errors `e2fsck -p` left, is
-  reported and left alone, and the rest goes on.
+  the TPM cannot unlock, or a volume that will not mount, is reported and
+  left alone, and the rest goes on; for the volume, `btrfs check
+  /dev/<pool>/<volume>` reports, `btrfs restore` copies files out, and
+  `btrfs check --repair` is the last resort.
 - **One operation at a time:** another one fails at once. Each logs to
   `/var/log/cherry-storage/<instance>.log`, which the `cherry` user can read.
 

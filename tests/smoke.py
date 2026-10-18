@@ -1428,11 +1428,10 @@ class Smoke:
 
         def check_volume():
             mount = vm.fstype(mp)
-            dev = vm.run("lvs --noheadings --separator : -o lv_kernel_major,lv_kernel_minor tank/data 2>/dev/null")
-            dev = dev.strip()
             options = set(mount.split()[5].split(","))
-            check(mount.split()[2] == dev and " - ext4 " in mount and {"nodev", "nosuid"} <= options,
-                  f"{mp} is not tank/data's ext4 ({dev}), nodev and nosuid: {mount}")
+            # The mount's device number is btrfs's own, not the volume's: the source names the volume.
+            check(" - btrfs /dev/mapper/tank-data " in mount and {"nodev", "nosuid"} <= options,
+                  f"{mp} is not tank/data's btrfs, nodev and nosuid: {mount}")
             check(vm.run("lvs --noheadings -o segtype tank/data").strip() == "cache", "tank/data is not cached")
             check(vm.run(f"stat -c %U {mp}") == "cherry", f"{mp} is not the cherry user's")
 
@@ -1455,14 +1454,15 @@ class Smoke:
         check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
               f"the cherry user may stop cherry-storage.service: {out}")
 
-        # Powered off, which unmounts and closes it all, and booted again: unlocked, activated, checked, mounted.
+        # Powered off, which unmounts and closes it all, and booted again: unlocked, activated, mounted, clean.
         vm.send("systemctl poweroff\n")
         vm.wait_exit(300)
         self.boot(disks=disks, ssds=ssds)
         check(vm.run("systemctl is-active cherry-storage.service") == "active", "cherry-storage.service is not active")
         shown = vm.run("journalctl -b -u cherry-storage --no-pager -o cat")
-        check("recovering journal" not in shown and not re.search(r"cannot|not active|missing disks|errors", shown),
-              f"the volume was not left clean, or not set up:\n{shown}")
+        check(not re.search(r"cannot|not active|missing disks", shown), f"the storage was not set up:\n{shown}")
+        check("tree-log replay" not in vm.run("dmesg | grep BTRFS || true"),
+              "a volume was not unmounted cleanly at the poweroff: the mount replayed a tree log")
         check_volume()
         check(vm.run(f"cat {mp}/hello") == "cherry-storage", "the volume's data did not survive the reboot")
         self.check_var_on_pool("vda1")

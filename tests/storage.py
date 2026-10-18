@@ -4,7 +4,7 @@ pool cherry: in RAM at boot, on the pool's disks once extend moved it there.
 
 The helper runs against a stand-in sysfs (with a zram-control that hands out zram1), udev database, mount table and
 swap list in a temporary directory, with stand-ins on PATH for lvm, wipefs, systemd-repart, systemd-cryptsetup,
-udevadm, mkfs.ext4, mkfs.btrfs, btrfs, e2fsck, resize2fs, mount, umount and df. They are this file, under those names:
+udevadm, mkfs.btrfs, btrfs, mount, umount and df. They are this file, under those names:
 they keep the machine's state (signatures, which partitions the TPM unlocks, LVM's physical volumes, volume groups and
 logical volumes, with the extents each takes on each physical volume) in a JSON file, change the stand-in sysfs as the
 real commands would (systemd-repart adds the cherry-pv partition, systemd-cryptsetup the device-mapper device that
@@ -21,8 +21,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "package", "cherry", "cherry-storage")
-STANDINS = ["lvm", "wipefs", "systemd-repart", "cryptsetup", "systemd-cryptenroll", "systemd-cryptsetup", "mkfs.ext4",
-            "mkfs.btrfs", "btrfs", "e2fsck", "resize2fs", "mount", "umount"]
+STANDINS = ["lvm", "wipefs", "systemd-repart", "cryptsetup", "systemd-cryptenroll", "systemd-cryptsetup", "mkfs.btrfs",
+            "btrfs", "mount", "umount"]
 # Those that only answer, in sh.
 SH_STANDINS = {
     "udevadm": "",
@@ -356,6 +356,8 @@ def mounts(state, args, name):
         raise Exit(32, f"{name}: failing as told")
     if name == "mount":
         dev, mp = args[-2], args[-1]
+        if mp in state["nomount"]:
+            raise Exit(32, f"mount: {mp}: wrong fs type, bad option, bad superblock on {dev}")
         fstype = args[args.index("-t") + 1]
         lines.append(f"{100 + len(lines)} 1 253:{len(lines)} / {mp} rw,nodev,nosuid - {fstype} {dev} rw")
     else:
@@ -381,12 +383,8 @@ def standin(name, args):
             luks(state, args, name)
         elif name in ("mount", "umount"):
             mounts(state, args, name)
-        elif name in ("mkfs.ext4", "mkfs.btrfs", "btrfs", "e2fsck", "resize2fs"):
+        elif name in ("mkfs.btrfs", "btrfs"):
             state["calls"].append(" ".join([name, *args]))
-            code = state["e2fsck"].get(args[-1], 0) if name == "e2fsck" else 0
-            if code:
-                save(state)
-                sys.exit(code)
         save(state)
     except Exit as e:
         save(state)
@@ -436,7 +434,7 @@ class Machine:
         open(f"{self.tmp}/sys/class/zram-control/hot_add", "w").write("1\n")
         os.makedirs(block("zram1", "holders"))
         save({"calls": [], "pvs": {}, "vgs": {}, "lvs": {}, "signatures": {}, "locked": [], "fail": [], "busy": [],
-              "e2fsck": {}, "stale": [], "minor": 0})
+              "nomount": [], "stale": [], "minor": 0})
         if ram_var:
             rc, out = self.run("boot", "start")
             check(rc == 0, f"the pool cherry in RAM: {out}")
@@ -633,7 +631,7 @@ def tests():
         m.fresh()
         m.disk("sda")
         m.disk("sdb", ssd=True)
-        m.part("sdb", 1, fstype="ext4")
+        m.part("sdb", 1, fstype="vfat")
         # A disk an older image made its /var: nothing special now.
         m.disk("sdc")
         m.part("sdc", 1, label="cherry-var")
@@ -666,7 +664,7 @@ def tests():
         sdb = next(d for d in facts["disks"] if d["name"] == "sdb")
         check(sdb["rotational"] is False and sdb["model"] == "Model sdb" and sdb["serial"] == "Ssdb"
               and sdb["size"] == 100 * GIB and sdb["signatures"] == ["gpt"]
-              and sdb["partitions"] == [{"name": "sdb1", "size": 2 * GIB, "label": "", "fstype": "ext4"}], sdb)
+              and sdb["partitions"] == [{"name": "sdb1", "size": 2 * GIB, "label": "", "fstype": "vfat"}], sdb)
         check(all(len(d["fingerprint"]) == 12 for d in facts["disks"]), "fingerprints")
         check(facts["var"] == {"fstype": "btrfs", "source": "/dev/mapper/cherry-var", "ram": True}
               and facts["tpm"] is True, facts)
@@ -797,14 +795,13 @@ def tests():
                 ("volume-create:nope:vol:10G", "no pool nope")]:
             expect(instance, m.run(instance), 1, message, [])
         shutil.rmtree(f"{tmp()}/home")
-        uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
-        gid = subprocess.run(["id", "-g"], capture_output=True, text=True).stdout.strip()
         mp = f"{tmp()}/home/volumes/tank/web"
         expect("create", m.run("volume-create:tank:web:150G"), 0, f"created the volume tank/web, mounted on {mp}",
-               [f"lvm lvcreate -y -n web -L 150G tank {sda} {sdb}",
-                f"mkfs.ext4 -q -m 0 -E root_owner={uid}:{gid},nodiscard /dev/tank/web",
-                f"mount -t ext4 -o nodev,nosuid /dev/tank/web {mp}"])
+               [f"lvm lvcreate -y -n web -L 150G tank {sda} {sdb}", "mkfs.btrfs -q /dev/tank/web",
+                f"mount -t btrfs -o nodev,nosuid /dev/tank/web {mp}"])
         check(os.path.isdir(mp) and volume("tank/web")["alloc"] == {sda: 25600, sdb: 12800}, volume("tank/web"))
+        # Its root the cherry user's, once mounted.
+        check(os.stat(mp).st_uid == os.getuid(), f"{mp} is not the cherry user's")
         expect("exists", m.run("volume-create:tank:web:1G"), 1, "the pool tank has a volume web already")
         # LVM's own failure and exit status.
         expect("too big", m.run("volume-create:tank:big:100G"), 5, "Insufficient free space")
@@ -874,7 +871,8 @@ def tests():
                None)
         calls = m.calls()
         check(calls[:3] == ["lvm lvconvert -y --uncache tank/web", f"lvm lvextend -L 80G tank/web {sda} {sdb}",
-                            "resize2fs /dev/tank/web"] and volume("tank/web")["segtype"] == "cache", calls)
+                            f"btrfs filesystem resize max {tmp()}/home/volumes/tank/web"]
+              and volume("tank/web")["segtype"] == "cache", calls)
         expect("shrink", m.run("volume-resize:tank:web:10G"), 1, "volumes only grow")
         check(volume("tank/web")["segtype"] == "cache", "the cache did not come back after a failed resize")
         expect("all", m.run("volume-resize:tank:web:all"), 0, "to 204800 MiB")
@@ -952,7 +950,7 @@ def tests():
             expect("locked", m.run("create:tank:sda"), 1, "another storage operation is running", [])
             check(m.run("list")[0] == 0, "list waits for the lock")
 
-    @case("boot: unlocks, brings up /var, activates the pools, checks and mounts the volumes; the reverse at shutdown")
+    @case("boot: unlocks, brings up /var, activates the pools and mounts the volumes; the reverse at shutdown")
     def _():
         sda, sdb, _, _, _ = setup()
         m.run("create:tank:sda:sdb")
@@ -969,27 +967,25 @@ def tests():
               and sorted(calls[4:]) == [f"systemd-cryptsetup detach cherry-pv-{p}"
                                         for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
         # The next boot: the disks unlocked, /var first (in RAM again: the pool cherry was never given disks), then
-        # the volumes. sdc's volume belongs to another TPM now: the rest goes on.
+        # the volumes, as they are. sdc's volume belongs to another TPM now, and db will not mount: the rest goes on.
         m.reboot()
-        m.change(locked=["sdc1"], e2fsck={"/dev/tank/db": 4})
+        m.change(locked=["sdc1"], nomount=[f"{vols}/db"])
         rc, out = m.run("boot", "start")
         check(rc == 1 and "the TPM cannot unlock /dev/sdc1: another machine's disk?" in out
-              and f"128M in RAM on {ZRAM}" in out
-              and "e2fsck found errors it cannot repair on tank/db (exit status 4): not mounted" in out, out)
+              and f"128M in RAM on {ZRAM}" in out and "cannot mount tank/db" in out, out)
         calls = m.calls()
         check([c for c in calls if c.startswith("systemd-cryptsetup")] == [
             f"systemd-cryptsetup attach cherry-pv-{p} /dev/{p} - tpm2-device=auto,headless"
             for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
-        check(calls[-4:] == ["lvm vgchange -ay tank", "e2fsck -p /dev/tank/db", "e2fsck -p /dev/tank/web",
-                             f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
-        check("lvm vgchange -ay cherry" not in calls and not [c for c in calls if c.startswith("mount") and "/db" in c],
-              calls)
+        check(calls[-3:] == ["lvm vgchange -ay tank", f"mount -t btrfs -o nodev,nosuid /dev/tank/db {vols}/db",
+                             f"mount -t btrfs -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
+        check("lvm vgchange -ay cherry" not in calls, calls)
         # Again: /var is there, what is mounted is left alone, what is unlocked too.
-        m.change(locked=[], e2fsck={})
+        m.change(locked=[], nomount=[])
         rc, out = m.run("boot", "start")
         calls = m.calls()
-        check(rc == 0 and "/var is mounted already" in out and "e2fsck -p /dev/tank/web" not in calls
-              and "e2fsck -p /dev/tank/db" in calls
+        check(rc == 0 and "/var is mounted already" in out and not [c for c in calls if c.endswith("/web")]
+              and f"mount -t btrfs -o nodev,nosuid /dev/tank/db {vols}/db" in calls
               and [c for c in calls if c.startswith("systemd-cryptsetup")] == [
                   "systemd-cryptsetup attach cherry-pv-sdc1 /dev/sdc1 - tpm2-device=auto,headless"], out + str(calls))
         # A pool that does not come up: its volumes are not mounted; /var is.
@@ -998,8 +994,7 @@ def tests():
         rc, out = m.run("boot", "start")
         m.change(fail=[])
         check(rc == 1 and "the pool tank is missing disks: not all its volumes are there" in out
-              and "tank/web is not active: not mounted" in out
-              and not [c for c in m.calls() if c.startswith("e2fsck") or "/tank/" in c], out)
+              and "tank/web is not active: not mounted" in out and not [c for c in m.calls() if "/tank/" in c], out)
         check(m.list()["var"]["ram"] is True, "/var did not come up")
         expect("bad boot verb", m.run("boot", "restart"), 1, "bad boot verb 'restart'")
 
@@ -1099,8 +1094,7 @@ def tests():
         check(len([c for c in calls if c.startswith("systemd-cryptsetup attach")]) == 5
               and [c for c in calls if not c.startswith("systemd-cryptsetup")] == [
                   "lvm vgchange -ay cherry", "mount -t btrfs -o nodev /dev/mapper/cherry-var /var",
-                  "lvm vgchange -ay tank", "e2fsck -p /dev/tank/web",
-                  f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
+                  "lvm vgchange -ay tank", f"mount -t btrfs -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
         check(not [c for c in calls if "zram" in c], f"with the pool on disk: {calls}")
         # Disks another TPM claimed, this one's before it was cleared say: the pool is not seen, and /var is in RAM
         # again, a new pool cherry; the disks are left as they are.
@@ -1110,7 +1104,7 @@ def tests():
         check(rc == 0 and "the TPM cannot unlock /dev/sda1" in out and "the TPM cannot unlock /dev/sdb1" in out
               and f"128M in RAM on {ZRAM}" in out, out)
         check(not [c for c in m.calls() if c.startswith("wipefs")]
-              and f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web" in m.calls(), m.calls())
+              and f"mount -t btrfs -o nodev,nosuid /dev/tank/web {vols}/web" in m.calls(), m.calls())
         m.change(locked=[])
 
     @case("/var: a missing disk that no volume uses goes; one a volume uses leaves /var a tmpfs and the disks alone")

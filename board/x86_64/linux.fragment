@@ -40,15 +40,16 @@ CONFIG_IGB=y
 CONFIG_R8169=y
 
 # Filesystems for containers and their images, and for disks: btrfs for /var,
-# the pool cherry's volume var (cherry-storage.service), where an environment is a
-# snapshot of its image (machinectl clone) and takes space only for what it
-# changes; ext4 for the storage volumes (cherry-storage).
+# the pool cherry's volume var (cherry-storage.service), where an environment
+# is a snapshot of its image (machinectl clone) and takes space only for what
+# it changes, and for the storage volumes (cherry-storage). No ext4: nothing
+# on Cherry makes or mounts it.
 CONFIG_BLK_DEV_LOOP=y
 CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_BTRFS_FS=y
 CONFIG_BTRFS_FS_POSIX_ACL=y
-CONFIG_EXT4_FS=y
+# CONFIG_EXT4_FS is not set
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y

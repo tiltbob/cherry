@@ -28,7 +28,7 @@
 # be, so that OpenChamber and the agent run until the agent gives the pool
 # disks: extend then moves var onto them (pvmove, 128 MiB) and the zram device
 # goes. Nothing claims a disk at boot. Then, under /var, the other pools are
-# activated and every volume checked and mounted under /var/lib/cherry/volumes.
+# activated and every volume mounted under /var/lib/cherry/volumes.
 # At shutdown, once systemd has unmounted the volumes and /var, `boot stop`
 # deactivates the pools and closes every disk.
 #
@@ -39,9 +39,10 @@
 # (/etc/lvm/lvm.conf). A pool is a volume group of claimed disks: data disks,
 # tagged data, and cache disks, tagged cache, the pool tagged writeback if its
 # cache is; the pool cherry's zram device is tagged ram while it has it. A
-# volume is a linear logical volume on the pool's data disks, holding ext4
-# whose root the cherry user owns, mounted on
-# /var/lib/cherry/volumes/<pool>/<volume> (var: btrfs, on /var); on a pool with
+# volume is a linear logical volume on the pool's data disks, holding btrfs
+# whose root the cherry user owns, mounted as it is (btrfs's check is for a
+# volume that will not mount) on /var/lib/cherry/volumes/<pool>/<volume>
+# (var: on /var); on a pool with
 # cache disks, it is cached on them (dm-cache, a cache pool), in proportion to
 # its share of the data disks. Sizes are a number and M, G or T (MiB, GiB,
 # TiB), or all: the pool's free space. The pool cherry is never destroyed, var
@@ -395,7 +396,11 @@ check_size() {
 }
 
 mountpoint_of() {
-	echo "$volumes/$1/$2"
+	if is_var "$1" "$2"; then
+		echo "$var_mount"
+	else
+		echo "$volumes/$1/$2"
+	fi
 }
 
 is_mounted() {
@@ -414,7 +419,7 @@ mount_volume() {
 		install -d -o "$user" -g "$(id -g "$user")" -m 0755 "$home"
 	fi
 	install -d -m 0755 "$volumes" "$volumes/$1" "$mp"
-	mount -t ext4 -o nodev,nosuid "/dev/$1/$2" "$mp"
+	mount -t btrfs -o nodev,nosuid "/dev/$1/$2" "$mp"
 }
 
 unmount_volume() {
@@ -850,22 +855,20 @@ volume_create() {
 	shift 3
 	# shellcheck disable=SC2086 # the size, two words
 	lvm lvcreate -y -n "$name" $size "$pool" "$@"
-	if ! mkfs.ext4 -q -m 0 -E "root_owner=$(id -u "$user"):$(id -g "$user"),nodiscard" "/dev/$pool/$name"; then
+	if ! mkfs.btrfs -q "/dev/$pool/$name"; then
 		lvm lvremove -y "$pool/$name"
 		fail "cannot make the filesystem of $pool/$name"
 	fi
 	mount_volume "$pool" "$name"
+	# Its root the cherry user's, once mounted: mkfs.btrfs has no option for it.
+	chown "$user:$(id -g "$user")" "$(mountpoint_of "$pool" "$name")"
 	echo "created the volume $pool/$name, mounted on $(mountpoint_of "$pool" "$name")"
 	cache_volume "$pool" "$name"
 }
 
-# grow_filesystem <pool> <volume>: its filesystem, to the volume's size, mounted.
+# grow_filesystem <pool> <volume>: its btrfs, to the volume's size, mounted.
 grow_filesystem() {
-	if is_var "$1" "$2"; then
-		btrfs filesystem resize max "$var_mount"
-	else
-		resize2fs "/dev/$1/$2"
-	fi
+	btrfs filesystem resize max "$(mountpoint_of "$1" "$2")"
 }
 
 volume_resize() {
@@ -1005,8 +1008,8 @@ boot_var() {
 	fi
 }
 
-# Under /var: every other pool activated, every volume but var checked and
-# mounted. What fails is reported, and the rest goes on.
+# Under /var: every other pool activated, every volume but var mounted. What
+# fails is reported, and the rest goes on.
 boot_volumes() {
 	rc=0
 	for pool in $(pools); do
@@ -1024,13 +1027,9 @@ boot_volumes() {
 				rc=1
 				continue
 			fi
-			# As systemd-fsck: 1 is errors corrected, 4 and above errors left.
-			e2rc=0
-			e2fsck -p "/dev/$pool/$name" || e2rc=$?
-			if [ "$e2rc" -ge 4 ]; then
-				echo "e2fsck found errors it cannot repair on $pool/$name (exit status $e2rc): not mounted"
-				rc=1
-			elif ! (mount_volume "$pool" "$name"); then
+			# Mounted as it is, as systemd-fsck leaves btrfs too: its check is
+			# for a volume that will not mount.
+			if ! (mount_volume "$pool" "$name"); then
 				echo "cannot mount $pool/$name"
 				rc=1
 			fi
