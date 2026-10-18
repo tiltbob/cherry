@@ -51,11 +51,13 @@
      unsigned, but boots it with Secure Boot on once signed by a CA the test
      adds to db (skipped when the image has no keys)
   13. with disks, the machine makes its blank one its /var: a LUKS2 volume
-     whose key the TPM seals, holding ext4, and leaves the disk with a
-     partition table alone; after a poweroff, which unmounts it cleanly, the
-     TPM unlocks it and /var kept its files and the SSH host key; another TPM
-     cannot unlock it, so that machine's /var is a tmpfs and the disk stays as
-     it was, until wipefs, as the README says, makes it blank again
+     whose key the TPM seals to the boot state (PCR 7, and PCR 11 under the
+     image's PCR key, as the header's token shows; the image's policy is
+     signed, and PCR 11 is what it says), holding ext4, and leaves the disk
+     with a partition table alone; after a poweroff, which unmounts it cleanly,
+     the TPM unlocks it and /var kept its files and the SSH host key; another
+     TPM cannot unlock it, so that machine's /var is a tmpfs and the disk
+     stays as it was, until wipefs, as the README says, makes it blank again
   14. storage, through OpenCode's storage MCP server as the cherry user, with
      /var on a disk of its own, which is in use: claim refuses a disk not as
      listed, then wipes a blank hard disk, one with a partition table and an
@@ -66,6 +68,11 @@
      volume grown; after a poweroff, which closes it all cleanly, the next
      boot unlocks, activates and mounts it again; then the cache, the volume
      and the pool go, and the disks are released blank
+  15. the disks' keys are bound to the boot state: with /var on a disk sealed
+     to the image's policy, the TPM does not unlock it under the same image
+     with one byte of its command line changed, which PCR 11 shows, nor under
+     the image signed anew with another PCR key; under the image itself it
+     does, and the files are there
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -87,6 +94,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import pcrsign  # noqa: E402
 import run_qemu  # noqa: E402
 import secureboot  # noqa: E402
 
@@ -506,6 +514,21 @@ class Smoke:
         check(rc != 0, f"an identity error was recorded: {error}")
         log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
+
+    def check_pcr11(self, uki, phase):
+        """PCR 11 holds what the image's policy expects once this boot phase is done: the stub's measurement of the UKI
+        (its sections, as read from the file), extended by systemd's phases."""
+        expected = pcrsign.measure(uki, phase).hex()
+        pcr = self.vm.run("tpm2_pcrread sha256:11 | sed -n 's/.*0x//p'").lower()
+        check(pcr == expected, f"PCR 11 is {pcr}, not {expected}, which the image's policy expects after {phase!r}")
+
+    def check_sealed(self, partition, uki):
+        """The LUKS2 volume's one TPM token seals its key to PCR 7, and to PCR 11 under the image's PCR key."""
+        tokens = json.loads(self.vm.run(f"cryptsetup luksDump --dump-json-metadata /dev/{partition}"))["tokens"]
+        tpm2 = [t for t in tokens.values() if t.get("type") == "systemd-tpm2"]
+        check(len(tpm2) == 1 and tpm2[0].get("tpm2-pcrs") == [7] and tpm2[0].get("tpm2_pubkey_pcrs") == [11]
+              and base64.b64decode(tpm2[0].get("tpm2_pubkey", "")) == bytes(uki[".pcrpkey"]),
+              f"/dev/{partition}'s key is not sealed to PCR 7 and PCR 11 under the image's key: {tpm2}")
 
     def check_var_on_disk(self, partition):
         """/var is the ext4 of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
@@ -1049,15 +1072,27 @@ class Smoke:
         disks = [used, blank]
         journal = "journalctl -b -u cherry-var --no-pager -o cat"
 
-        # The machine makes the blank disk its encrypted /var, sealed by its TPM.
+        # The image's PCR policy is signed, with the key it carries.
+        image = os.path.join(self.images, run_qemu.EFI_NAME)
+        p = subprocess.run([sys.executable, pcrsign.__file__, "check", image], capture_output=True, text=True)
+        check(p.returncode == 0, f"the image's PCR policy does not check out: {p.stdout}{p.stderr}")
+        log(p.stdout.strip())
+        _, uki = pcrsign.read_uki(image)
+
+        # The machine makes the blank disk its encrypted /var, sealed by its TPM to the boot state: PCR 7, and PCR
+        # 11 under the image's key, which holds what the policy says once the machine is ready.
         self.boot(disks=disks)
         shown = vm.run(journal)
         log("cherry-var.service:\n" + shown)
         check("making the blank disk /dev/vdb " in shown, "cherry-var.service did not set up vdb")
+        check("sealing" not in shown, f"a new volume's key was sealed anew:\n{shown}")
         self.check_var_on_disk("vdb1")
         luks = vm.run("cryptsetup luksDump /dev/vdb1")
         check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M), f"no systemd-tpm2 token on /dev/vdb1:\n{luks}")
         check(len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1, f"not one key slot, the TPM's:\n{luks}")
+        self.check_sealed("vdb1", uki)
+        self.check_pcr11(uki, "sysinit:ready")
+        vm.run("test -s /run/systemd/tpm2-pcr-signature.json && test -s /run/systemd/tpm2-pcr-public-key.pem")
         vm.run("echo cherry-smoke >/var/cherry-smoke")
         host_key = vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
         # Powered off, not pulled: /var is unmounted and the volume closed on the way down.
@@ -1067,8 +1102,8 @@ class Smoke:
         # The TPM unlocks it at the next boot, its filesystem was left clean, and /var kept its files.
         self.boot(disks=disks)
         shown = vm.run(journal)
-        check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown,
-              f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
+        check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown
+              and "sealing" not in shown, f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
         check("recovering journal" not in shown, f"/var was not unmounted cleanly at the poweroff:\n{shown}")
         self.check_var_on_disk("vdb1")
         check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
@@ -1215,6 +1250,64 @@ class Smoke:
         check(all((found[n]["state"], found[n]["blank"]) == ("free", True) for n in ("vdb", "vdc", "nvme0n1")),
               f"the disks were not given back blank: {found}")
         check("cherry-pv" not in vm.run("ls /dev/mapper"), "a cherry-pv volume is still open")
+        vm.stop()
+
+    def s15_boot_state(self):
+        vm = self.vm
+        blank = os.path.join(self.workdir, "sealed.img")
+        run_qemu.make_disk(blank, 4 << 30)
+        journal = "journalctl -b -u cherry-var --no-pager -o cat"
+        data, uki = pcrsign.read_uki(os.path.join(self.images, run_qemu.EFI_NAME))
+        tmp = os.path.join(self.workdir, "boot-state")
+        os.makedirs(tmp)
+
+        # /var on a disk sealed to the image's policy, as in 13.
+        self.boot(disks=[blank])
+        self.check_var_on_disk("vda1")
+        self.check_sealed("vda1", uki)
+        vm.run("echo boot-state >/var/cherry-smoke")
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+
+        # The same image with one byte of its command line changed, which is measured, and the image signed anew
+        # with another PCR key, which the disk's token does not name: the TPM unlocks the disk under neither.
+        tampered = bytearray(data)
+        cmdline = bytes(uki[".cmdline"])
+        check(b"panic=10" in cmdline, f"no panic=10 on the command line to change: {cmdline}")
+        tampered[pcrsign.pe_sections(data)[".cmdline"].offset + cmdline.index(b"panic=10") + 7] = ord("1")
+        key = os.path.join(tmp, "other.key")
+        subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key],
+                       check=True, capture_output=True)
+        resigned = bytearray(data)
+        pcrsign.write_pcrsig(resigned, json.dumps(pcrsign.entries(uki, pcrsign.public_key(key), key)))
+        for name, image in (("tampered", tampered), ("resigned", resigned)):
+            images = os.path.join(tmp, name)
+            os.makedirs(images)
+            with open(os.path.join(images, run_qemu.EFI_NAME), "wb") as f:
+                f.write(image)
+            server = run_qemu.serve(images)
+            try:
+                self.boot(disks=[blank], server=server, expect="degraded")
+            finally:
+                server.shutdown()
+            check(vm.run("systemctl --failed --no-legend --plain | awk '{ print $1 }'") == "cherry-var.service",
+                  f"{name}: cherry-var.service is not the one failed unit")
+            shown = vm.run(journal)
+            check("the TPM cannot unlock /dev/vda1" in shown, f"{name}: cherry-var.service reported:\n{shown}")
+            check(" - tmpfs " in vm.fstype("/var"), f"{name}: /var is not a tmpfs")
+            if name == "tampered":
+                check("panic=11" in vm.run("cat /proc/cmdline"), "the changed command line was not booted")
+                _, tampered_uki = pcrsign.read_uki(os.path.join(images, run_qemu.EFI_NAME))
+                self.check_pcr11(tampered_uki, "sysinit:ready")
+            else:
+                self.check_pcr11(uki, "sysinit:ready")
+            log(f"{name}: the TPM did not unlock the disk")
+
+        # Under the image itself, it does, and the files are there. Then the disk is blank again.
+        self.boot(disks=[blank])
+        self.check_var_on_disk("vda1")
+        check(vm.run("cat /var/cherry-smoke") == "boot-state", "a file on /var did not survive")
+        vm.run("wipefs --all --force /dev/vda1 /dev/vda && udevadm settle && partprobe /dev/vda")
         vm.stop()
 
     def run(self):

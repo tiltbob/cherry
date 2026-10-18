@@ -10,32 +10,13 @@
 # token; issue writes release.crt and its key, to a new file or stdout, also
 # with its scratch space on another file system (/dev/shm, when it is one);
 # check catches a tampered file, a swapped one and a release certificate the
-# CA didn't issue. Skipped without softhsm2-util and pkcs11-tool (OpenSC).
+# CA didn't issue. pcr, which needs no token, writes pcr.pem and the key, once:
+# a second pcr refuses, as the key's loss locks every disk; check takes
+# pcr.pem with the Secure Boot keys or alone, and catches one that is no
+# RSA-2048 key. The token's part is skipped without softhsm2-util and
+# pkcs11-tool (OpenSC).
 set -eu
 cd "$(dirname "$0")/.."
-
-module=
-for m in /usr/lib/softhsm/libsofthsm2.so /usr/lib64/pkcs11/libsofthsm2.so /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so; do
-	[ -e "$m" ] && module=$m && break
-done
-if [ -z "$module" ] || ! command -v softhsm2-util >/dev/null || ! command -v pkcs11-tool >/dev/null; then
-	echo "ceremony: SKIPPED, needs softhsm2 and opensc (scripts/secureboot.py init and issue unchecked)"
-	exit 0
-fi
-
-tmp=$(mktemp -d)
-# A temporary directory on another file system than the keys, as a tmpfs /tmp is
-# (Arch's): /dev/shm, when it is one, for the scratch space of an issue.
-other=
-if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$tmp")" ]; then
-	other=$(mktemp -d /dev/shm/ceremony.XXXXXX)
-fi
-trap 'rm -rf "$tmp" ${other:+"$other"}' EXIT
-mkdir "$tmp/tokens"
-printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$tmp/tokens" >"$tmp/softhsm2.conf"
-export SOFTHSM2_CONF="$tmp/softhsm2.conf" CHERRY_HSM_PIN=123456
-softhsm2-util --init-token --free --label "Cherry Secure Boot" --so-pin 12345678 --pin "$CHERRY_HSM_PIN" >/dev/null
-keys=$tmp/keys
 
 n=0
 die() {
@@ -50,9 +31,6 @@ sb() {
 	set -e
 	n=$((n + 1))
 }
-token() {
-	sb "$@" --module "$module" --token "Cherry Secure Boot"
-}
 ok() {
 	[ "$rc" -eq 0 ] || die "failed: $out"
 }
@@ -62,6 +40,61 @@ refused() {
 	*"$1"*) ;;
 	*) die "expected '$1' in: $out" ;;
 	esac
+}
+
+# The PCR key, with openssl alone.
+pcr=$(mktemp -d)
+trap 'rm -rf "$pcr"' EXIT
+keys=$pcr/keys
+sb pcr --key-out "$pcr/pcr.key"
+ok
+[ "$(stat -c %a "$pcr/pcr.key")" = 600 ] || die "the PCR key is not private to its owner"
+[ "$(openssl pkey -in "$pcr/pcr.key" -pubout)" = "$(cat "$keys/pcr.pem")" ] || die "pcr.pem is not the key's public half"
+openssl pkey -pubin -in "$keys/pcr.pem" -noout -text | grep -q "Public-Key: (2048 bit)" || die "pcr.pem is not RSA-2048"
+case $out in *"PCR_KEY"*) ;; *) die "pcr did not say what to do with the key: $out" ;; esac
+sb check
+ok
+case $out in *"no Secure Boot keys"*"pcr.pem is the PCR key"*) ;; *) die "check without Secure Boot keys: $out" ;; esac
+sb pcr --key-out "$pcr/other.key"
+refused "pcr.pem exists"
+[ ! -e "$pcr/other.key" ] || die "a refused pcr wrote a key"
+set +e
+python3 scripts/secureboot.py --dir "$pcr/stdout" pcr --key-out - >"$pcr/stdout.key" 2>/dev/null
+rc=$?
+set -e
+n=$((n + 1))
+ok
+openssl pkey -in "$pcr/stdout.key" -noout || die "pcr --key-out - printed no key"
+openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null | openssl pkey -pubout >"$keys/pcr.pem"
+sb check
+refused "pcr.pem: not an RSA-2048 public key"
+rm -rf "$keys"
+
+module=
+for m in /usr/lib/softhsm/libsofthsm2.so /usr/lib64/pkcs11/libsofthsm2.so /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so; do
+	[ -e "$m" ] && module=$m && break
+done
+if [ -z "$module" ] || ! command -v softhsm2-util >/dev/null || ! command -v pkcs11-tool >/dev/null; then
+	echo "ceremony: $n cases passed; the token's SKIPPED, needs softhsm2 and opensc (scripts/secureboot.py init and issue unchecked)"
+	exit 0
+fi
+
+tmp=$(mktemp -d)
+# A temporary directory on another file system than the keys, as a tmpfs /tmp is
+# (Arch's): /dev/shm, when it is one, for the scratch space of an issue.
+other=
+if [ -d /dev/shm ] && [ -w /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$tmp")" ]; then
+	other=$(mktemp -d /dev/shm/ceremony.XXXXXX)
+fi
+trap 'rm -rf "$tmp" "$pcr" ${other:+"$other"}' EXIT
+mkdir "$tmp/tokens"
+printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$tmp/tokens" >"$tmp/softhsm2.conf"
+export SOFTHSM2_CONF="$tmp/softhsm2.conf" CHERRY_HSM_PIN=123456
+softhsm2-util --init-token --free --label "Cherry Secure Boot" --so-pin 12345678 --pin "$CHERRY_HSM_PIN" >/dev/null
+keys=$tmp/keys
+
+token() {
+	sb "$@" --module "$module" --token "Cherry Secure Boot"
 }
 
 # privkeys: the labels of the token's private keys, on one line.
@@ -152,6 +185,11 @@ openssl x509 -in "$keys/release.crt" -noout -ext extendedKeyUsage | grep -q "Cod
 sb check
 ok
 case $out in *"issued release.crt"*) ;; *) die "check did not cover release.crt: $out" ;; esac
+openssl pkey -in "$pcr/pcr.key" -pubout -out "$keys/pcr.pem"
+sb check
+ok
+case $out in *"issued release.crt; pcr.pem is the PCR key"*) ;; *) die "check did not cover pcr.pem: $out" ;; esac
+rm "$keys/pcr.pem"
 token issue --key-out "$tmp/release.key"
 refused "exists"
 set +e

@@ -26,11 +26,11 @@ if (exec 0</dev/console) 2>/dev/null; then
 	exec 0</dev/console 1>/dev/console 2>/dev/console
 fi
 
-# systemd keeps API file systems that are already mounted. /run gets the
-# options systemd would give it.
+# systemd keeps API file systems that are already mounted. /run is mounted
+# already too: cherry-pit gave it a tmpfs, with the UKI's PCR signature and
+# public key in /run/systemd.
 mount -t proc -o nosuid,nodev,noexec proc /proc
 mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
-mount -t tmpfs -o mode=0755,nosuid,nodev,strictatime,size=20%,nr_inodes=800k tmpfs /run
 
 id_dir=/run/cherry/identity
 mkdir -p "$id_dir"

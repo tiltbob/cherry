@@ -79,7 +79,7 @@ test:
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
 	check-postbuild check-firewall check-secureboot check-ceremony check-var \
-	check-storage check-version
+	check-storage check-pcrsign check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -158,6 +158,11 @@ check-var:
 # cherry-storage claims only the disks it may, and drives LVM as it should.
 check-storage:
 	python3 tests/storage.py
+
+# scripts/pcrsign.py computes, signs and checks the UKI's PCR 11 policy as
+# systemd does.
+check-pcrsign:
+	python3 tests/pcrsign.py
 
 # The image is named after the nearest release tag, and a given name wins.
 check-version:

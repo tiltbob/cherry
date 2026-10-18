@@ -1,12 +1,16 @@
 #!/bin/sh
 # /usr/lib/cherry/var (cherry-var.service) picks the right disk and leaves the
-# others alone: run against a stand-in sysfs (CHERRY_SYSFS) and mount table
-# (CHERRY_MOUNTINFO) in a temporary directory, with stand-in udevadm, wipefs,
-# systemd-repart, systemd-cryptsetup, e2fsck and mount on PATH. wipefs prints
-# the signatures in signatures/<disk>, or fails on signatures/<disk>.error.
-# The others record their calls; systemd-repart adds the cherry-var partition
-# <disk>1 to the sysfs, systemd-cryptsetup, systemd-repart and mount fail when
-# FAKE_FAIL names them, and e2fsck exits with FAKE_E2FSCK.
+# others alone, and seals its key to the boot state: run against a stand-in
+# sysfs (CHERRY_SYSFS), mount table (CHERRY_MOUNTINFO) and PCR policy
+# (CHERRY_PCR_SIGNATURE, CHERRY_PCR_PUBLIC_KEY) in a temporary directory, with
+# stand-in udevadm, wipefs, systemd-repart, systemd-cryptsetup, cryptsetup,
+# systemd-cryptenroll, e2fsck and mount on PATH. wipefs prints the signatures
+# in signatures/<disk>, or fails on signatures/<disk>.error. The others record
+# their calls; systemd-repart adds the cherry-var partition <disk>1 to the
+# sysfs, cryptsetup prints a LUKS2 header, as cryptsetup prints one, whose TPM
+# token FAKE_TOKEN names (sealed to the policy, empty, under another key, or
+# both), systemd-cryptsetup, systemd-cryptenroll, systemd-repart and mount fail
+# when FAKE_FAIL names them, and e2fsck exits with FAKE_E2FSCK.
 set -eu
 cd "$(dirname "$0")/.."
 script=$PWD/board/x86_64/rootfs-overlay/usr/lib/cherry/var
@@ -15,8 +19,12 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin" "$tmp/signatures"
 export PATH="$tmp/bin:$PATH" CHERRY_SYSFS="$tmp/sys" CHERRY_MOUNTINFO="$tmp/mountinfo" CALLS="$tmp/calls" \
-	SIGNATURES="$tmp/signatures"
+	SIGNATURES="$tmp/signatures" CHERRY_PCR_SIGNATURE="$tmp/pcr.json" CHERRY_PCR_PUBLIC_KEY="$tmp/pcr.pem"
 block=$CHERRY_SYSFS/class/block
+# The policy as cherry-pit leaves it: the signature, and the public key, whose
+# base64 is what a token sealed under it holds.
+echo '{"sha256":[]}' >"$CHERRY_PCR_SIGNATURE"
+printf -- '-----BEGIN PUBLIC KEY-----\n/n0t+a/key==\n-----END PUBLIC KEY-----\n' >"$CHERRY_PCR_PUBLIC_KEY"
 
 printf '#!/bin/sh\n' >"$tmp/bin/udevadm"
 cat >"$tmp/bin/wipefs" <<'EOF'
@@ -40,6 +48,37 @@ cat >"$tmp/bin/systemd-cryptsetup" <<'EOF'
 #!/bin/sh
 echo "systemd-cryptsetup $*" >>"$CALLS"
 [ "${FAKE_FAIL:-}" != systemd-cryptsetup ] || [ "$1" != attach ] || exit 1
+EOF
+# The header's JSON as cryptsetup prints it: whitespace of its own, and the
+# slashes escaped.
+cat >"$tmp/bin/cryptsetup" <<'EOF'
+#!/bin/sh
+echo "cryptsetup $*" >>"$CALLS"
+[ "$1" = luksDump ] || exit 1
+key=$(base64 -w 0 "$CHERRY_PCR_PUBLIC_KEY" | sed 's,/,\\/,g')
+# token <slot> <pcrs> [<public key>]
+token() {
+	printf '    "%s":{\n      "type":"systemd-tpm2",\n      "keyslots":[\n        "%s"\n      ],\n' "$1" "$1"
+	printf '      "tpm2-pcrs":[%s\n      ]' "$2"
+	[ -z "${3:-}" ] || printf ',\n      "tpm2_pubkey_pcrs":[\n        11\n      ],\n      "tpm2_pubkey":"%s"' "$3"
+	printf '\n    }'
+}
+printf '{\n  "tokens":{\n'
+case ${FAKE_TOKEN:-sealed} in
+sealed) token 0 '
+        7' "$key" ;;
+empty) token 0 '' ;;
+other) token 0 '
+        7' "$(printf 'another key' | base64 -w 0)" ;;
+both) token 0 ''; printf ',\n'; token 1 '
+        7' "$key" ;;
+esac
+printf '\n  }\n}\n'
+EOF
+cat >"$tmp/bin/systemd-cryptenroll" <<'EOF'
+#!/bin/sh
+echo "systemd-cryptenroll $*" >>"$CALLS"
+[ "${FAKE_FAIL:-}" != systemd-cryptenroll ] || exit 1
 EOF
 cat >"$tmp/bin/e2fsck" <<'EOF'
 #!/bin/sh
@@ -130,12 +169,15 @@ not:
 $4"
 }
 
-unlock="systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto,headless"
+unlock="systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto,tpm2-signature=$CHERRY_PCR_SIGNATURE,headless"
+dump="cryptsetup luksDump --dump-json-metadata /dev/vda1"
 check="e2fsck -p /dev/mapper/cherry-var"
 mount="mount -t ext4 -o nodev /dev/mapper/cherry-var /var"
 detach="systemd-cryptsetup detach cherry-var"
-repart="systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/repart.d"
-repart="$repart --tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= /dev/vda"
+policy="--tpm2-device=auto --tpm2-pcrs=7 --tpm2-public-key=$CHERRY_PCR_PUBLIC_KEY --tpm2-public-key-pcrs=11"
+repart="systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/repart.d $policy /dev/vda"
+reseal="systemd-cryptenroll --unlock-tpm2-device=auto $policy --tpm2-signature=$CHERRY_PCR_SIGNATURE"
+reseal="$reseal --wipe-slot=tpm2 /dev/vda1"
 
 fresh
 echo '36 25 0:32 / /var rw,nodev,relatime shared:5 - tmpfs tmpfs rw,size=1536000k' >"$CHERRY_MOUNTINFO"
@@ -147,13 +189,15 @@ unsuitable
 run
 expect "no blank disk" 0 "no partition labelled cherry-var and no blank disk: /var is a tmpfs" ""
 
-# The first blank disk, after all those that are not, and only that one.
+# The first blank disk, after all those that are not, and only that one: its
+# key sealed to the policy, which the header then shows.
 disk vda
 disk vdb
 run
 expect "first boot" 0 "making the blank disk /dev/vda this machine's encrypted disk for /var" \
 	"$repart
 $unlock
+$dump
 $check
 $mount"
 printf '%s\n' "$out" | grep -qxF "/var is on /dev/vda1, unlocked with the TPM" || die "first boot: $out"
@@ -162,8 +206,28 @@ printf '%s\n' "$out" | grep -qxF "/var is on /dev/vda1, unlocked with the TPM" |
 # The next boot unlocks the partition it made, and claims nothing.
 run
 expect "next boot" 0 "/var is on /dev/vda1, unlocked with the TPM" "$unlock
+$dump
 $check
 $mount"
+
+# A key sealed before the policy, or under another image's key, or in one slot
+# of two, is sealed to the policy anew, and the old slot goes; when that fails,
+# /var is mounted all the same.
+for token in empty other both; do
+	FAKE_TOKEN=$token run
+	expect "sealed $token" 0 "sealing the key of /dev/vda1 to the boot state anew" "$unlock
+$dump
+$reseal
+$check
+$mount"
+done
+FAKE_TOKEN=empty FAKE_FAIL=systemd-cryptenroll run
+expect "reseal failed" 0 "cannot seal the key of /dev/vda1 to the boot state: its slot stays as it is" "$unlock
+$dump
+$reseal
+$check
+$mount"
+printf '%s\n' "$out" | grep -qxF "/var is on /dev/vda1, unlocked with the TPM" || die "reseal failed: $out"
 
 # A partition that the TPM cannot unlock: nothing else is touched.
 export FAKE_FAIL=systemd-cryptsetup
@@ -176,6 +240,7 @@ expect "locked" 1 "the TPM cannot unlock /dev/vda1; /var is a tmpfs" "$unlock"
 export FAKE_E2FSCK=1
 run
 expect "e2fsck corrected" 0 "/var is on /dev/vda1, unlocked with the TPM" "$unlock
+$dump
 $check
 $mount"
 export FAKE_E2FSCK=4
@@ -183,6 +248,7 @@ run
 unset FAKE_E2FSCK
 expect "e2fsck failed" 1 "e2fsck found errors it cannot repair on /dev/vda1 (exit status 4); /var is a tmpfs" \
 	"$unlock
+$dump
 $check
 $detach"
 
@@ -190,6 +256,7 @@ export FAKE_FAIL=mount
 run
 unset FAKE_FAIL
 expect "mount failed" 1 "cannot mount /dev/mapper/cherry-var (/dev/vda1) on /var; /var is a tmpfs" "$unlock
+$dump
 $check
 $mount
 $detach"
@@ -206,5 +273,11 @@ export FAKE_FAIL=systemd-repart
 run
 unset FAKE_FAIL
 expect "repart failed" 1 "systemd-repart could not set up /dev/vda; /var is a tmpfs" "$repart"
+
+# Without the image's policy, nothing is claimed or unlocked.
+mv "$CHERRY_PCR_SIGNATURE" "$tmp/pcr.json.away"
+run
+expect "no policy" 1 "the image carries no PCR policy ($CHERRY_PCR_PUBLIC_KEY, $CHERRY_PCR_SIGNATURE) to seal a key to: nothing is unlocked or claimed; /var is a tmpfs" ""
+mv "$tmp/pcr.json.away" "$CHERRY_PCR_SIGNATURE"
 
 echo "var: $n cases passed"

@@ -3,7 +3,9 @@ config BR2_PACKAGE_CHERRY_PIT
 	help
 	  The /init of Cherry's initramfs: it mounts the root
 	  filesystem, a compressed EROFS image in the initramfs,
-	  straight from the file, and runs the /init of that root.
+	  straight from the file, gives it a tmpfs /run with the UKI's
+	  PCR signature and public key, which systemd-stub left in the
+	  initramfs, and runs the /init of that root.
 
 	  A static binary, installed to the images directory, where
 	  post-image.sh packs it into the initramfs.

@@ -13,10 +13,15 @@
 # systemd-repart makes all of it the cherry-var partition
 # (/usr/lib/cherry/repart.d), with a new key that the TPM seals.
 #
-# The key is sealed without a PCR policy, for now: the TPM unseals it whatever
-# the machine booted, so it protects a disk taken out of the machine, not a
-# machine booted into something else. Clearing the TPM loses the key, and the
-# data with it.
+# The key is sealed to the boot state: to PCR 7, the firmware's Secure Boot
+# state, and to PCR 11, which systemd-stub measured the image into, under the
+# image's PCR key, whose public half and signatures over the values PCR 11 may
+# hold cherry-pit left in /run/systemd (scripts/pcrsign.py). So the TPM
+# unseals it only booted into a Cherry image that key signed, with Secure Boot
+# as it was: elsewhere, and under anything else booted here, the disk is
+# unreadable. A disk sealed another way, before this policy, is sealed again
+# under it as it is unlocked, and its old slot goes. Clearing the TPM loses
+# the key, and the data with it.
 #
 # Nothing here erases anything. If the cherry-var partition cannot be unlocked
 # or its filesystem mounted, this fails and /var is a tmpfs for the boot; with
@@ -29,9 +34,11 @@ volume=cherry-var
 definitions=/usr/lib/cherry/repart.d
 # 1 GiB, in the 512-byte sectors of /sys/class/block/*/size.
 min_sectors=2097152
-# tests/var.sh stands in a sysfs and a mount table of its own.
+# tests/var.sh stands in a sysfs, a mount table and a PCR policy of its own.
 block=${CHERRY_SYSFS:-/sys}/class/block
 mountinfo=${CHERRY_MOUNTINFO:-/proc/self/mountinfo}
+signature=${CHERRY_PCR_SIGNATURE:-/run/systemd/tpm2-pcr-signature.json}
+public_key=${CHERRY_PCR_PUBLIC_KEY:-/run/systemd/tpm2-pcr-public-key.pem}
 
 fail() {
 	echo "$1; /var is a tmpfs" >&2
@@ -75,9 +82,40 @@ blank_disk() {
 	done
 }
 
+# count <text> <string>: how often the string occurs in the text.
+count() {
+	printf '%s' "$1" | grep -o -F -- "$2" | wc -l
+}
+
+# sealed <device>: every TPM slot of the LUKS2 volume is sealed to the policy:
+# PCR 7, and PCR 11 under the image's key. cryptsetup prints the header's JSON
+# with whitespace and escaped slashes of its own, taken out (the backslashes
+# as \134) to match on.
+sealed() {
+	tokens=$(cryptsetup luksDump --dump-json-metadata "$1" | tr -d ' \n\t\134')
+	key=$(base64 -w 0 "$public_key")
+	n=$(count "$tokens" '"type":"systemd-tpm2"')
+	[ "$n" -gt 0 ] && [ "$(count "$tokens" "\"tpm2_pubkey\":\"$key\"")" -eq "$n" ] &&
+		[ "$(count "$tokens" '"tpm2-pcrs":[7]')" -eq "$n" ]
+}
+
+# reseal <device>: the key sealed to the policy in a new TPM slot, unlocked
+# with the slot it has, which then goes. cherry-storage does the same for the
+# claimed disks.
+reseal() {
+	echo "sealing the key of $1 to the boot state anew"
+	systemd-cryptenroll --unlock-tpm2-device=auto --tpm2-device=auto --tpm2-pcrs=7 \
+		--tpm2-public-key="$public_key" --tpm2-public-key-pcrs=11 --tpm2-signature="$signature" \
+		--wipe-slot=tpm2 "$1" >/dev/null ||
+		echo "cannot seal the key of $1 to the boot state: its slot stays as it is" >&2
+}
+
 if awk '$5 == "/var" { found = 1 } END { exit !found }' "$mountinfo"; then
 	echo "/var is mounted already"
 	exit 0
+fi
+if [ ! -s "$public_key" ] || [ ! -s "$signature" ]; then
+	fail "the image carries no PCR policy ($public_key, $signature) to seal a key to: nothing is unlocked or claimed"
 fi
 
 # Every disk the kernel found at boot, as udev set it up.
@@ -96,7 +134,7 @@ if [ $# -eq 0 ]; then
 	fi
 	echo "making the blank disk /dev/$disk this machine's encrypted disk for /var"
 	systemd-repart --dry-run=no --empty=require --definitions="$definitions" \
-		--tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= "/dev/$disk" ||
+		--tpm2-device=auto --tpm2-pcrs=7 --tpm2-public-key="$public_key" --tpm2-public-key-pcrs=11 "/dev/$disk" ||
 		fail "systemd-repart could not set up /dev/$disk"
 	udevadm settle --timeout=60 || true
 	# shellcheck disable=SC2046
@@ -105,8 +143,11 @@ if [ $# -eq 0 ]; then
 fi
 part=/dev/$1
 
-systemd-cryptsetup attach "$volume" "$part" - tpm2-device=auto,headless ||
+systemd-cryptsetup attach "$volume" "$part" - "tpm2-device=auto,tpm2-signature=$signature,headless" ||
 	fail "the TPM cannot unlock $part"
+if ! sealed "$part"; then
+	reseal "$part"
+fi
 
 # What a crash left (a watchdog reset is one), repaired as systemd-fsck would:
 # 1 is errors corrected, 4 and above errors left.

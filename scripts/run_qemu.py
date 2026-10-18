@@ -11,8 +11,10 @@ The swtpm state in <state>/tpm is the VM's TPM, and so its identity: it stays
 the same machine across runs until that directory is deleted. Without a disk,
 every run otherwise starts from scratch. --disk SIZE attaches <state>/disk.img,
 a sparse virtio disk created blank with that size: Cherry makes it the VM's
-encrypted /var at the first boot, its key sealed by that TPM, and unlocks it
-at the next. Delete both for a new machine. --hdd SIZE and --ssd SIZE, each
+encrypted /var at the first boot, its key sealed by that TPM to the boot state
+and to the build tree's PCR key (output/<name>/pcr.key, which the build keeps;
+`make clean` takes it, and the disk then unlocks under no image, until wipefs),
+and unlocks it at the next. Delete both for a new machine. --hdd SIZE and --ssd SIZE, each
 repeatable, attach more disks for storage pools, blank and kept likewise:
 <state>/hdd<N>.img on virtio-blk, which the guest sees as hard disks, and
 <state>/ssd<N>.img on NVMe, which it sees as SSDs.

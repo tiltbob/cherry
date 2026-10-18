@@ -37,10 +37,10 @@ checks it out).
 | `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
-| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys) |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys and of the PCR key) |
 | `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
-| `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`; each one's docstring is its manual |
+| `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`, `pcrsign.py`; each one's docstring is its manual |
 | `tests/` | the checks that `make check` runs, one file each, and `smoke.py`, the end-to-end test in QEMU |
 | `.github/workflows/` | `build.yml` (checks, build, smoke test, image releases) and `sdk.yml` (toolchain releases) |
 | `output/`, `dl/`, `.ccache/` | build output, downloads and ccache: ignored, never committed |
@@ -78,6 +78,14 @@ is, what runs it and what it needs. Read that before the code.
 - **A TPM 2.0 is mandatory.** The machine ID and hostname come from its
   endorsement key, in `/init`, before systemd starts. Without one, boot stops
   at `cherry-no-tpm.target`.
+- **The disks' keys are sealed to the boot state:** PCR 7, and PCR 11 under
+  the image's signed policy (`scripts/pcrsign.py`, which `post-image.sh` signs
+  it with; `cherry-pit` hands the signature and key to `/run/systemd`). Every
+  path that seals or unlocks a key, in `usr/lib/cherry/var` and
+  `cherry-storage`, passes that policy, and reseals a key sealed another way;
+  smoke scenario 15 proves that a changed or re-signed image unlocks nothing.
+  A release is signed with the repository's PCR key, in the release job, so
+  that an update still unlocks the disks.
 - **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
   committed public half of keys that live on a Nitrokey HSM 2 and in the
   `release` environment's secret. Never regenerate, edit or "fix" them;
@@ -126,8 +134,9 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
 | `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
-| `var` | `cherry-var.service` claims only a blank disk, and unlocks the right partition | |
+| `var` | `cherry-var.service` claims only a blank disk, unlocks the right partition, and seals its key to the boot state | |
 | `storage` | `cherry-storage` claims only the disks it may, and drives LVM as it should, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
+| `pcrsign` | `scripts/pcrsign.py` measures, signs and checks a UKI's PCR 11 policy as systemd does: on PE binaries the test makes, against systemd's vectors | openssl |
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
@@ -135,7 +144,7 @@ A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
 without theirs. CI installs all of them (`build.yml`, "Install check tools").
 An agent sandbox usually has python3, node, make, git, systemd and openssl,
 and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the submodule: then
-`make -k check` runs eleven checks, skips three and fails three for want of
+`make -k check` runs twelve checks, skips three and fails three for want of
 tools. Get the submodule with `git submodule update --init --depth 1
 buildroot` and install what you can; in the pull request, say which checks
 ran.
@@ -343,6 +352,7 @@ two defconfigs' toolchain options must stay the same.
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
 | Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s3, s11 | Machine identity |
 | `/var` on an encrypted disk | `usr/lib/cherry/var`, `cherry-var.service`, `usr/lib/cherry/repart.d/` | `tests/var.sh`, s13 | Disks |
+| The disks' keys sealed to the boot state | `scripts/pcrsign.py`, `board/x86_64/post-image.sh`, `package/cherry-pit/src/cherry-pit.c`, `usr/lib/cherry/var`, `package/cherry/cherry-storage`, `scripts/secureboot.py pcr`, the `release` job of `build.yml` | `tests/pcrsign.py`, `tests/var.sh`, `tests/storage.py`, `tests/ceremony.sh`, s13, s15 | Disks, Secure Boot |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |

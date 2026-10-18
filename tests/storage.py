@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """package/cherry/cherry-storage claims only the disks it should, and drives LVM as the README says.
 
-The helper runs against a stand-in sysfs, udev database, mount table and swap list in a temporary directory, with
-stand-ins on PATH for lvm, wipefs, systemd-repart, systemd-cryptsetup, udevadm, mkfs.ext4, e2fsck, resize2fs, mount,
-umount and df. They are this file, under those names: they keep the machine's state (signatures, which partitions the
-TPM unlocks, LVM's physical volumes, volume groups and logical volumes, with the extents each takes on each physical
-volume) in a JSON file, change the stand-in sysfs as the real commands would (systemd-repart adds the cherry-pv
-partition, systemd-cryptsetup the device-mapper device that holds it), and record the calls that change something.
+The helper runs against a stand-in sysfs, udev database, mount table, swap list and PCR policy in a temporary
+directory, with stand-ins on PATH for lvm, wipefs, systemd-repart, cryptsetup, systemd-cryptenroll, systemd-cryptsetup,
+udevadm, mkfs.ext4, e2fsck, resize2fs, mount, umount and df. They are this file, under those names: they keep the
+machine's state (signatures, which partitions the TPM unlocks and what policy their keys are sealed to, LVM's
+physical volumes, volume groups and logical volumes, with the extents each takes on each physical volume) in a JSON
+file, change the stand-in sysfs as the real commands would (systemd-repart adds the cherry-pv partition,
+systemd-cryptsetup the device-mapper device that holds it), and record the calls that change something, and
+cryptsetup's dumps of a header.
 The stand-in LVM refuses what LVM refuses: allocating more than there is, reducing a physical volume still in use,
 moving or growing a cached volume. Needs python3, sh, coreutils, awk, sed and util-linux's flock.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -253,16 +256,33 @@ def repart(state, args):
 
 def luks(state, args, name):
     """cryptsetup luksFormat with a key file, then systemd-cryptenroll with it, which seals a new key slot's key in
-    the TPM and wipes the key file's."""
+    the TPM, to the policy, and wipes the key file's; systemd-cryptenroll unlocking with the TPM seals it to the
+    policy anew; cryptsetup luksDump prints the header's JSON as cryptsetup does, with whitespace and escaped slashes,
+    its TPM token sealed as the state's policy says: to the policy, empty, or under another key."""
     state["calls"].append(" ".join([name, *args]))
     part = args[-1].removeprefix("/dev/")
+    if args[0] == "luksDump":
+        check(args[1] == "--dump-json-metadata", f"cryptsetup {args}")
+        with open(os.environ["CHERRY_PCR_PUBLIC_KEY"], "rb") as f:
+            key = base64.b64encode(f.read()).decode()
+        policy = state["policy"].get(part, "sealed")
+        token = {"type": "systemd-tpm2", "keyslots": ["1"], "tpm2-pcrs": [7] if policy != "empty" else []}
+        if policy != "empty":
+            token.update({"tpm2_pubkey_pcrs": [11], "tpm2_pubkey": key if policy == "sealed" else "b3RoZXIK"})
+        print(json.dumps({"tokens": {"0": token}}, indent=2).replace("/", "\\/"))
+        return
     if name in state["fail"]:
         raise Exit(1, f"{name} failing as told")
+    if args[0] == "--unlock-tpm2-device=auto":
+        state["policy"][part] = "sealed"
+        return
     key = args[args.index("--key-file") + 1] if name == "cryptsetup" else args[0].split("=", 1)[1]
     with open(key, "rb") as f:
         check(len(f.read()) == 64, f"{name}: the key in {key} is not 64 bytes")
     if name == "cryptsetup":
         state["signatures"][part] = [{"UUID": f"luks-{part}", "TYPE": "crypto_LUKS", "OFFSET": "0x0"}]
+    else:
+        state["policy"][part] = "sealed"
 
 
 def make_device(state, name, sectors, uevent, partition=True):
@@ -353,10 +373,16 @@ class Machine:
         self.env = dict(os.environ, CHERRY_SYSFS=f"{tmp}/sys", CHERRY_UDEV=f"{tmp}/udev",
                         CHERRY_MOUNTINFO=f"{tmp}/mountinfo", CHERRY_SWAPS=f"{tmp}/swaps",
                         CHERRY_IDENTITY=f"{tmp}/identity", CHERRY_VOLUMES=f"{tmp}/home/volumes",
-                        CHERRY_STORAGE_USER=user,
+                        CHERRY_STORAGE_USER=user, CHERRY_PCR_SIGNATURE=f"{tmp}/pcr.json",
+                        CHERRY_PCR_PUBLIC_KEY=f"{tmp}/pcr.pem",
                         CHERRY_STORAGE_LOCK=f"{tmp}/lock", LOGS_DIRECTORY=f"{tmp}/logs", STORAGE_STATE=f"{tmp}/state",
                         PATH=f"{tmp}/bin:{os.environ['PATH']}")
         os.makedirs(f"{tmp}/bin")
+        # The image's PCR policy, as cherry-pit leaves it.
+        with open(f"{tmp}/pcr.json", "w") as f:
+            f.write('{"sha256":[]}\n')
+        with open(f"{tmp}/pcr.pem", "w") as f:
+            f.write("-----BEGIN PUBLIC KEY-----\n/n0t+a/key==\n-----END PUBLIC KEY-----\n")
         for name in STANDINS:
             with open(f"{tmp}/bin/{name}", "w") as f:
                 f.write(f'#!/bin/sh\nexec python3 -S {os.path.abspath(__file__)} {name} "$@"\n')
@@ -378,8 +404,8 @@ class Machine:
         open(f"{self.tmp}/mountinfo", "w").write(
             "36 25 0:32 / /var rw,nodev,relatime shared:5 - ext4 /dev/mapper/cherry-var rw\n")
         open(f"{self.tmp}/swaps", "w").write("Filename\tType\tSize\tUsed\tPriority\n/dev/zram0\tpartition\t1\t0\t100\n")
-        save({"calls": [], "pvs": {}, "vgs": {}, "lvs": {}, "signatures": {}, "locked": [], "fail": [], "busy": [],
-              "e2fsck": {}, "stale": [], "minor": 0})
+        save({"calls": [], "pvs": {}, "vgs": {}, "lvs": {}, "signatures": {}, "locked": [], "policy": {}, "fail": [],
+              "busy": [], "e2fsck": {}, "stale": [], "minor": 0})
 
     def state(self):
         return load()
@@ -478,21 +504,38 @@ def expect(name, result, rc, line, calls=None):
         check(got == calls, f"{name}: called\n  " + "\n  ".join(got) + "\nnot\n  " + "\n  ".join(calls))
 
 
-REPART = ("systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/storage/repart.d "
-          "--tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs=")
+REPART = "systemd-repart --dry-run=no --empty=require --definitions=/usr/lib/cherry/storage/repart.d"
+# The policy the keys are sealed to, and the signature that unlocks them, as the script passes them.
+POLICY = "--tpm2-device=auto --tpm2-pcrs=7 --tpm2-public-key={pem} --tpm2-public-key-pcrs=11 --tpm2-signature={sig}"
+
+
+def policy():
+    return POLICY.format(pem=m.env["CHERRY_PCR_PUBLIC_KEY"], sig=m.env["CHERRY_PCR_SIGNATURE"])
+
+
+def attach(part):
+    return f"systemd-cryptsetup attach cherry-pv-{part} /dev/{part} - tpm2-device=auto,tpm2-signature=" \
+           f"{m.env['CHERRY_PCR_SIGNATURE']},headless"
+
+
+def dump(part):
+    return f"cryptsetup luksDump --dump-json-metadata /dev/{part}"
+
+
+def reseal(part):
+    return f"systemd-cryptenroll --unlock-tpm2-device=auto {policy()} --wipe-slot=tpm2 /dev/{part}"
 
 
 def luks_calls(part):
-    """What makes the partition a LUKS2 volume that only the TPM unlocks, with a key file in some temporary
-    directory."""
-    calls = [c for c in m.calls() if c.startswith(("cryptsetup ", "systemd-cryptenroll "))]
+    """What makes the partition a LUKS2 volume that only the TPM unlocks, sealed to the policy, with a key file in
+    some temporary directory."""
+    calls = [c for c in m.calls() if c.startswith(("cryptsetup luksFormat", "systemd-cryptenroll "))]
     check(len(calls) == 2, f"no cryptsetup and systemd-cryptenroll calls: {m.calls()}")
     key = calls[0].split("--key-file ")[1].split()[0]
     check(not os.path.exists(key), f"the key file {key} is left")
     return [f"cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 "
             f"--key-file {key} /dev/{part}",
-            f"systemd-cryptenroll --unlock-key-file={key} --tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= "
-            f"--wipe-slot=0 /dev/{part}"]
+            f"systemd-cryptenroll --unlock-key-file={key} {policy()} --wipe-slot=0 /dev/{part}"]
 
 
 def claim(*disks):
@@ -602,14 +645,18 @@ def tests():
         os.remove(f"{tmp()}/identity/ek-hash")
         expect("no TPM", m.run(f"claim:sda:{fp}"), 1, "no usable TPM", [])
         open(f"{tmp()}/identity/ek-hash", "w").write("0" * 64 + "\n")
+        os.rename(m.env["CHERRY_PCR_SIGNATURE"], m.env["CHERRY_PCR_SIGNATURE"] + ".away")
+        expect("no policy", m.run(f"claim:sda:{fp}"), 1, "the image carries no PCR policy", [])
+        rc, out = m.run("boot", "start")
+        check(rc == 1 and "the image carries no PCR policy" in out and m.calls() == [], out + str(m.calls()))
+        os.rename(m.env["CHERRY_PCR_SIGNATURE"] + ".away", m.env["CHERRY_PCR_SIGNATURE"])
 
     @case("claim wipes the disk, partitions first, and makes it a physical volume")
     def _():
         expect("claim sdb", m.run(f"claim:sdb:{m.fingerprint('sdb')}"), 0,
                "claimed /dev/sdb: /dev/sdb1, unlocked with the TPM as /dev/mapper/cherry-pv-sdb1",
                ["wipefs --all /dev/sdb1", "wipefs --all /dev/sdb", f"{REPART} /dev/sdb", *luks_calls("sdb1"),
-                "systemd-cryptsetup attach cherry-pv-sdb1 /dev/sdb1 - tpm2-device=auto,headless",
-                "lvm pvcreate -y /dev/mapper/cherry-pv-sdb1"])
+                attach("sdb1"), "lvm pvcreate -y /dev/mapper/cherry-pv-sdb1"])
         sdb = next(d for d in m.list()["disks"] if d["name"] == "sdb")
         check(sdb["state"] == "claimed" and sdb["pv"] == "/dev/mapper/cherry-pv-sdb1", sdb)
         expect("again", m.run(f"claim:sdb:{sdb['fingerprint']}"), 1, "/dev/sdb cannot be claimed: claimed")
@@ -861,15 +908,20 @@ def tests():
         check(calls[:3] == [f"umount {vols}/web", f"umount {vols}/db", "lvm vgchange -an tank"]
               and sorted(calls[3:]) == [f"systemd-cryptsetup detach cherry-pv-{p}"
                                         for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
-        # sdc's volume belongs to another TPM now: the rest goes on.
-        m.change(locked=["sdc1"], e2fsck={"/dev/tank/db": 4})
+        # sdc's volume belongs to another TPM now, sda's key was sealed before the policy and sdb's under another
+        # image's key: those two are sealed anew, the rest goes on.
+        m.change(locked=["sdc1"], e2fsck={"/dev/tank/db": 4}, policy={"sda1": "empty", "sdb1": "other"})
         rc, out = m.run("boot", "start")
         check(rc == 1 and "the TPM cannot unlock /dev/sdc1: another machine's disk?" in out
               and "e2fsck found errors it cannot repair on tank/db (exit status 4): not mounted" in out, out)
         calls = m.calls()
-        check([c for c in calls if c.startswith("systemd-cryptsetup")] == [
-            f"systemd-cryptsetup attach cherry-pv-{p} /dev/{p} - tpm2-device=auto,headless"
-            for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
+        check([c for c in calls if c.startswith(("systemd-cryptsetup", "cryptsetup", "systemd-cryptenroll"))] == [
+            attach("nvme0n1p1"), dump("nvme0n1p1"), attach("nvme1n1p1"), dump("nvme1n1p1"),
+            attach("sda1"), dump("sda1"), reseal("sda1"), attach("sdb1"), dump("sdb1"), reseal("sdb1"),
+            attach("sdc1")], calls)
+        check(out.count("sealing the key of /dev/sda1 to the boot state anew") == 1
+              and out.count("sealing the key of /dev/sdb1 to the boot state anew") == 1
+              and m.state()["policy"] == {"sda1": "sealed", "sdb1": "sealed"}, out)
         check(calls[-4:] == ["lvm vgchange -ay tank", "e2fsck -p /dev/tank/db", "e2fsck -p /dev/tank/web",
                              f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
         check("lvm vgchange -ay tank" in calls and f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web" in calls
@@ -879,8 +931,14 @@ def tests():
         rc, out = m.run("boot", "start")
         calls = m.calls()
         check(rc == 0 and "e2fsck -p /dev/tank/web" not in calls and "e2fsck -p /dev/tank/db" in calls
-              and [c for c in calls if c.startswith("systemd-cryptsetup")] == [
-                  "systemd-cryptsetup attach cherry-pv-sdc1 /dev/sdc1 - tpm2-device=auto,headless"], out + str(calls))
+              and [c for c in calls if c.startswith("systemd-cryptsetup")] == [attach("sdc1")], out + str(calls))
+        # A key that cannot be sealed anew stays as it is, and its disk is used all the same.
+        m.run("boot", "stop")
+        m.change(fail=["systemd-cryptenroll"], policy={"sdc1": "empty"})
+        rc, out = m.run("boot", "start")
+        m.change(fail=[])
+        check(rc == 0 and "cannot seal the key of /dev/sdc1 to the boot state: its slot stays as it is" in out
+              and reseal("sdc1") in m.calls() and m.state()["policy"] == {"sdc1": "empty"}, out + str(m.calls()))
         # A pool that does not come up: its volumes are not mounted.
         m.run("boot", "stop")
         m.change(fail=["vgchange"])
