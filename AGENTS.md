@@ -270,9 +270,9 @@ unmet: check the symbol's dependencies for this kernel version first.
 `board/x86_64/rootfs-overlay/` is copied onto the root as it is. Cherry's
 units are `cherry-*.service` and `cherry-no-tpm.target`; their scripts live
 under `usr/lib/cherry/`. Order against systemd's targets explicitly (the
-firewall before `network-pre.target`; `cherry-var.service`, of
+firewall before `network-pre.target`; `cherry-storage.service`, of
 `package/cherry/`, before `var.mount`), condition on the TPM where the README
-says (`cherry-var.service`:
+says (`cherry-storage.service`:
 `ConditionPathExists=/run/cherry/identity/ek-hash`), and give each unit the
 hardening its neighbors have.
 `make check-units` verifies the result; a change in what a unit does is also a
@@ -355,13 +355,13 @@ two defconfigs' toolchain options must stay the same.
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
 | Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s4, s12 | Machine identity |
 | SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s4, s12 | SSH host key |
-| `/var` on the pool `cherry`, in RAM until it has disks | `package/cherry/cherry-storage` (`boot var`), `cherry-var.service`, `lvm.conf`; the overlay's `var.mount.d/` | `tests/storage.py`, s1, s2, s4 | Disks |
+| `/var` on the pool `cherry`, in RAM until it has disks | `package/cherry/cherry-storage` (`boot start`), `cherry-storage.service`, `lvm.conf`; the overlay's `var.mount.d/` | `tests/storage.py`, s1, s2, s4 | Disks |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
 | Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
-| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `cherry-var.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
+| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
 | The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s9 | As the cherry user, Cherry service |
 | OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s8, s9 | OpenCode, OpenChamber |
 | The image's name and version | `Makefile`, `board/x86_64/post-build.sh` | `tests/version.sh`, `tests/postbuild.sh` | Building |

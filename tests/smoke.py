@@ -597,7 +597,7 @@ class Smoke:
 
     def check_var_in_ram(self):
         """/var is cherry/var on a zram device of 132 MiB, zstd, the pool cherry's one physical volume, tagged ram:
-        the pool in RAM, var 128 MiB, as cherry-var.service made it."""
+        the pool in RAM, var 128 MiB, as cherry-storage.service made it."""
         vm = self.vm
         dm = self.check_var_mount()
         zram = vm.run(f"ls /sys/class/block/{dm}/slaves")
@@ -608,7 +608,7 @@ class Smoke:
               "cherry/var is not 128 MiB")
         check(vm.run("pvs --noheadings -o pv_name,pv_tags").split() == [f"/dev/{zram}", "ram"],
               "LVM sees other physical volumes than the pool cherry's zram device, tagged ram")
-        vm.run(f"journalctl -b -u cherry-var --no-pager -o cat | grep -q 'in RAM on /dev/{zram}'")
+        vm.run(f"journalctl -b -u cherry-storage --no-pager -o cat | grep -q 'in RAM on /dev/{zram}'")
 
     def check_var_on_pool(self, partition):
         """/var is cherry/var on the LUKS2 volume of the given partition, labelled cherry-pv, which the TPM unlocks:
@@ -770,11 +770,11 @@ class Smoke:
         vm.wait_exit(300)
         # The same TPM, attached through the other interface: the disk unlocked, var mounted, the files there.
         self.boot(tpm_interface="tis", disks=[self.var_disk])
-        journal = "journalctl -b -u cherry-var --no-pager -o cat"
+        journal = "journalctl -b -u cherry-storage --no-pager -o cat"
         shown = vm.run(journal)
-        log("cherry-var.service:\n" + shown)
+        log("cherry-storage.service:\n" + shown)
         check("/var is cherry/var (btrfs) on the pool's disks, unlocked with the TPM" in shown and "RAM" not in shown,
-              f"cherry-var.service did not mount the pool's var alone:\n{shown}")
+              f"cherry-storage.service did not mount the pool's var alone:\n{shown}")
         # Left clean, it has no tree log for the mount to replay.
         check("tree-log replay" not in vm.run("dmesg | grep BTRFS || true"),
               "/var was not unmounted cleanly at the poweroff: the mount replayed a tree log")

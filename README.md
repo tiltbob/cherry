@@ -375,7 +375,7 @@ and `var` moves onto them live, a `pvmove` of its 128 MiB, with nothing
 stopped or restarted; the zram device then goes. `var` is then grown
 (`resize_volume`), and `/var` with it. From then on, `/var` persists.
 
-`cherry-var.service` (`cherry-storage boot var start`, see
+`cherry-storage.service` (`cherry-storage boot start`, see
 [`cherry-storage`](package/cherry/cherry-storage)) does it before systemd
 mounts `/var`, and only on a machine with a usable TPM:
 
@@ -388,18 +388,19 @@ mounts `/var`, and only on a machine with a usable TPM:
   `/var` as `/dev/mapper/cherry-var`. A disk of the pool that is missing and
   that no volume uses (the zram device, after a crash between the move of
   `var` off it and its removal) is dropped from the pool; one a volume uses
-  fails the unit, and `/var` is a tmpfs for that boot, the disks as they
-  were (`vgreduce --removemissing --force`, as root, gives the volumes up).
+  fails the unit, and `/var` is a tmpfs for that boot, with no volume
+  mounted and the disks as they were (`vgreduce --removemissing --force`, as
+  root, gives the volumes up).
 - **No pool:** the pool is made in RAM, as above. Disks the TPM cannot
   unlock are not seen, so a machine with another machine's disks boots like
   one without.
 - **Without either,** should making the pool in RAM fail, `/var` is a tmpfs
   of up to half the RAM, and nothing persists.
 
-systemd then fills `/var` with what it lacks of the image's factory defaults.
-Once `/var` is there, `cherry-storage.service` mounts the pools' other
-volumes (see [Storage](#storage)). At shutdown, those are unmounted first,
-then `/var`, and then the pool is deactivated and the disks closed.
+The same unit then mounts the pools' other volumes under `/var` (see
+[Storage](#storage)), and systemd fills `/var` with what it lacks of the
+image's factory defaults. At shutdown, systemd unmounts the volumes and then
+`/var`, and the unit deactivates the pools and closes the disks.
 
 The TPM is the keys' only holder: there is no passphrase or recovery key.
 Clearing the TPM (in the firmware setup, or `tpm2_clear`) loses the keys, and
@@ -472,17 +473,15 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   resize`.
 - **Taking a data disk out** of a pool moves its data to the pool's other data
   disks first (`pvmove`), with the volumes' caches detached meanwhile.
-- **At boot,** `cherry-var.service` unlocks every `cherry-pv` partition with
-  the TPM and brings up the pool `cherry` and `/var`, before systemd mounts
-  `/var` (see [Disks](#disks)); then, before `cherry.service`,
-  `cherry-storage.service` activates each pool, which nothing else does
-  (their volume groups are made without autoactivation), checks each
-  volume's filesystem (`e2fsck -p`) and mounts it. At shutdown, once
-  `cherry.service` has stopped, it unmounts the volumes and deactivates every
-  pool but `cherry`; once `/var` is unmounted, `cherry-var.service`
-  deactivates that one and closes the disks. A disk the TPM cannot unlock,
-  or a volume with errors `e2fsck -p` left, is reported and left alone, and
-  the rest goes on. Both units run `cherry-storage boot`.
+- **At boot,** before systemd mounts `/var`, `cherry-storage.service`
+  (`cherry-storage boot start`) unlocks every `cherry-pv` partition with the
+  TPM, brings up the pool `cherry` and `/var` (see [Disks](#disks)), then
+  activates each other pool, which nothing else does (their volume groups
+  are made without autoactivation), and checks each volume's filesystem
+  (`e2fsck -p`) and mounts it. At shutdown, once systemd has unmounted the
+  volumes and `/var`, it deactivates the pools and closes the disks. A disk
+  the TPM cannot unlock, or a volume with errors `e2fsck -p` left, is
+  reported and left alone, and the rest goes on.
 - **One operation at a time:** another one fails at once. Each logs to
   `/var/log/cherry-storage/<instance>.log`, which the `cherry` user can read.
 

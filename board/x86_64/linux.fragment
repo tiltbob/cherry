@@ -40,7 +40,7 @@ CONFIG_IGB=y
 CONFIG_R8169=y
 
 # Filesystems for containers and their images, and for disks: btrfs for /var,
-# the pool cherry's volume var (cherry-var.service), where an environment is a
+# the pool cherry's volume var (cherry-storage.service), where an environment is a
 # snapshot of its image (machinectl clone) and takes space only for what it
 # changes; ext4 for the storage volumes (cherry-storage).
 CONFIG_BLK_DEV_LOOP=y
@@ -141,7 +141,7 @@ CONFIG_DM_MIRROR=y
 # filesystem and /var included, is in RAM; under memory pressure, the kernel
 # compresses cold pages, tmpfs ones too, into /dev/zram0 with zstd. A second
 # zram device holds the pool cherry, and so /var, until the pool has disks
-# (cherry-var.service).
+# (cherry-storage.service).
 CONFIG_SWAP=y
 CONFIG_ZRAM=y
 CONFIG_ZRAM_BACKEND_ZSTD=y

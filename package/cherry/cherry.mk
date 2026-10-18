@@ -15,10 +15,10 @@
 # (environments.js) and the profiles they build from (profiles/, to
 # /usr/lib/cherry/profiles); its storage: cherry-storage@.service, which
 # claims disks and makes LVM pools and volumes of them for it as root, with
-# Cherry's /etc/lvm/lvm.conf (over lvm2's), cherry-var.service, which mounts
-# /var from the pool cherry before var.mount, or makes that pool in RAM, and
-# cherry-storage.service, which activates the pools and mounts their volumes
-# once /var is there; the OpenCode agent's tools for
+# Cherry's /etc/lvm/lvm.conf (over lvm2's), and cherry-storage.service, which
+# mounts /var from the pool cherry before var.mount, or makes that pool in
+# RAM, then activates the pools and mounts their volumes; the OpenCode
+# agent's tools for
 # all of it, in the system configuration directory /etc/opencode: the MCP
 # servers cherry-machines-mcp and cherry-storage-mcp, run on Bun over
 # mcp-stdio.js, and the machine-images skill and the storage,
@@ -87,8 +87,6 @@ define CHERRY_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/lib/systemd/system/cherry-storage@.service
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-storage.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/cherry-storage.service
-	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-var.service \
-		$(TARGET_DIR)/usr/lib/systemd/system/cherry-var.service
 	$(INSTALL) -D -m 0755 $(CHERRY_PKGDIR)/cherry-storage \
 		$(TARGET_DIR)/usr/libexec/cherry-storage
 endef

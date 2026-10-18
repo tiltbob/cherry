@@ -399,7 +399,7 @@ def standin(name, args):
 
 class Machine:
     """The stand-in machine: a sysfs, udev database, mount table, swaps, TPM identity and state, in tmp; fresh, as
-    cherry-var.service leaves it at boot without disks, with the pool cherry in RAM and /var mounted from it."""
+    cherry-storage.service leaves it at boot without disks, with the pool cherry in RAM and /var mounted from it."""
 
     def __init__(self, tmp):
         self.tmp = tmp
@@ -438,7 +438,7 @@ class Machine:
         save({"calls": [], "pvs": {}, "vgs": {}, "lvs": {}, "signatures": {}, "locked": [], "fail": [], "busy": [],
               "e2fsck": {}, "stale": [], "minor": 0})
         if ram_var:
-            rc, out = self.run("boot", "var", "start")
+            rc, out = self.run("boot", "start")
             check(rc == 0, f"the pool cherry in RAM: {out}")
             self.change(calls=[])
 
@@ -447,18 +447,15 @@ class Machine:
             return f.read().strip()
 
     def unmount_var(self):
-        """As var.mount does at shutdown, between `boot volumes stop` and `boot var stop`."""
+        """As systemd does at shutdown before `boot stop`: /var unmounted (the volumes under it are left to the stop,
+        which unmounts what is still mounted)."""
         with open(f"{self.tmp}/mountinfo") as f:
             lines = [line for line in f.read().splitlines() if line.split()[4] != "/var"]
         with open(f"{self.tmp}/mountinfo", "w") as f:
             f.write("".join(line + "\n" for line in lines))
 
-    def shutdown(self):
-        """`boot volumes stop`, var.mount's unmount, `boot var stop`, then the reboot: RAM is gone, and with it the
-        zram device and whatever pool lived on it alone."""
-        self.run("boot", "volumes", "stop")
-        self.unmount_var()
-        self.run("boot", "var", "stop")
+    def reboot(self):
+        """After `boot stop`: RAM is gone, and with it the zram device and whatever pool lived on it alone."""
         state = load()
         ram = [vg for vg in state["vgs"] if all(p.startswith("/dev/zram") for p, v in state["pvs"].items()
                                                 if v["vg"] == vg)]
@@ -471,6 +468,11 @@ class Machine:
         save(state)
         shutil.rmtree(block("zram1"), ignore_errors=True)
         os.makedirs(block("zram1", "holders"))
+
+    def shutdown(self):
+        self.unmount_var()
+        self.run("boot", "stop")
+        self.reboot()
 
     def state(self):
         return load()
@@ -696,8 +698,8 @@ def tests():
                 ("claim:sdf:" + fps["sdf"], "/dev/sdf cannot be claimed: /dev/sdf is held by md127"),
                 ("claim:sdi:" + fps["sdi"], "/dev/sdi cannot be claimed: on USB"),
                 ("frobnicate:sda", "unknown verb 'frobnicate'"),
-                ("boot", "usage: cherry-storage boot var|volumes start|stop"),
-                ("boot:var:start", "unknown verb 'boot'")]:
+                ("boot", "bad instance 'boot'"),
+                ("boot:start", "unknown verb 'boot'")]:
             expect(instance, m.run(instance), 1, message, [])
         os.remove(f"{tmp()}/identity/ek-hash")
         expect("no TPM", m.run(f"claim:sda:{fp}"), 1, "no usable TPM", [])
@@ -950,61 +952,61 @@ def tests():
             expect("locked", m.run("create:tank:sda"), 1, "another storage operation is running", [])
             check(m.run("list")[0] == 0, "list waits for the lock")
 
-    @case("boot volumes: unlocks, activates, checks and mounts the volumes, var left to /var; then the other way")
+    @case("boot: unlocks, brings up /var, activates the pools, checks and mounts the volumes; the reverse at shutdown")
     def _():
         sda, sdb, _, _, _ = setup()
         m.run("create:tank:sda:sdb")
         m.run("volume-create:tank:web:10G")
         m.run("volume-create:tank:db:10G")
-        # Shutdown: the volumes unmounted and their pools deactivated, not cherry, which holds /var; then, once /var
-        # is unmounted, boot var stop deactivates the rest and closes every disk.
-        m.run("boot", "volumes", "stop")
         vols = f"{tmp()}/home/volumes/tank"
-        check(m.calls() == [f"umount {vols}/web", f"umount {vols}/db", "lvm vgchange -an tank"], m.calls())
+        # Shutdown: systemd unmounts the volumes and /var, then every pool is deactivated and every disk closed; a
+        # volume still mounted is unmounted first.
         m.unmount_var()
-        m.run("boot", "var", "stop")
+        m.run("boot", "stop")
         calls = m.calls()
-        check(calls[:2] == ["lvm vgchange -an cherry", "lvm vgchange -an tank"]
-              and sorted(calls[2:]) == [f"systemd-cryptsetup detach cherry-pv-{p}"
+        check(calls[:4] == [f"umount {vols}/web", f"umount {vols}/db", "lvm vgchange -an cherry",
+                            "lvm vgchange -an tank"]
+              and sorted(calls[4:]) == [f"systemd-cryptsetup detach cherry-pv-{p}"
                                         for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
-        # The next boot, /var first (in RAM again: the pool cherry was never given disks). sdc's volume belongs to
-        # another TPM now: the rest goes on.
-        m.shutdown()
+        # The next boot: the disks unlocked, /var first (in RAM again: the pool cherry was never given disks), then
+        # the volumes. sdc's volume belongs to another TPM now: the rest goes on.
+        m.reboot()
         m.change(locked=["sdc1"], e2fsck={"/dev/tank/db": 4})
-        rc, out = m.run("boot", "var", "start")
-        check(rc == 0 and "in RAM" in out, out)
-        rc, out = m.run("boot", "volumes", "start")
+        rc, out = m.run("boot", "start")
         check(rc == 1 and "the TPM cannot unlock /dev/sdc1: another machine's disk?" in out
+              and f"128M in RAM on {ZRAM}" in out
               and "e2fsck found errors it cannot repair on tank/db (exit status 4): not mounted" in out, out)
         calls = m.calls()
         check([c for c in calls if c.startswith("systemd-cryptsetup")] == [
-            "systemd-cryptsetup attach cherry-pv-sdc1 /dev/sdc1 - tpm2-device=auto,headless"], calls)
-        check(calls[-5:] == ["lvm vgchange -ay cherry", "lvm vgchange -ay tank", "e2fsck -p /dev/tank/db",
-                             "e2fsck -p /dev/tank/web", f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"],
+            f"systemd-cryptsetup attach cherry-pv-{p} /dev/{p} - tpm2-device=auto,headless"
+            for p in ("nvme0n1p1", "nvme1n1p1", "sda1", "sdb1", "sdc1")], calls)
+        check(calls[-4:] == ["lvm vgchange -ay tank", "e2fsck -p /dev/tank/db", "e2fsck -p /dev/tank/web",
+                             f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
+        check("lvm vgchange -ay cherry" not in calls and not [c for c in calls if c.startswith("mount") and "/db" in c],
               calls)
-        check(not [c for c in calls if c.startswith("mount") and ("/db" in c or "/var" in c)], calls)
-        # Again: what is mounted is left alone, what is unlocked too.
+        # Again: /var is there, what is mounted is left alone, what is unlocked too.
         m.change(locked=[], e2fsck={})
-        rc, out = m.run("boot", "volumes", "start")
+        rc, out = m.run("boot", "start")
         calls = m.calls()
-        check(rc == 0 and "e2fsck -p /dev/tank/web" not in calls and "e2fsck -p /dev/tank/db" in calls
+        check(rc == 0 and "/var is mounted already" in out and "e2fsck -p /dev/tank/web" not in calls
+              and "e2fsck -p /dev/tank/db" in calls
               and [c for c in calls if c.startswith("systemd-cryptsetup")] == [
                   "systemd-cryptsetup attach cherry-pv-sdc1 /dev/sdc1 - tpm2-device=auto,headless"], out + str(calls))
-        # A pool that does not come up: its volumes are not mounted.
-        m.run("boot", "volumes", "stop")
+        # A pool that does not come up: its volumes are not mounted; /var is.
+        m.shutdown()
         m.change(fail=["vgchange"])
-        rc, out = m.run("boot", "volumes", "start")
+        rc, out = m.run("boot", "start")
         m.change(fail=[])
         check(rc == 1 and "the pool tank is missing disks: not all its volumes are there" in out
               and "tank/web is not active: not mounted" in out
-              and not [c for c in m.calls() if c.startswith(("e2fsck", "mount"))], out)
-        expect("bad boot verb", m.run("boot", "restart"), 1, "usage: cherry-storage boot var|volumes start|stop")
-        expect("bad boot verb", m.run("boot", "var", "restart"), 1, "bad boot verb 'var restart'")
+              and not [c for c in m.calls() if c.startswith("e2fsck") or "/tank/" in c], out)
+        check(m.list()["var"]["ram"] is True, "/var did not come up")
+        expect("bad boot verb", m.run("boot", "restart"), 1, "bad boot verb 'restart'")
 
-    @case("/var: without the pool, boot var start makes it in RAM, a zram device with var of 128 MiB, btrfs")
+    @case("/var: without the pool, boot start makes it in RAM, a zram device with var of 128 MiB, btrfs")
     def _():
         m.fresh(ram_var=False)
-        rc, out = m.run("boot", "var", "start")
+        rc, out = m.run("boot", "start")
         check(rc == 0 and f"/var is cherry/var (btrfs), 128M in RAM on {ZRAM}: nothing persists until the pool has "
               "disks" in out, out)
         check(m.calls() == [f"lvm pvcreate -y {ZRAM}", f"lvm vgcreate --setautoactivation n cherry {ZRAM}",
@@ -1016,11 +1018,11 @@ def tests():
         check(volume("cherry/var")["alloc"] == {ZRAM: 32}, volume("cherry/var"))
         check(m.list()["var"] == {"fstype": "btrfs", "source": "/dev/mapper/cherry-var", "ram": True}, m.list()["var"])
         # Again: nothing to do.
-        expect("mounted", m.run("boot", "var", "start"), 0, "/var is mounted already", [])
+        expect("mounted", m.run("boot", "start"), 0, "/var is mounted already", [])
         # What fails is undone, and /var is the tmpfs of var.mount, in RAM too as list sees it.
         m.fresh(ram_var=False)
         m.change(fail=["lvcreate"])
-        rc, out = m.run("boot", "var", "start")
+        rc, out = m.run("boot", "start")
         check(rc == 1 and f"cannot make the pool cherry in RAM on {ZRAM}: /var is a tmpfs" in out, out)
         check(m.calls()[-2:] == ["lvm vgremove -y -f cherry", f"lvm pvremove -y {ZRAM}"]
               and m.state()["vgs"] == {} and m.state()["pvs"] == {}, m.calls())
@@ -1086,30 +1088,29 @@ def tests():
         m.run("create:tank:sdc")
         m.run("volume-create:tank:web:10G")
         vols = f"{tmp()}/home/volumes/tank"
-        m.run("boot", "volumes", "stop")
         m.unmount_var()
-        m.run("boot", "var", "stop")
+        m.run("boot", "stop")
         check([c for c in m.calls() if c.startswith("lvm")] == ["lvm vgchange -an cherry", "lvm vgchange -an tank"]
               and len([c for c in m.calls() if c.startswith("systemd-cryptsetup detach")]) == 5, m.calls())
-        m.shutdown()
-        rc, out = m.run("boot", "var", "start")
+        m.reboot()
+        rc, out = m.run("boot", "start")
         check(rc == 0 and "/var is cherry/var (btrfs) on the pool's disks, unlocked with the TPM" in out, out)
         calls = m.calls()
         check(len([c for c in calls if c.startswith("systemd-cryptsetup attach")]) == 5
-              and calls[-2:] == ["lvm vgchange -ay cherry", "mount -t btrfs -o nodev /dev/mapper/cherry-var /var"],
-              calls)
-        check(not [c for c in calls if "zram" in c or "tank" in c], f"with the pool on disk: {calls}")
-        rc, out = m.run("boot", "volumes", "start")
-        check(rc == 0 and m.calls() == ["lvm vgchange -ay cherry", "lvm vgchange -ay tank", "e2fsck -p /dev/tank/web",
-                                        f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], m.calls())
+              and [c for c in calls if not c.startswith("systemd-cryptsetup")] == [
+                  "lvm vgchange -ay cherry", "mount -t btrfs -o nodev /dev/mapper/cherry-var /var",
+                  "lvm vgchange -ay tank", "e2fsck -p /dev/tank/web",
+                  f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web"], calls)
+        check(not [c for c in calls if "zram" in c], f"with the pool on disk: {calls}")
         # Disks another TPM claimed, this one's before it was cleared say: the pool is not seen, and /var is in RAM
         # again, a new pool cherry; the disks are left as they are.
         m.shutdown()
         m.change(locked=["sda1", "sdb1"])
-        rc, out = m.run("boot", "var", "start")
+        rc, out = m.run("boot", "start")
         check(rc == 0 and "the TPM cannot unlock /dev/sda1" in out and "the TPM cannot unlock /dev/sdb1" in out
               and f"128M in RAM on {ZRAM}" in out, out)
-        check(not [c for c in m.calls() if c.startswith("wipefs")], m.calls())
+        check(not [c for c in m.calls() if c.startswith("wipefs")]
+              and f"mount -t ext4 -o nodev,nosuid /dev/tank/web {vols}/web" in m.calls(), m.calls())
         m.change(locked=[])
 
     @case("/var: a missing disk that no volume uses goes; one a volume uses leaves /var a tmpfs and the disks alone")
@@ -1123,7 +1124,7 @@ def tests():
         state["pvs"][ZRAM] = {"vg": "cherry", "tags": ["ram"], "extents": 32}
         save(state)
         shutil.rmtree(block("zram1"))
-        rc, out = m.run("boot", "var", "start")
+        rc, out = m.run("boot", "start")
         check(rc == 0 and "on the pool's disks" in out, out)
         check("lvm vgreduce --removemissing cherry" in m.calls() and ZRAM not in m.state()["pvs"], m.calls())
         # var grown over both disks, and sdb another TPM's now: var is not whole, so /var is a tmpfs for the boot,
@@ -1132,10 +1133,10 @@ def tests():
         check(sdb in volume("cherry/var")["alloc"], volume("cherry/var"))
         m.shutdown()
         m.change(locked=["sdb1"])
-        rc, out = m.run("boot", "var", "start")
+        rc, out = m.run("boot", "start")
         m.change(locked=[])
-        check(rc == 1 and "the pool cherry is missing a disk that its volumes use" in out and "/var is a tmpfs" in out,
-              out)
+        check(rc == 1 and "the pool cherry is missing a disk that its volumes use" in out
+              and "/var is a tmpfs, and no volume is mounted" in out, out)
         calls = m.calls()
         check(calls[-3:] == ["lvm vgchange -ay cherry", "lvm vgreduce --removemissing cherry",
                              "lvm vgchange -an cherry"]

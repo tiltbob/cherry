@@ -21,17 +21,16 @@
 #   volume-remove:<pool>:<volume>
 #
 # The pool cherry is the machine's own, and its volume var is /var. At boot,
-# before var.mount, cherry-var.service runs `cherry-storage boot var start`:
+# before var.mount, cherry-storage.service runs `cherry-storage boot start`:
 # it unlocks the claimed disks and, if the pool cherry is among them, activates
 # it and mounts var on /var; otherwise it makes the pool in RAM, on a zram
 # device of 132 MiB (zstd), with var of 128 MiB, btrfs, the least a btrfs can
 # be, so that OpenChamber and the agent run until the agent gives the pool
 # disks: extend then moves var onto them (pvmove, 128 MiB) and the zram device
-# goes. Nothing claims a disk at boot. Then cherry-storage.service runs `boot
-# volumes start`: the other pools activated, every volume checked and mounted
-# under /var/lib/cherry/volumes. At shutdown, `boot volumes stop` unmounts the
-# volumes and deactivates those pools, and once var.mount has unmounted /var,
-# `boot var stop` deactivates the pool cherry and closes every disk.
+# goes. Nothing claims a disk at boot. Then, under /var, the other pools are
+# activated and every volume checked and mounted under /var/lib/cherry/volumes.
+# At shutdown, once systemd has unmounted the volumes and /var, `boot stop`
+# deactivates the pools and closes every disk.
 #
 # A claimed disk holds one GPT partition labelled cherry-pv (systemd-repart,
 # with /usr/lib/cherry/storage/repart.d): a LUKS2 volume whose key the TPM
@@ -936,7 +935,7 @@ detach_disks() {
 }
 
 var_fail() {
-	fail "$1: /var is a tmpfs"
+	fail "$1: /var is a tmpfs, and no volume is mounted"
 }
 
 # The pool cherry on its disks: activated, and var mounted on /var.
@@ -993,15 +992,12 @@ make_ram_var() {
 	echo "$var_mount is $system_pool/$var_volume (btrfs), $ram_var_size in RAM on $dev: nothing persists until the pool has disks"
 }
 
-# Before var.mount: /var from the pool cherry, on its disks or made in RAM.
-boot_var_start() {
+# /var from the pool cherry, on its disks or made in RAM, unless it is there.
+boot_var() {
 	if is_mounted "$var_mount"; then
 		echo "$var_mount is mounted already"
 		return 0
 	fi
-	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
-	unlock_disks
-	udevadm settle --timeout=60 || true
 	if pools | grep -qxF "$system_pool"; then
 		activate_var
 	else
@@ -1009,24 +1005,12 @@ boot_var_start() {
 	fi
 }
 
-# Once var.mount has unmounted /var: the pool cherry deactivated, and any
-# other pool still active, and every disk closed.
-boot_var_stop() {
-	for pool in $(pools); do
-		lvm vgchange -an "$pool" || true
-	done
-	detach_disks
-}
-
-# After /var: every pool activated, every volume but var checked and mounted.
-# What fails is reported, and the rest goes on.
-boot_volumes_start() {
+# Under /var: every other pool activated, every volume but var checked and
+# mounted. What fails is reported, and the rest goes on.
+boot_volumes() {
 	rc=0
-	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
-	unlock_disks
-	udevadm settle --timeout=60 || true
 	for pool in $(pools); do
-		if ! lvm vgchange -ay "$pool"; then
+		if [ "$pool" != "$system_pool" ] && ! lvm vgchange -ay "$pool"; then
 			echo "the pool $pool is missing disks: not all its volumes are there"
 			rc=1
 		fi
@@ -1055,36 +1039,40 @@ boot_volumes_start() {
 	return "$rc"
 }
 
-# Before var.mount unmounts /var: the volumes unmounted, and every pool but
-# cherry, which holds /var, deactivated.
-boot_volumes_stop() {
+# At boot, before var.mount: the claimed disks unlocked, /var from the pool
+# cherry, then the volumes.
+boot_start() {
+	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
+	unlock_disks
+	udevadm settle --timeout=60 || true
+	boot_var
+	boot_volumes
+}
+
+# At shutdown, once systemd has unmounted the volumes and /var: whatever is
+# still mounted unmounted, every pool deactivated, every disk closed.
+boot_stop() {
 	awk -v dir="$volumes/" 'index($5, dir) == 1 { print $5 }' "$mountinfo" | while read -r mp; do
 		umount "$mp" || echo "cannot unmount $mp"
 	done
 	for pool in $(pools); do
-		if [ "$pool" != "$system_pool" ]; then
-			lvm vgchange -an "$pool" || true
-		fi
+		lvm vgchange -an "$pool" || true
 	done
+	detach_disks
 }
 
-if [ "${1:-}" = boot ]; then
-	if [ $# -ne 3 ]; then
-		fail "usage: cherry-storage boot var|volumes start|stop"
-	fi
+if [ $# -eq 2 ] && [ "$1" = boot ]; then
 	exec 9>"$lock"
 	flock 9
-	case $2:$3 in
-	var:start) boot_var_start ;;
-	var:stop) boot_var_stop ;;
-	volumes:start) boot_volumes_start ;;
-	volumes:stop) boot_volumes_stop ;;
-	*) fail "bad boot verb '$2 $3': var or volumes, start or stop" ;;
+	case $2 in
+	start) boot_start ;;
+	stop) boot_stop ;;
+	*) fail "bad boot verb '$2': start or stop" ;;
 	esac
 	exit
 fi
 if [ $# -ne 1 ]; then
-	fail "usage: cherry-storage <verb>[:<argument>...], or cherry-storage boot var|volumes start|stop"
+	fail "usage: cherry-storage <verb>[:<argument>...], or cherry-storage boot start|stop"
 fi
 
 instance=$1
