@@ -12,7 +12,7 @@ disable systemd-pcrlock-*
 # use (the import would write it to /etc, which is read-only). No
 # blk-availability.service either: its blkdeactivate would unmount and close
 # device-mapper devices at shutdown, /var's among them, out of turn;
-# cherry-storage.service and cherry-var.service close theirs in order.
+# cherry-storage.service closes its own in order.
 disable dm-event.socket
 disable lvm2-monitor.service
 disable lvm-devices-import.path

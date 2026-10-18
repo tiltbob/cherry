@@ -18,9 +18,9 @@ before anything that erases data, ask the user, naming exactly what goes.
 - **Take a disk out:** `remove_disk`. A data disk's data moves to the pool's
   other data disks, which need room for it (see `list`: the pool's `free`
   must be at least what the disk holds); copying a full multi-terabyte disk
-  takes hours. Not the pool's last data disk: destroy the pool instead. The
-  disk stays claimed: `release` it if the user wants it erased and given
-  back.
+  takes hours. Not the pool's last data disk: destroy the pool instead, or,
+  for `cherry`, which holds `/var`, keep it. The disk stays claimed:
+  `release` it if the user wants it erased and given back.
 - **Replace a disk** that is failing, while it still reads: `claim` the new
   one, `add_disks` it, then `remove_disk` the old one, whose data moves to
   the new.
@@ -28,12 +28,14 @@ before anything that erases data, ask the user, naming exactly what goes.
   for the pool's free space); `resize_volume` grows it, while in use, and
   never shrinks it; `remove_volume` deletes it and its data, and fails while
   anything has files open in it.
+- **`/var`** is `cherry`/`var`: `resize_volume` grows it like any volume, and
+  `/var` with it. It is never removed, the pool `cherry` never destroyed, and
+  its last data disk stays.
 - **Destroy a pool:** `remove_volume` each of its volumes, then
   `destroy_pool`. Its disks stay claimed, to make another pool of, or to
   `release`.
 - **Give disks back:** `release` erases claimed disks that are in no pool and
-  leaves them blank. A blank disk becomes the machine's `/var` disk at the
-  next boot if it has none.
+  leaves them blank.
 
 `list` shows a pool's `missing_disks` when one of its disks is gone: tell
 the user. Volumes with data on it are not mounted, and its other volumes

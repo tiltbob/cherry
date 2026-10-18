@@ -9,8 +9,8 @@ User=opencode
 Group=opencode
 # Its state, laid out as under a user's home: .local/share/opencode (sessions,
 # auth.json, log/), .config/opencode and .cache/opencode. The agent works in
-# work/ unless a client picks another directory. Without the machine's disk,
-# /var is a tmpfs, so all of it is new at every boot.
+# work/ unless a client picks another directory. Until the pool cherry has
+# disks, /var is in RAM, so all of it is new at every boot (README: Disks).
 StateDirectory=opencode opencode/work
 Environment=HOME=/var/lib/opencode
 WorkingDirectory=/var/lib/opencode/work

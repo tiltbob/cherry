@@ -35,16 +35,17 @@ fi
 [ "$unit" != "$(cat "$STATE/FAIL_UNIT")" ] || { echo "Job for $unit failed." >&2; exit 1; }
 `, { mode: 0o755 });
 
-// What cherry-storage@list writes: a pool tank of two hard disks, cached
-// writeback on an SSD, with a cached volume, mounted, and another one, not;
-// a claimed disk in no pool, and disks in every other state.
+// What cherry-storage@list writes: the pool cherry on one disk, with var, /var,
+// on it; a pool tank of two hard disks, cached writeback on an SSD, with a
+// cached volume, mounted, and another one, not; a claimed disk in no pool, and
+// disks in every other state.
 const pvs = (rows) => ({ report: [{ pv: rows }] });
 const disk = (name, state, extra = {}) => ({ name, size: 100 * GIB, rotational: true, model: `Model ${name}`,
   serial: `S${name}`, bus: "ata", state, reason: "", fingerprint: `${name}0000000000`.slice(0, 12), pv: "",
   signatures: [], partitions: [], ...extra });
 const FACTS = {
   tpm: true,
-  var: { fstype: "btrfs", source: "/dev/mapper/cherry-var" },
+  var: { fstype: "btrfs", source: "/dev/mapper/cherry-var", ram: false },
   disks: [
     disk("nvme0n1", "claimed", { size: 10 * GIB, rotational: false, pv: "/dev/mapper/cherry-pv-nvme0n1p1" }),
     disk("sda", "claimed", { pv: "/dev/mapper/cherry-pv-sda1" }),
@@ -55,22 +56,41 @@ const FACTS = {
     disk("sde", "locked", { reason: "its cherry-pv volume does not unlock with this machine's TPM" }),
     disk("sdf", "unsuitable", { reason: "on USB" }),
     disk("sdg", "claimed", { pv: "/dev/mapper/cherry-pv-sdg1" }),
-    disk("vda", "in-use", { reason: "this machine's /var disk (/dev/vda1, cherry-var)" }),
+    disk("vda", "claimed", { pv: "/dev/mapper/cherry-pv-vda1" }),
   ],
   pvs: pvs([
+    { pv_name: "/dev/mapper/cherry-pv-vda1", vg_name: "cherry", pv_size: String(100 * GIB), pv_free: String(60 * GIB), pv_tags: "data" },
     { pv_name: "/dev/mapper/cherry-pv-nvme0n1p1", vg_name: "tank", pv_size: String(10 * GIB), pv_free: String(4 * GIB), pv_tags: "cache" },
     { pv_name: "/dev/mapper/cherry-pv-sda1", vg_name: "tank", pv_size: String(100 * GIB), pv_free: String(20 * GIB), pv_tags: "data" },
     { pv_name: "/dev/mapper/cherry-pv-sdb1", vg_name: "tank", pv_size: String(100 * GIB), pv_free: String(100 * GIB), pv_tags: "data" },
     { pv_name: "/dev/mapper/cherry-pv-sdg1", vg_name: "", pv_size: String(100 * GIB), pv_free: String(100 * GIB), pv_tags: "" },
   ]),
-  vgs: { report: [{ vg: [{ vg_name: "tank", vg_size: String(210 * GIB), vg_free: String(124 * GIB), vg_tags: "writeback",
-    vg_extent_size: "4194304", pv_count: "3", lv_count: "2", vg_missing_pv_count: "0" }] }] },
+  vgs: { report: [{ vg: [
+    { vg_name: "cherry", vg_size: String(100 * GIB), vg_free: String(60 * GIB), vg_tags: "", vg_extent_size: "4194304",
+      pv_count: "1", lv_count: "1", vg_missing_pv_count: "0" },
+    { vg_name: "tank", vg_size: String(210 * GIB), vg_free: String(124 * GIB), vg_tags: "writeback",
+      vg_extent_size: "4194304", pv_count: "3", lv_count: "2", vg_missing_pv_count: "0" },
+  ] }] },
   lvs: { report: [{ lv: [
+    { vg_name: "cherry", lv_name: "var", lv_size: String(40 * GIB), segtype: "linear", cache_mode: "" },
     { vg_name: "tank", lv_name: "[web_cache_cpool]", lv_size: String(6 * GIB), segtype: "linear", cache_mode: "" },
     { vg_name: "tank", lv_name: "db", lv_size: String(20 * GIB), segtype: "linear", cache_mode: "" },
     { vg_name: "tank", lv_name: "web", lv_size: String(60 * GIB), segtype: "cache", cache_mode: "writeback" },
   ] }] },
-  mounts: [{ path: `${VOLUMES}/tank/web`, size: 60 * GIB, used: GIB, available: 59 * GIB }],
+  mounts: [{ path: "/var", size: 40 * GIB, used: 2 * GIB, available: 38 * GIB },
+    { path: `${VOLUMES}/tank/web`, size: 60 * GIB, used: GIB, available: 59 * GIB }],
+};
+// The same machine before the pool cherry had disks: in RAM, on its zram device, var 128 MiB, /var in RAM too.
+const RAM = {
+  ...FACTS,
+  var: { ...FACTS.var, ram: true },
+  disks: FACTS.disks.map((d) => (d.name === "vda" ? disk("vda", "free") : d)),
+  pvs: pvs([{ pv_name: "/dev/zram1", vg_name: "cherry", pv_size: String(128 * 2 ** 20), pv_free: "0", pv_tags: "ram" },
+    ...FACTS.pvs.report[0].pv.slice(1)]),
+  vgs: { report: [{ vg: [{ ...FACTS.vgs.report[0].vg[0], vg_size: String(128 * 2 ** 20), vg_free: "0" },
+    FACTS.vgs.report[0].vg[1]] }] },
+  lvs: { report: [{ lv: [{ ...FACTS.lvs.report[0].lv[0], lv_size: String(128 * 2 ** 20) }, ...FACTS.lvs.report[0].lv.slice(1)] }] },
+  mounts: [{ path: "/var", size: 128 * 2 ** 20, used: 8 * 2 ** 20, available: 120 * 2 ** 20 }, FACTS.mounts[1]],
 };
 fs.writeFileSync(fixture, JSON.stringify(FACTS));
 
@@ -157,11 +177,16 @@ async function main() {
     assert.deepStrictEqual([byName.sda.pool, byName.sda.role, byName.nvme0n1.pool, byName.nvme0n1.role, byName.nvme0n1.kind],
       ["tank", "data", "tank", "cache", "ssd"]);
     assert.deepStrictEqual([byName.sdg.state, byName.sdg.pool, byName.sdg.role], ["claimed", null, null]);
+    assert.deepStrictEqual([byName.vda.state, byName.vda.pool, byName.vda.role], ["claimed", "cherry", "data"]);
     // Nothing to claim with, for disks claim does not take.
-    for (const name of ["sdf", "vda"]) {
+    for (const name of ["sdf"]) {
       assert(!("fingerprint" in byName[name]) && byName[name].reason, JSON.stringify(byName[name]));
     }
     assert.deepStrictEqual(view.pools, [{
+      name: "cherry", disks: ["vda"], size: "100.0 GiB", free: "60.0 GiB", cache: null,
+      volumes: [{ name: "var", size: "40.0 GiB", path: "/var", mounted: true, used: "2.0 GiB", available: "38.0 GiB",
+        cache: null }],
+    }, {
       name: "tank", disks: ["sda", "sdb"], size: "200.0 GiB", free: "120.0 GiB",
       cache: { disks: ["nvme0n1"], size: "10.0 GiB", mode: "writeback" },
       volumes: [
@@ -170,6 +195,20 @@ async function main() {
           available: "59.0 GiB", cache: { size: "6.0 GiB", mode: "writeback" } },
       ],
     }]);
+  });
+
+  await test("list: the pool cherry in RAM, on its zram device, and so /var", async () => {
+    reset();
+    fs.writeFileSync(fixture, JSON.stringify(RAM));
+    const view = JSON.parse((await c.call("list", {})).text);
+    fs.writeFileSync(fixture, JSON.stringify(FACTS));
+    assert.deepStrictEqual(view.var, { fstype: "btrfs", source: "/dev/mapper/cherry-var", ram: true });
+    assert.deepStrictEqual(view.pools[0], {
+      name: "cherry", disks: [], size: "128.0 MiB", free: "0 B", cache: null, ram: true,
+      volumes: [{ name: "var", size: "128.0 MiB", path: "/var", mounted: true, used: "8.0 MiB", available: "120.0 MiB",
+        cache: null }],
+    });
+    assert.strictEqual(view.disks.find((d) => d.name === "vda").state, "free");
   });
 
   await test("claim and release: disk by disk, with their fingerprints, checked first", async () => {
@@ -209,7 +248,6 @@ async function main() {
 
   await test("create_pool: the pool, then its cache; the pool as it is after", async () => {
     const bad = [
-      [{ name: "cherry", disks: ["sda"] }, /bad pool name "cherry"/],
       [{ name: "my_pool", disks: ["sda"] }, /bad pool name "my_pool"/],
       [{ name: "tank", disks: [] }, /disks must be an array of 1 to 32 disks/],
       [{ name: "tank", disks: ["sda", "sda"] }, /a disk is given twice/],
@@ -239,6 +277,12 @@ async function main() {
     const r = await c.call("create_pool", { name: "tank", disks: ["sda"], cache: ["nvme0n1"] }, "create:tank:sda");
     assert(r.isError && /cherry-storage@create:tank:sda\.service failed/.test(r.text), r.text);
     assert.deepStrictEqual(started(), ["create:tank:sda"]);
+    // The pool cherry is there from boot: its disks are an extend, which moves /var onto them.
+    reset();
+    const own = await c.call("create_pool", { name: "cherry", disks: ["sda", "sdb"], cache: ["nvme0n1"] });
+    assert(!own.isError, own.text);
+    assert.deepStrictEqual(started(), ["extend:cherry:sda:sdb", "cache:cherry:writethrough:nvme0n1", "list"]);
+    assert.match(own.text, /done extend:cherry:sda:sdb[\s\S]*"name": "cherry"/);
   });
 
   await test("the other tools: their instances", async () => {

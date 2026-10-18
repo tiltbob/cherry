@@ -81,7 +81,7 @@ test:
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
 	check-extension check-postbuild check-firewall check-secureboot \
-	check-ceremony check-var check-storage check-exocarp check-version
+	check-ceremony check-storage check-exocarp check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -161,11 +161,8 @@ check-secureboot:
 check-ceremony:
 	tests/ceremony.sh
 
-# cherry-var.service claims only a blank disk, and unlocks the right partition.
-check-var:
-	tests/var.sh
-
-# cherry-storage claims only the disks it may, and drives LVM as it should.
+# cherry-storage claims only the disks it may, drives LVM as it should, and
+# gives /var the pool cherry: in RAM at boot, on its disks once it has them.
 check-storage:
 	python3 tests/storage.py
 

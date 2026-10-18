@@ -68,9 +68,11 @@ Enterprise Linux ones), so `status` shows an address once it is up.
 
 ## Limits
 
-- `/var` holds the images and environments: on the machine's encrypted
-  disk if it has one, where an environment is a snapshot of its image and
-  takes space only for what it changes; otherwise in RAM, gone at the next
-  boot, where it is a copy. A Debian base takes about 240 MB; mind the RAM.
+- `/var`, which holds the images and environments, is the volume `var` of
+  the machine's storage pool, btrfs: an environment is a snapshot of its
+  image and takes space only for what it changes. Until the pool has disks,
+  `/var` is 128 MiB in RAM: no image fits, and nothing lasts past a reboot.
+  The storage tools give the pool its disks (the `configure-storage` skill),
+  and `resize_volume` grows `var`. A Debian base takes about 240 MB.
 - Building runs the distribution's package manager from its mirrors, so
   the machine needs to reach them.

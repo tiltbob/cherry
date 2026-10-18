@@ -21,13 +21,14 @@ Once booted:
   releases are signed for it (see [Secure Boot](#secure-boot)).
 - **Root:** the EROFS image, read-only, mounted straight from the initramfs.
   It stays compressed in RAM (see [Memory](#memory)).
-- **`/var`:** the machine's encrypted disk, unlocked by the TPM at boot,
-  where containers persist. A machine without one gets one on its first
-  blank disk; one without a blank disk keeps `/var` in a tmpfs of up to half
-  the RAM, so nothing persists (see [Disks](#disks)).
-- **Storage:** the agent claims the machine's other disks, which erases them,
-  and makes LVM pools of them, with SSDs as hard disks' cache, and volumes,
-  each disk a LUKS2 volume the TPM unlocks too (see [Storage](#storage)).
+- **`/var`:** the volume `var` of the pool `cherry`, the machine's own: on
+  the disks the agent gave it, which the TPM unlocks at boot, where
+  containers persist. Until the pool has disks, it is in RAM, 128 MiB, so
+  the agent runs and nothing persists (see [Disks](#disks)).
+- **Storage:** the agent claims the machine's disks, which erases them, and
+  makes LVM pools of them, `cherry` first, with SSDs as hard disks' cache,
+  and volumes, each disk a LUKS2 volume the TPM unlocks (see
+  [Storage](#storage)).
 - **Swap:** compressed, in RAM (zram; see [Memory](#memory)).
 - **Firewall:** nothing comes in unasked but ping, to the host or to its
   containers (see [Firewall](#firewall)).
@@ -115,13 +116,14 @@ the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
 busybox root, the OpenCode MCP servers' tools and the Environments
 extension's manifest and service against stand-ins for systemctl,
-machinectl, busctl and ip, `cherry-storage`'s claims and LVM calls against
-stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
+machinectl, busctl and ip, `cherry-storage`'s claims, LVM calls and `/var`
+from the pool, in RAM and on its disks, against stand-ins for LVM, the
+disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
-key ceremony on a SoftHSM token, `cherry-var.service`'s choice of disk, the
-`exocarp` host key agent against a swtpm, and the image's version from the
+key ceremony on a SoftHSM token, the `exocarp` host key agent against a
+swtpm, and the image's version from the
 release tags. `make -k check` runs on after a failure; `make check-<name>`
 runs one. They need shellcheck, flake8, python3-magic, python3-yaml,
 systemd's `systemd-analyze`, openssl and util-linux's flock; node for the
@@ -215,8 +217,9 @@ ssh -p 2222 root@localhost
    - starts systemd with that machine ID, or, without a usable TPM, with
      `cherry-no-tpm.target` instead of the default target
 5. **systemd:**
-   - mounts `/var`: the machine's encrypted disk, which the TPM unlocks, or
-     else a tmpfs (see [Disks](#disks))
+   - mounts `/var`: the volume `var` of the pool `cherry`, on the disks the
+     TPM unlocks, or made in RAM while the pool has none (see
+     [Disks](#disks))
    - fills `/var` with what it lacks of the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
    - sets up compressed swap in RAM (see [Memory](#memory))
@@ -232,9 +235,8 @@ Because `/etc` is read-only:
 
 ## Memory
 
-Everything lives in RAM: the root filesystem, `/var` with its containers
-unless the machine has a disk for it (see [Disks](#disks)), and the memory
-processes allocate.
+Everything lives in RAM: the root filesystem, `/var` until the machine's
+pool has disks (see [Disks](#disks)), and the memory processes allocate.
 
 The root filesystem stays compressed. Its only copy is the EROFS image in the
 initramfs: 62 MB for 139 MiB of files before OpenCode, OpenChamber and Bun,
@@ -247,8 +249,11 @@ from the image again when they are needed.
 Under memory pressure, the kernel also compresses the coldest pages into zram,
 a swap device in RAM, instead of running out:
 
-- **What it compresses:** process memory, and tmpfs pages too, i.e. cold files
-  of `/var`, where containers live.
+- **What it compresses:** process memory, and tmpfs pages too (`/tmp`,
+  `/run`, `/dev/shm`).
+- **`/var` in RAM:** until the pool `cherry` has disks, a second zram device,
+  of 132 MiB and zstd too, holds it, so its files cost their compressed size
+  (see [Disks](#disks)).
 - **When:** only under memory pressure. Until then, nothing goes to zram.
 - **Setup:** `cherry-zram-swap.service` sets up `/dev/zram0` at every boot:
   - compressed with zstd
@@ -350,67 +355,71 @@ key. Without a usable TPM, neither the agent nor sshd starts.
 
 ## Disks
 
-A machine keeps `/var` on an encrypted disk of its own, and with it the
-containers and the `cherry` user's state. That disk is a GPT partition
-labelled `cherry-var`: a LUKS2 volume holding btrfs, whose key the machine's
-TPM seals. The machine unlocks it at boot without a passphrase; elsewhere, it
-is unreadable. On btrfs, an environment is a snapshot of its image
-(`machinectl clone`), which takes space only for what it changes (see
-[Environments](#environments)).
+`/var` is the volume `var` of the pool `cherry`, the machine's own storage
+pool (see [Storage](#storage)): btrfs, so that an environment is a snapshot
+of its image (`machinectl clone`), which takes space only for what it
+changes (see [Environments](#environments)). With it persist the containers,
+the images, the `cherry` user's state and the journal. The pool's disks are
+LUKS2 volumes whose keys the machine's TPM seals: the machine unlocks them at
+boot without a passphrase; elsewhere, they are unreadable.
 
-`cherry-var.service` ([`/usr/lib/cherry/var`](board/x86_64/rootfs-overlay/usr/lib/cherry/var))
-sets it up before systemd mounts `/var`, and only on a machine with a usable
-TPM:
+Nothing claims a disk at boot. A machine boots with the pool in RAM: a zram
+device of 132 MiB, compressed with zstd, as the pool's one physical volume,
+and `var` on it, 128 MiB, the least a btrfs can be (`mkfs.btrfs` wants 109
+MiB). That is room for OpenChamber, the OpenCode agent and the journal, not
+for a container: nothing persists, and no image fits, until the agent gives
+the pool disks. It does that through its storage tools, with the user's yes
+to the disks that get erased (`create_pool` named `cherry`, see
+[Storage](#storage)): the disks are claimed, the pool is extended with them,
+and `var` moves onto them live, a `pvmove` of its 128 MiB, with nothing
+stopped or restarted; the zram device then goes (LVM is told to mix its
+4 KiB logical blocks with the disks' 512-byte ones: `var` moves from the
+larger to the smaller, and its btrfs writes 4 KiB sectors either way). `var`
+is then grown (`resize_volume`), and `/var` with it. From then on, `/var`
+persists.
 
-- **Unlock:** given a partition labelled `cherry-var`, it unlocks it with the
-  TPM (`systemd-cryptsetup`) as `/dev/mapper/cherry-var` and mounts it on
-  `/var`: btrfs, or the ext4 of a disk an older image made, which it checks
-  first (`e2fsck -p`) and uses as it is.
-- **First boot:** without one, it claims the first blank disk, in the order
-  of the kernel's names (`nvme0n1`, `sda`, `vda`, ...). `systemd-repart`
-  writes a GPT and makes all of the disk the `cherry-var` partition, with a
-  new key that the TPM seals
-  ([`repart.d`](board/x86_64/rootfs-overlay/usr/lib/cherry/repart.d)).
-  systemd then fills the new `/var` from the image's factory defaults.
-- **Blank:** a whole disk of at least 1 GiB on which `wipefs` finds no
-  signature: no partition table, filesystem, or RAID or volume manager
-  member. Never a removable, read-only or USB disk. `wipefs -a /dev/<disk>`
-  makes a disk blank.
-- **Without either,** `/var` is a tmpfs, so nothing persists.
+`cherry-storage.service` (`cherry-storage boot start`, see
+[`cherry-storage`](package/cherry/cherry-storage)) does it before systemd
+mounts `/var`, and only on a machine with a usable TPM:
 
-Nothing erases a disk:
+- **Unlock:** every claimed disk, a partition labelled `cherry-pv`, is
+  unlocked with the TPM (`systemd-cryptsetup`) as
+  `/dev/mapper/cherry-pv-<partition>`. One the TPM cannot unlock (another
+  machine's disk, or this one's before its TPM was cleared) is reported and
+  left alone.
+- **The pool on its disks:** activated (`vgchange`), and `var` mounted on
+  `/var` as `/dev/mapper/cherry-var`. A disk of the pool that is missing and
+  that no volume uses (the zram device, after a crash between the move of
+  `var` off it and its removal) is dropped from the pool; one a volume uses
+  fails the unit, and `/var` is a tmpfs for that boot, with no volume
+  mounted and the disks as they were (`vgreduce --removemissing --force`, as
+  root, gives the volumes up).
+- **No pool:** the pool is made in RAM, as above. Disks the TPM cannot
+  unlock are not seen, so a machine with another machine's disks boots like
+  one without.
+- **Without either,** should making the pool in RAM fail, `/var` is a tmpfs
+  of up to half the RAM, and nothing persists.
 
-- If the `cherry-var` partition can't be unlocked (another machine's disk,
-  or a cleared TPM), holds something else, or its filesystem can't be
-  mounted (or, ext4, repaired), `cherry-var.service` fails and `/var` is a
-  tmpfs for that boot. The disk stays as it was.
-- With more than one `cherry-var` partition, it uses none, and fails.
-- A machine with a `cherry-var` partition never claims a blank disk, even
-  if it can't unlock that partition.
+The same unit then mounts the pools' other volumes under `/var` (see
+[Storage](#storage)), and systemd fills `/var` with what it lacks of the
+image's factory defaults. At shutdown, systemd unmounts the volumes and then
+`/var`, and the unit deactivates the pools and closes the disks.
 
-To look at a volume that won't mount, unlock it by hand
-(`systemd-cryptsetup attach cherry-var /dev/vda1 - tpm2-device=auto`), run
-`btrfs check /dev/mapper/cherry-var` (which only reports; `btrfs restore`
-copies files out, and `btrfs check --repair` is the last resort), or on
-ext4 `e2fsck /dev/mapper/cherry-var`, then
-`systemd-cryptsetup detach cherry-var`, and reboot. An older disk's ext4
-keeps working as it is, without snapshots; `btrfs-convert` is on the image,
-but needs the volume unmounted, which `/var` never is on a running machine,
-so moving to btrfs is starting over, with a copy of what matters.
-
-To start over with an empty `/var`, erase the `cherry-var` partition, then
-its disk (`wipefs --all --force /dev/vda1 /dev/vda`), and reboot: the disk is
-blank again, so the next boot makes a new volume, with a new key.
-
-The TPM is the key's only holder: there is no passphrase or recovery key.
-Clearing the TPM (in the firmware setup, or `tpm2_clear`) loses the key, and
-the data with it, though not the machine's identity, which comes from the
-endorsement seed. The key isn't bound to the boot state yet (see
+The TPM is the keys' only holder: there is no passphrase or recovery key.
+Clearing the TPM (in the firmware setup, or `tpm2_clear`) loses the keys, and
+the data with them, though not the machine's identity, which comes from the
+endorsement seed. The keys aren't bound to the boot state yet (see
 [Security notes](#security-notes)).
+
+To start over with an empty `/var`: `release` refuses the pool's disks, which
+hold it, so erase the partition and then the disk by hand (`wipefs --all
+--force /dev/vda1 /dev/vda`), and reboot. The machine boots with the pool in
+RAM, and the disk is blank again, for the agent to claim.
 
 `make qemu` gives the VM no disk. `--disk 8G` attaches
 `output/cherry_x86_64/qemu/disk.img`, created blank and sparse at the first
-run, which the VM then keeps along with its TPM:
+run, which the VM then keeps along with its TPM, for the agent to give to the
+pool:
 
 ```sh
 python3 scripts/run_qemu.py --disk 8G
@@ -418,9 +427,10 @@ python3 scripts/run_qemu.py --disk 8G
 
 ## Storage
 
-Besides `/var`'s, a machine's disks can hold storage pools for the `cherry`
-user and its agent: LVM volume groups of the disks it claimed, with volumes
-in them, mounted under `/var/lib/cherry/volumes`.
+A machine's disks hold storage pools for the `cherry` user and its agent:
+LVM volume groups of the disks it claimed, with volumes in them, mounted
+under `/var/lib/cherry/volumes`. The pool `cherry` is the machine's own,
+there from boot, and its volume `var` is `/var` (see [Disks](#disks)).
 `cherry-storage@.service` ([`/usr/libexec/cherry-storage`](package/cherry/cherry-storage))
 does it all as root, for the `cherry` user, which may start it (polkit) but
 touches no disk itself; the OpenCode agent gets tools for it (below).
@@ -428,7 +438,7 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
 - **Claiming a disk** erases it: `wipefs` on its partitions, then on the
   disk. `systemd-repart` then makes all of it one GPT partition labelled
   `cherry-pv` ([`50-pv.conf`](package/cherry/storage-pv.conf)), a LUKS2 volume
-  whose key the TPM seals, as `/var`'s: `cryptsetup` makes it with a random
+  whose key the TPM seals: `cryptsetup` makes it with a random
   key, `systemd-cryptenroll` enrolls the TPM with that key, then wipes that
   key's slot, so the TPM is the only holder of the key (systemd-repart's
   `Encrypt=` would put a filesystem in it). It is unlocked as
@@ -436,14 +446,19 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   - **As listed:** `list` gives each disk a fingerprint, of its size, serial,
     model and partition table, and a claim names it, so it never takes a disk
     that a reboot renamed, or that changed since.
-  - **Not in use:** never a disk that is mounted, swap, held by device mapper
-    or md, or `/var`'s, nor a removable, read-only, USB or smaller than 1 GiB
-    one.
+  - **Not in use:** never a disk that is mounted, swap, or held by device
+    mapper or md, nor a removable, read-only, USB or smaller than 1 GiB one.
   - **Another machine's:** a disk with a `cherry-pv` volume this TPM cannot
     unlock can be claimed, which erases it too.
 - **LVM sees only those volumes** (Cherry's [`/etc/lvm/lvm.conf`](package/cherry/lvm.conf)):
   LVM on any other disk is never activated, and a disk holding it can be
   claimed, as nothing uses it.
+- **The pool `cherry`** is there from boot, in RAM until `extend` gives it
+  disks, which moves `/var` onto them (see [Disks](#disks)); a `create` of
+  it is refused, as is anything but `extend` while it is in RAM. It is never
+  destroyed, `var` never removed, and its last data disk never taken out.
+  Otherwise it is a pool like any: more disks, a cache, with `var` cached
+  like the rest, volumes beside `var`.
 - **A pool** is a volume group of claimed disks:
   - **data disks** hold its volumes, one after the other, with no redundancy;
   - **cache disks**, SSDs, cache every volume (dm-cache, a cache pool): each
@@ -454,21 +469,23 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   nor repaired. For the same reason, no cache's metadata is checked when it is
   activated, which a writethrough cache can afford: the data disks under it
   hold all the data.
-- **A volume** holds ext4 owned by the `cherry` user, mounted `nodev,nosuid`
-  on `/var/lib/cherry/volumes/<pool>/<volume>`, which `cherry.service` sees
-  writable. Volumes grow, online (`resize2fs`), but don't shrink.
+- **A volume** holds btrfs, its root owned by the `cherry` user, mounted
+  `nodev,nosuid` on `/var/lib/cherry/volumes/<pool>/<volume>`, which
+  `cherry.service` sees writable; `var` is mounted on `/var`. Volumes grow,
+  online (`btrfs filesystem resize`), but don't shrink.
 - **Taking a data disk out** of a pool moves its data to the pool's other data
   disks first (`pvmove`), with the volumes' caches detached meanwhile.
-- **At boot,** before `cherry.service`, `cherry-storage.service`:
-  - unlocks every `cherry-pv` partition with the TPM;
-  - activates each pool, which nothing else does: their volume groups are
-    made without autoactivation;
-  - checks each volume's filesystem (`e2fsck -p`) and mounts it.
-
-  At shutdown, once `cherry.service` has stopped, it unmounts the volumes,
-  deactivates the pools and closes the disks' volumes. A disk the TPM cannot
-  unlock, or a volume with errors `e2fsck -p` left, is reported and left
-  alone, and the rest goes on.
+- **At boot,** before systemd mounts `/var`, `cherry-storage.service`
+  (`cherry-storage boot start`) unlocks every `cherry-pv` partition with the
+  TPM, brings up the pool `cherry` and `/var` (see [Disks](#disks)), then
+  activates each other pool, which nothing else does (their volume groups
+  are made without autoactivation), and mounts each volume as it is, as
+  systemd-fsck leaves btrfs too. At shutdown, once systemd has unmounted the
+  volumes and `/var`, it deactivates the pools and closes the disks. A disk
+  the TPM cannot unlock, or a volume that will not mount, is reported and
+  left alone, and the rest goes on; for the volume, `btrfs check
+  /dev/<pool>/<volume>` reports, `btrfs restore` copies files out, and
+  `btrfs check --repair` is the last resort.
 - **One operation at a time:** another one fails at once. Each logs to
   `/var/log/cherry-storage/<instance>.log`, which the `cherry` user can read.
 
@@ -479,17 +496,20 @@ The instance is a verb and its arguments, separated by colons:
 | `list` | the disks, pools and volumes, as JSON in `/var/log/cherry-storage/list.json` |
 | `claim:<disk>:<fingerprint>` | erases the disk and makes it Cherry's |
 | `release:<disk>:<fingerprint>` | erases a claimed disk that is in no pool, and leaves it blank |
-| `create:<pool>:<disk>...` | a pool, of these claimed disks as its data disks |
-| `extend:<pool>:<disk>...` | more data disks for the pool |
+| `create:<pool>:<disk>...` | a pool, of these claimed disks as its data disks (not `cherry`, which is there from boot) |
+| `extend:<pool>:<disk>...` | more data disks for the pool; for `cherry` in RAM, its first, which `/var` moves onto |
 | `cache:<pool>:<mode>:<disk>...` | the pool's cache disks are now these (none: no cache), `writethrough` or `writeback`; every volume's cache is made anew |
 | `reduce:<pool>:<disk>` | takes the disk out of the pool; it stays claimed |
-| `destroy:<pool>` | destroys a pool that has no volumes; its disks stay claimed |
+| `destroy:<pool>` | destroys a pool that has no volumes; its disks stay claimed (never `cherry`) |
 | `volume-create:<pool>:<volume>:<size>` | a volume of `<n>M`, `G` or `T` (MiB, GiB, TiB), or `all` of the pool's free space |
-| `volume-resize:<pool>:<volume>:<size>` | grows the volume |
-| `volume-remove:<pool>:<volume>` | unmounts and removes the volume |
+| `volume-resize:<pool>:<volume>:<size>` | grows the volume (`cherry`/`var`: `/var`) |
+| `volume-remove:<pool>:<volume>` | unmounts and removes the volume (never `cherry`/`var`) |
 
 ```sh
 systemctl start cherry-storage@list && cat /var/log/cherry-storage/list.json
+systemctl start cherry-storage@claim:vda:<fingerprint>
+systemctl start cherry-storage@extend:cherry:vda          # /var moves onto it
+systemctl start cherry-storage@volume-resize:cherry:var:20G
 systemctl start cherry-storage@claim:vdb:<fingerprint>
 systemctl start cherry-storage@claim:nvme0n1:<fingerprint>
 systemctl start cherry-storage@create:tank:vdb
@@ -508,6 +528,9 @@ agent follows `configure-storage`:
 2. It proposes LVM from the chosen disks' kinds, as the kernel reports them:
    - all SSDs, or all hard disks: one pool of all of them;
    - both: one pool of the hard disks, with the SSDs as its cache.
+
+   The pool is `cherry` while that one is in RAM, so the first configuration
+   makes `/var` persistent, and sizes `var`.
 3. It claims the disks and makes the pool once the user agrees.
 
 The tools, run as the `cherry` user with its privileges alone:
@@ -516,7 +539,7 @@ The tools, run as the `cherry` user with its privileges alone:
 |---|---|
 | `list` | the disks (kind, state, fingerprint, what is on them), pools and volumes |
 | `claim`, `release` | `claim:` and `release:`, disk by disk |
-| `create_pool` | `create:`, then `cache:` for the SSDs given as its cache |
+| `create_pool` | `create:`, then `cache:` for the SSDs given as its cache; named `cherry`, `extend:` instead |
 | `add_disks`, `set_cache`, `remove_disk`, `destroy_pool` | `extend:`, `cache:`, `reduce:`, `destroy:` |
 | `create_volume`, `resize_volume`, `remove_volume` | `volume-create:`, `volume-resize:`, `volume-remove:` |
 
@@ -716,9 +739,9 @@ With `--network-veth` (or `VirtualEthernet=yes`), systemd-networkd serves DHCP
 to the container and masquerades its traffic. The firewall lets the container
 out, but nothing in unasked (see [Firewall](#firewall)).
 
-On a machine with its encrypted disk (see [Disks](#disks)), containers and
-their configuration persist. Without one, they live in memory and are gone
-after a reboot.
+Once the machine's pool has disks (see [Disks](#disks)), containers and
+their configuration persist. Before that, `/var` is 128 MiB in RAM: no
+container fits, and nothing lasts past a reboot.
 
 ### As the cherry user
 
@@ -906,10 +929,10 @@ manage:
   `cherry-image@build:<name>`; that recipe is what marks the machine as an
   image. An image is never started: it is what environments are made from.
 - An **environment** is a clone of an image (`machinectl clone`, with the
-  image's `.nspawn` settings: on the disk's btrfs, a snapshot of the image's
-  subvolume, which takes space only for what it changes; on a tmpfs `/var`,
-  a copy), started, stopped and removed on its own, with changes of its
-  own; several can come from one image.
+  image's `.nspawn` settings: a snapshot of the image's subvolume on `/var`'s
+  btrfs, which takes space only for what it changes), started, stopped and
+  removed on its own, with changes of its own; several can come from one
+  image.
   `/var/lib/cherry/environments/<name>/environment.conf` records its image,
   and is what marks the machine as an environment. An image with environments
   is neither removed nor rebuilt until they are gone.
@@ -980,8 +1003,8 @@ the server, as the `cherry` user (see [Cherry service](#cherry-service)).
   for OpenChamber's terminals and git panel, and for OpenCode elsewhere.
 - **Providers:** none are configured; nothing on the machine holds a key.
   Connect one at runtime, in OpenChamber. The credential lands under
-  `/var/lib/cherry`: on the machine's encrypted disk if it has one, and
-  otherwise in RAM, gone at the next boot.
+  `/var/lib/cherry`: on the machine's pool once it has disks, and in RAM
+  before, gone at the next boot (see [Disks](#disks)).
 
 ## OpenChamber
 
@@ -1027,10 +1050,10 @@ on a machine with a TPM.
   it starts, and the agent's tools and terminals. Their data is under
   `/var/lib/cherry` (OpenChamber's in `.config/openchamber`), and the agent
   works in `/var/lib/cherry/work` unless a project picks another directory.
-  All of it persists if `/var` is on the machine's disk, and is new at every
-  boot otherwise (see [Disks](#disks)); the volumes of its storage pools,
-  mounted under `/var/lib/cherry/volumes`, persist either way (see
-  [Storage](#storage)). `/var/lib/cherry` is the only place the service can
+  All of it persists once the machine's pool has disks, and is new at every
+  boot before (see [Disks](#disks)); the volumes of its storage pools are
+  mounted under `/var/lib/cherry/volumes` (see [Storage](#storage)).
+  `/var/lib/cherry` is the only place the service can
   write: it sees the rest of the system read-only, with a private `/tmp`, and
   runs without capabilities, under a system call filter (systemd's
   `@system-service` set, less `@privileged`, whose calls fail with `EPERM`).
@@ -1088,9 +1111,10 @@ This is a development image:
 - The `cherry` user claims disks through polkit (see [Storage](#storage)),
   which erases them: any disk nothing uses, as `cherry-storage` runs as root
   for it, with checked arguments. A process running as that user, the agent
-  or a terminal of OpenChamber's, can erase such a disk, or a pool's volume.
-- The TPM unseals the key of the encrypted `/var` disk, and of the claimed
-  disks, whatever the machine boots: it isn't bound to the boot state (PCRs)
+  or a terminal of OpenChamber's, can erase such a disk, or a pool's volume,
+  though not `/var`'s pool or volume.
+- The TPM unseals the keys of the claimed disks, `/var`'s pool among them,
+  whatever the machine boots: they aren't bound to the boot state (PCRs)
   yet. Each is unreadable away from its machine, but anything that boots the
   machine (an HTTP boot server, a USB stick) can unlock it. The SSH host key
   is the TPM's likewise: it never leaves the TPM, but whatever boots the

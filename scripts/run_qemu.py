@@ -10,10 +10,11 @@ console on this terminal.
 The swtpm state in <state>/tpm is the VM's TPM, and so its identity: it stays
 the same machine across runs until that directory is deleted. Without a disk,
 every run otherwise starts from scratch. --disk SIZE attaches <state>/disk.img,
-a sparse virtio disk created blank with that size: Cherry makes it the VM's
-encrypted /var at the first boot, its key sealed by that TPM, and unlocks it
-at the next. Delete both for a new machine. --hdd SIZE and --ssd SIZE, each
-repeatable, attach more disks for storage pools, blank and kept likewise:
+a sparse virtio disk created blank with that size, for the agent to give to
+the VM's pool cherry, which puts /var on it, its key sealed by that TPM, and
+unlocks it at the next boot. Delete both for a new machine. --hdd SIZE and
+--ssd SIZE, each repeatable, attach more disks for storage pools, blank and
+kept likewise:
 <state>/hdd<N>.img on virtio-blk, which the guest sees as hard disks, and
 <state>/ssd<N>.img on NVMe, which it sees as SSDs.
 
@@ -236,7 +237,7 @@ def main():
                         help="TPM interface, or none to see Cherry stop without a TPM (default: crb)")
     parser.add_argument("--disk", type=parse_size, metavar="SIZE",
                         help="attach <state>/disk.img, created blank with this size (e.g. 8G) if it is not there, "
-                             "for Cherry's encrypted /var (default: no disk)")
+                             "for the agent to give to the pool cherry, and so /var (default: no disk)")
     parser.add_argument("--hdd", type=parse_size, action="append", default=[], metavar="SIZE",
                         help="attach <state>/hdd<N>.img, a virtio disk, created blank with this size if it is not "
                              "there, for storage pools (repeatable)")

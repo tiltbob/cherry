@@ -16,7 +16,9 @@
 # /usr/lib/cherry/profiles); its storage: cherry-storage@.service, which
 # claims disks and makes LVM pools and volumes of them for it as root, with
 # Cherry's /etc/lvm/lvm.conf (over lvm2's), and cherry-storage.service, which
-# unlocks, activates and mounts them at boot; the OpenCode agent's tools for
+# mounts /var from the pool cherry before var.mount, or makes that pool in
+# RAM, then activates the pools and mounts their volumes; the OpenCode
+# agent's tools for
 # all of it, in the system configuration directory /etc/opencode: the MCP
 # servers cherry-machines-mcp and cherry-storage-mcp, run on Bun over
 # mcp-stdio.js, and the machine-images skill and the storage,

@@ -36,7 +36,7 @@ checks it out).
 | `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
-| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys) |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys) |
 | `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
 | `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`; each one's docstring is its manual |
@@ -50,14 +50,17 @@ is, what runs it and what it needs. Read that before the code.
 ## What a change must keep
 
 - **One image, identical on every machine.** Nothing machine-specific is
-  built in. A machine takes what it finds: its TPM, its first blank disk,
-  firmware in Secure Boot setup mode. No central config, no enrollment, and
-  no control plane beyond HTTP and DHCP.
+  built in. A machine takes what it finds: its TPM, firmware in Secure Boot
+  setup mode. Its disks, only the agent claims, with the user's yes: nothing
+  touches a disk at boot. No central config, no enrollment, and no control
+  plane beyond HTTP and DHCP.
 - **The root is read-only, `/etc` included.** Users and groups are created
   at build time with Buildroot's `<PKG>_USERS`; nothing can add one at boot.
   Whatever a service writes goes under `/var` (`StateDirectory=`,
   `LogsDirectory=`); `/root` is a symlink into `/var`; files the image
-  carries under `/var` are factory defaults, copied in at boot.
+  carries under `/var` are factory defaults, copied in at boot. `/var` is
+  the pool `cherry`'s volume `var`, 128 MiB in RAM until the agent gives the
+  pool disks: nothing that runs before that may need more.
 - **Everything is in RAM.** The README records the sizes (Memory, OpenCode,
   OpenChamber); update them when a change moves them, and leave out what a
   container host doesn't need. `post-image.sh` prints the UKI's size.
@@ -131,8 +134,7 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
 | `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
-| `var` | `cherry-var.service` claims only a blank disk, unlocks the right partition and mounts what it holds (btrfs, or an older image's ext4) | |
-| `storage` | `cherry-storage` claims only the disks it may, and drives LVM as it should, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
+| `storage` | `cherry-storage` claims only the disks it may, drives LVM as it should, and gives `/var` the pool `cherry`, in RAM at boot and moved onto its disks by `extend`, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
 | `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |
 | `version` | the image is named after the nearest `v*` tag | git |
 
@@ -142,7 +144,7 @@ and `syntax` fail without theirs. CI installs all of them (`build.yml`,
 "Install check tools"). An agent sandbox usually has python3, node, make,
 git, systemd and openssl, and lacks shellcheck, busybox, `ip`, softhsm2,
 opensc, swtpm, libtss2-dev and the submodule: then `make -k check` runs
-twelve checks, skips four and fails three for want of tools. Get the
+eleven checks, skips four and fails three for want of tools. Get the
 submodule with `git submodule update --init --depth 1 buildroot` and install
 what you can; in the pull request, say which checks ran.
 
@@ -295,8 +297,9 @@ unmet: check the symbol's dependencies for this kernel version first.
 `board/x86_64/rootfs-overlay/` is copied onto the root as it is. Cherry's
 units are `cherry-*.service` and `cherry-no-tpm.target`; their scripts live
 under `usr/lib/cherry/`. Order against systemd's targets explicitly (the
-firewall before `network-pre.target`, `/var` before `var.mount`), condition on
-the TPM where the README says (`cherry-var.service`:
+firewall before `network-pre.target`; `cherry-storage.service`, of
+`package/cherry/`, before `var.mount`), condition on the TPM where the README
+says (`cherry-storage.service`:
 `ConditionPathExists=/run/cherry/identity/ek-hash`), and give each unit the
 hardening its neighbors have.
 `make check-units` verifies the result; a change in what a unit does is also a
@@ -314,7 +317,7 @@ change to its script's test under `tests/` and to the README.
   `check_rc=False`; assert with `check(condition, message)`, whose message
   names what was found; report with `log()`. Timeouts scale with `MULT`.
 - A scenario that needs a mirror or the internet probes for it first and
-  returns `SKIPPED`, with the reason logged, as `s4_debootstrap` does.
+  returns `SKIPPED`, with the reason logged, as `s5_debootstrap` does.
 - Run as the `cherry` user (`AS_CHERRY`), inside `cherry.service`'s sandbox
   where the agent would (`IN_CHERRY_SERVICE`), whenever the README says that
   user can do it: the scenario is what proves the privileges are enough and
@@ -377,17 +380,17 @@ two defconfigs' toolchain options must stay the same.
 | Feature | Code | Checks | README |
 |---|---|---|---|
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
-| Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s3, s11 | Machine identity |
-| SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s3, s11, s13 | SSH host key |
-| `/var` on an encrypted disk | `usr/lib/cherry/var`, `cherry-var.service`, `usr/lib/cherry/repart.d/` | `tests/var.sh`, s13 | Disks |
-| Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
-| Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |
-| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |
-| Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
-| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s9 | Building images, Environments |
-| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s14 | Storage |
-| The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s8 | As the cherry user, Cherry service |
-| OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s7, s8 | OpenCode, OpenChamber |
+| Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s4, s12 | Machine identity |
+| SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s4, s12 | SSH host key |
+| `/var` on the pool `cherry`, in RAM until it has disks | `package/cherry/cherry-storage` (`boot start`), `cherry-storage.service`, `lvm.conf`; the overlay's `var.mount.d/` | `tests/storage.py`, s1, s2, s4 | Disks |
+| Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
+| Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
+| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
+| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
+| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
+| The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s9 | As the cherry user, Cherry service |
+| OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s8, s9 | OpenCode, OpenChamber |
 | The image's name and version | `Makefile`, `board/x86_64/post-build.sh` | `tests/version.sh`, `tests/postbuild.sh` | Building |
 | Toolchain and SDK | `configs/cherry_sdk_x86_64_defconfig`, `patches/toolchain-external-custom/`, `sdk.yml` | the `sdk` workflow's own check | Building |
 | QEMU | `scripts/run_qemu.py` | `tests/smoke.py` uses it | Booting |
