@@ -81,7 +81,7 @@ test:
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
 	check-extension check-postbuild check-firewall check-secureboot \
-	check-ceremony check-storage check-exocarp check-version
+	check-ceremony check-storage check-pcrsign check-exocarp check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -165,6 +165,11 @@ check-ceremony:
 # gives /var the pool cherry: in RAM at boot, on its disks once it has them.
 check-storage:
 	python3 tests/storage.py
+
+# scripts/pcrsign.py computes, signs and checks the UKI's PCR 11 policy as
+# systemd does.
+check-pcrsign:
+	python3 tests/pcrsign.py
 
 # exocarp, the SSH host key agent, against a swtpm: the key is the TPM's, the
 # same at every start, and sshd signs with it (skipped without cc, libtss2-dev,
