@@ -262,9 +262,15 @@ def report(state, cmd, args):
     rows = [r for r in rows if not only or r["vg_name"] in only]
     if "--reportformat" in args:
         print(json.dumps({"report": [{cmd[:2]: [{f: str(r[f]) for f in fields} for r in rows]}]}))
-    else:
+    elif "--separator" in args:
         for r in rows:
             print("  " + "|".join(str(r[f]) for f in fields))
+    else:
+        # Aligned, as LVM prints without a separator: each column padded to its widest value.
+        cells = [[str(r[f]) for f in fields] for r in rows]
+        widths = [max((len(c[i]) for c in cells), default=0) for i in range(len(fields))]
+        for c in cells:
+            print("  " + " ".join(v.ljust(w) for v, w in zip(c, widths)))
 
 
 def wipefs(state, args):

@@ -305,8 +305,10 @@ ram_device() {
 	pool_pvs "$system_pool" ram
 }
 
+# A separator keeps LVM from aligning the column, which pads every name but
+# the longest with spaces (the smoke test's s14, with cherry and tank).
 pools() {
-	lvm vgs --noheadings -o vg_name | sed 's/^[[:space:]]*//'
+	lvm vgs --noheadings --separator '|' -o vg_name | sed 's/^[[:space:]]*//'
 }
 
 missing_pvs() {
@@ -439,7 +441,8 @@ uncache() {
 			lvm lvconvert -y --uncache "$1/$name"
 		fi
 	done
-	for stray in $(lvm lvs --noheadings -o lv_name "$1" | sed -n 's/^[[:space:]]*\([A-Za-z0-9-]*_cache\)$/\1/p'); do
+	for stray in $(lvm lvs --noheadings --separator '|' -o lv_name "$1" |
+		sed -n 's/^[[:space:]]*\([A-Za-z0-9-]*_cache\)$/\1/p'); do
 		lvm lvremove -y "$1/$stray"
 	done
 }
