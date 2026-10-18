@@ -733,6 +733,13 @@ git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
   from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
+- **A leaked release key:** `scripts/secureboot.py revoke
+  board/x86_64/secureboot/release.crt` adds its certificate to `dbx.auth`,
+  the signed update that sets dbx to every revoked certificate, which the
+  KEK on the Nitrokey signs; then `issue` a new key, and commit both. Every
+  release from then on carries `dbx.auth`, and a machine applies it (below):
+  the firmware then refuses whatever the revoked key signed. Nothing takes a
+  revocation back.
 - **The PCR key** is made outside the token, by `pcr`, once: a second `pcr`
   refuses while `pcr.pem` is there. Back the key up as the token's.
 
@@ -758,10 +765,11 @@ release. Before anything else starts, `cherry-secureboot.service`:
    network, graphics and storage cards: the firmware measured each into PCR 2
    of the TPM, by the Authenticode SHA-256 that db entries hold, and the TPM's
    event log lists them;
-2. sets db to the CA and those hashes, then the KEK, then the PK, which ends
-   setup mode. Microsoft signs option ROMs, and db leaves Microsoft's CA out:
+2. sets db to the CA and those hashes, dbx to the revoked release keys when
+   the image carries `dbx.auth`, then the KEK, then the PK, which ends setup
+   mode. Microsoft signs option ROMs, and db leaves Microsoft's CA out:
    without their hashes, the cards would have no driver. Whatever db and KEK
-   held before goes;
+   held before goes, and dbx too when the image has one;
 3. shows what it enrolled on the console, and reboots. The firmware now boots
    only what the CA's certificates signed, and those option ROMs.
 
@@ -769,7 +777,11 @@ It enrolls nothing, and says why on the console, when the TPM's event log is
 missing or a driver in it has no SHA-256 (the TPM's SHA-256 PCR bank is off),
 or when the firmware refuses a variable before the PK. On every later boot it
 reports in the journal (`journalctl -u cherry-secureboot`) whether Secure Boot
-is on, with Cherry's keys. When the keys are in but Secure Boot is off, which
+is on, with Cherry's keys, and on a machine with Cherry's keys whose dbx is
+not the image's `dbx.auth`, sets it: the firmware takes the update, signed by
+the KEK and later than what dbx holds, and from the next boot refuses what
+the revoked keys signed; one that refuses it is reported on the console, and
+the unit fails. When the keys are in but Secure Boot is off, which
 is the firmware setup's own switch, out of Cherry's reach, it says so on the
 console. Some firmware asks at the next boot to confirm new keys, and drops
 them if nobody does; Cherry then reports that instead of enrolling again.
@@ -806,9 +818,9 @@ to try a key hierarchy of your own, e.g. made by `scripts/secureboot.py` on a
 SoftHSM token (as `tests/ceremony.sh` does), point it there, run `make
 br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
 
-Not yet: Cherry applies no dbx updates, which would revoke a leaked release
-key (the KEK would sign them), and an older release, signed with the same
-keys, still boots and unlocks the disks a newer one sealed.
+Not yet: an older release still boots, and unlocks the disks a newer one
+sealed, as long as its release key is not revoked, and revoking the key
+refuses every release it signed; dbx holds no hashes of single releases.
 
 ## Running containers
 
@@ -1198,7 +1210,9 @@ This is a development image:
   was when they were sealed (see [Disks](#disks)): nothing else that boots
   the machine (an HTTP boot server, a USB stick) can unlock them. Any
   release signed with that key does, older ones with their holes included,
-  as nothing revokes one; and `root` on the console then has the disks open.
+  until their release key is revoked, which takes every release it signed
+  (see [Secure Boot](#secure-boot)); and `root` on the console then has the
+  disks open.
   A build tree's images unlock only the disks they sealed themselves. The
   SSH host key is the TPM's, and sealed to nothing: it never leaves the TPM,
   but whatever boots the machine, and root or the `tss` group on it, can

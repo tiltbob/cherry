@@ -6,9 +6,9 @@
 
 # Cherry's own, no source: cherry-secureboot.service, and the signed variable
 # updates it enrolls in setup mode, from the keys directory (all three, or
-# none: then the unit doesn't start). They are public: certificates, and the
-# token's signatures over them. A change to them needs
-# `make br-cherry-secureboot-reinstall`.
+# none: then the unit doesn't start), with dbx.auth, the revoked release keys,
+# when there is one. They are public: certificates, and the token's signatures
+# over them. A change to them needs `make br-cherry-secureboot-reinstall`.
 CHERRY_SECUREBOOT_KEYS = $(call qstrip,$(BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS))
 
 define CHERRY_SECUREBOOT_INSTALL_TARGET_CMDS
@@ -18,6 +18,10 @@ define CHERRY_SECUREBOOT_INSTALL_TARGET_CMDS
 			$(INSTALL) -D -m 0644 $(CHERRY_SECUREBOOT_KEYS)/$$var.auth \
 				$(TARGET_DIR)/usr/share/cherry/secureboot/$$var.auth || exit 1; \
 		done; \
+		if [ -e $(CHERRY_SECUREBOOT_KEYS)/dbx.auth ]; then \
+			$(INSTALL) -D -m 0644 $(CHERRY_SECUREBOOT_KEYS)/dbx.auth \
+				$(TARGET_DIR)/usr/share/cherry/secureboot/dbx.auth; \
+		fi; \
 	fi
 endef
 

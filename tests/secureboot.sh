@@ -1,7 +1,9 @@
 #!/bin/sh
 # package/cherry-secureboot/cherry-secureboot enrolls in setup mode what it
 # should, in the right order, and nothing when it shouldn't; out of setup mode
-# it reports the state. Run against a directory standing in for efivarfs
+# it reports the state, and sets dbx from the image's dbx.auth on a machine
+# with Cherry's PK whose dbx differs, reporting a firmware that refuses it.
+# Run against a directory standing in for efivarfs
 # (CHERRY_EFIVARS), keys made with scripts/secureboot.py's own structures and
 # dummy signatures (the script never checks them, the firmware does), and
 # stand-ins on PATH: tpm2_eventlog prints the YAML in $FAKE_EVENTLOG; dd is
@@ -84,6 +86,12 @@ for var in ("PK", "KEK", "db"):
     esls[var] = sb.esl(sb.EFI_CERT_X509, [f"a DER certificate of the {var}".encode()])
     with open(f"{tmp}/keys/{var}.auth", "wb") as f:
         f.write(sb.auth2(sb.efi_time(when), f"a PKCS#7 signature over the {var}".encode(), esls[var]))
+# dbx.auth, as revoke writes it: one list per revoked certificate, later than db.auth; kept outside the keys
+# until the dbx cases.
+esls["dbx"] = b"".join(sb.esl(sb.EFI_CERT_X509, [f"a DER certificate of leaked release key {i}".encode()])
+                       for i in (1, 22))
+with open(f"{tmp}/dbx.auth", "wb") as f:
+    f.write(sb.auth2(sb.efi_time(when + datetime.timedelta(days=1)), b"a PKCS#7 signature over dbx", esls["dbx"]))
 drivers = sorted(hashlib.sha256(name).hexdigest() for name in (b"virtio-net", b"gop"))
 other = hashlib.sha256(b"cherry-x86_64.efi").hexdigest()
 
@@ -138,7 +146,7 @@ for name, text in logs.items():
     with open(f"{tmp}/eventlog.{name}", "w") as f:
         f.write(text)
 db = esls["db"] + sb.esl(sb.EFI_CERT_SHA256, [bytes.fromhex(h) for h in drivers])
-expected = {"db": db, "db.none": esls["db"], "KEK": esls["KEK"], "PK": esls["PK"]}
+expected = {"db": db, "db.none": esls["db"], "KEK": esls["KEK"], "PK": esls["PK"], "dbx": esls["dbx"]}
 for name, data in expected.items():
     with open(f"{tmp}/expected/{name}", "wb") as f:
         f.write(struct.pack("<I", 0x27) + data)
@@ -323,6 +331,75 @@ run
 [ "$rc" -eq 0 ] || die "failed: $out"
 says "The firmware has no Secure Boot."
 calls ""
+
+# dbx.auth in the image. In setup mode, dbx goes in after db, as the KEK
+# signed it, and the banner counts its two revoked keys.
+cp "$tmp/dbx.auth" "$tmp/keys/dbx.auth"
+firmware 1 0
+run
+[ "$rc" -eq 0 ] || die "failed: $out"
+says "and 2 option ROM driver(s) the firmware loaded, and dbx: 2 revoked release key(s)."
+calls "dd db-$security
+dd dbx-$security
+dd KEK-$global
+dd PK-$global
+dd $marker
+systemctl --no-block reboot"
+same "$efivars/dbx-$security" "$tmp/expected/dbx"
+{ printf "\047\000\000\000"; cat "$tmp/keys/dbx.auth"; } | cmp -s - "$tmp/writes/dbx" ||
+	die "dbx was not set to dbx.auth as the token signed it"
+# The firmware refuses dbx in setup mode: no KEK, no PK, no reboot.
+firmware 1 0
+export FAKE_FAIL=dbx
+run
+unset FAKE_FAIL
+[ "$rc" -ne 0 ] || die "succeeded: $out"
+says "The firmware refused dbx: dd: error writing"
+calls "dd db-$security
+dd dbx-$security"
+# Out of setup mode, with Cherry's PK: a dbx that isn't dbx.auth's (none, or
+# another vendor's, made writable first) becomes it, with Secure Boot on or
+# off; one that is already is left alone, as is any dbx under another PK.
+firmware 0 1 "PK-$global" "$tmp/expected/PK"
+run
+[ "$rc" -eq 0 ] || die "failed: $out"
+says "Secure Boot is on, with Cherry's keys."
+says "dbx is now the image's: 2 revoked release key(s)."
+calls "dd dbx-$security"
+same "$efivars/dbx-$security" "$tmp/expected/dbx"
+firmware 0 0 "PK-$global" "$tmp/expected/PK" "dbx-$security" "$tmp/old"
+run
+[ "$rc" -eq 0 ] || die "failed: $out"
+says "dbx is now the image's"
+calls "chattr -i $efivars/dbx-$security
+dd dbx-$security"
+same "$efivars/dbx-$security" "$tmp/expected/dbx"
+firmware 0 1 "PK-$global" "$tmp/expected/PK" "dbx-$security" "$tmp/expected/dbx"
+run
+[ "$rc" -eq 0 ] || die "failed: $out"
+says "Secure Boot is on, with Cherry's keys."
+case $out in *dbx*) die "dbx was touched though it is the image's already: $out" ;; esac
+calls ""
+firmware 0 1 "PK-$global" "$tmp/old" "dbx-$security" "$tmp/old"
+run
+[ "$rc" -eq 0 ] || die "failed: $out"
+says "Secure Boot is on, with another platform key than Cherry's."
+calls ""
+same "$efivars/dbx-$security" "$tmp/old"
+# The firmware refuses it out of setup mode: reported on the console, and the
+# unit fails, with Secure Boot's state reported all the same.
+firmware 0 1 "PK-$global" "$tmp/expected/PK"
+export FAKE_FAIL=dbx
+run
+unset FAKE_FAIL
+[ "$rc" -ne 0 ] || die "succeeded: $out"
+says "Secure Boot is on, with Cherry's keys."
+says "Cherry could not revoke its leaked release keys."
+says "with 2 revoked release key(s), signed by the key exchange key: dd: error writing"
+says "Images those keys signed still boot on this machine."
+calls "dd dbx-$security"
+[ ! -e "$efivars/dbx-$security" ] || die "a refused dbx was set"
+rm "$tmp/keys/dbx.auth"
 
 # No scratch space (early in boot, /tmp is read-only): a failure, in setup
 # mode as out of it, with nothing set and no reboot.

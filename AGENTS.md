@@ -35,7 +35,7 @@ checks it out).
 | `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
-| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys and of the PCR key) |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys and of the PCR key, and `dbx.auth`, the revoked release keys, once there is one) |
 | `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
 | `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`, `pcrsign.py`; each one's docstring is its manual |
@@ -94,7 +94,8 @@ is, what runs it and what it needs. Read that before the code.
   the disks.
 - **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
   committed public half of keys that live on a Nitrokey HSM 2 and in the
-  `release` environment's secret. Never regenerate, edit or "fix" them;
+  `release` environment's secret. Never regenerate, edit or "fix" them, and
+  write `dbx.auth` through `scripts/secureboot.py revoke` alone;
   `scripts/secureboot.py check` verifies them. Local builds are unsigned, and
   a machine with Cherry's keys and Secure Boot on refuses them.
 - **Every download is pinned.** `BR2_DOWNLOAD_FORCE_CHECK_HASHES` is on:
@@ -141,8 +142,8 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `extension` | OpenChamber's Environments extension: its manifest, as the host inspects a package, and its service, against the `machines` stand-ins | node |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
-| `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
-| `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
+| `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should, and sets dbx from `dbx.auth` | openssl |
+| `ceremony` | `scripts/secureboot.py init`, `issue` and `revoke`, on a SoftHSM token | softhsm2, opensc |
 | `storage` | `cherry-storage` claims only the disks it may, drives LVM as it should, seals the keys to the boot state, and gives `/var` the pool `cherry`, in RAM at boot and moved onto its disks by `extend`, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
 | `pcrsign` | `scripts/pcrsign.py` measures, signs and checks a UKI's PCR 11 policy as systemd does: on PE binaries the test makes, against systemd's vectors | openssl |
 | `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |

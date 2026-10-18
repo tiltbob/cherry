@@ -8,9 +8,13 @@
 # CA's, before it hands out a key. init writes the six files and check verifies
 # them; init refuses to run again, over the files or over the keys on the
 # token; issue writes release.crt and its key, to a new file or stdout, also
-# with its scratch space on another file system (/dev/shm, when it is one);
-# check catches a tampered file, a swapped one and a release certificate the
-# CA didn't issue. pcr, which needs no token, writes pcr.pem and the key, once:
+# with its scratch space on another file system (/dev/shm, when it is one).
+# revoke adds a release certificate to dbx.auth, signed by the KEK, keeps the
+# ones revoked before, refuses one revoked already and one the CA didn't
+# issue, and check then wants a new release key, which issue gives. check
+# catches a tampered file, a swapped one, a release certificate the CA didn't
+# issue and a tampered dbx.auth. pcr, which needs no token, writes pcr.pem and
+# the key, once:
 # a second pcr refuses, as the key's loss locks every disk; check takes
 # pcr.pem with the Secure Boot keys or alone, and catches one that is no
 # RSA-2048 key. The token's part is skipped without softhsm2-util and
@@ -200,6 +204,54 @@ set -e
 ok
 openssl pkey -in "$tmp/stdout.key" -noout || die "issue --key-out - printed no key"
 
+# A leaked release key: revoke puts its certificate in dbx.auth, signed by the
+# KEK; check refuses to go on with that key, and issue replaces it. A second
+# leak adds to the list, a certificate the CA didn't issue is refused, as is
+# one revoked already.
+cp "$keys/release.crt" "$tmp/leaked-1.crt"
+token revoke "$tmp/leaked-1.crt"
+ok
+[ -s "$keys/dbx.auth" ] || die "revoke wrote no dbx.auth"
+case $out in *"1 revoked certificate(s)"*"issue a new release key"*) ;; *) die "revoke did not say to issue a new key: $out" ;; esac
+sb check
+refused "release.crt is revoked by dbx.auth"
+token revoke "$tmp/leaked-1.crt"
+refused "is revoked already"
+openssl req -new -x509 -newkey rsa:2048 -nodes -keyout /dev/null -subj "/CN=not the CA's/" -days 1 \
+	-out "$tmp/foreign.crt" 2>/dev/null
+token revoke "$tmp/foreign.crt"
+refused "not a certificate db.crt issued"
+rm "$tmp/release.key"
+token issue --key-out "$tmp/release.key"
+ok
+sb check
+ok
+case $out in *"issued release.crt; dbx.auth revokes 1 release certificate(s)"*) ;; *) die "check did not count the revocation: $out" ;; esac
+cp "$keys/release.crt" "$tmp/leaked-2.crt"
+token revoke "$tmp/leaked-2.crt"
+ok
+rm "$tmp/release.key"
+token issue --key-out "$tmp/release.key"
+ok
+sb check
+ok
+case $out in *"dbx.auth revokes 2 release certificate(s)"*) ;; *) die "check did not count both revocations: $out" ;; esac
+python3 - "$keys" "$tmp" <<'EOF'
+import sys
+sys.path.insert(0, "scripts")
+import secureboot as sb  # noqa: E402
+
+keys, tmp = sys.argv[1:]
+revoked = sb.revoked_certificates(f"{keys}/dbx.auth")
+leaked = [sb.pem_to_der(f"{tmp}/leaked-{i}.crt") for i in (1, 2)]
+assert revoked == leaked, "dbx.auth does not revoke the two leaked certificates, in order"
+with open(f"{keys}/dbx.auth", "rb") as f:
+    timestamp = sb.parse_auth2(f.read())[0]
+with open(f"{keys}/db.auth", "rb") as f:
+    assert timestamp > sb.parse_auth2(f.read())[0], "dbx.auth is not later than db.auth"
+EOF
+n=$((n + 1))
+
 cp -a "$keys" "$tmp/good"
 python3 -c 'import sys; p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[-1] ^= 1; open(p, "wb").write(b)' \
 	"$keys/db.auth"
@@ -217,5 +269,14 @@ refused "release.crt: not issued by db.crt"
 rm "$keys/release.crt" "$keys/db.crt"
 sb check
 refused "lacks db.crt"
+rm -rf "$keys" && cp -a "$tmp/good" "$keys"
+python3 -c 'import sys; p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[-1] ^= 1; open(p, "wb").write(b)' \
+	"$keys/dbx.auth"
+sb check
+refused "dbx.auth: its signature does not verify with KEK.crt"
+rm -rf "$keys" && cp -a "$tmp/good" "$keys"
+cp "$keys/db.auth" "$keys/dbx.auth"
+sb check
+refused "dbx.auth: its signature does not verify with KEK.crt"
 
 echo "ceremony: $n cases passed"
