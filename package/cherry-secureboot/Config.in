@@ -7,7 +7,10 @@ config BR2_PACKAGE_CHERRY_SECUREBOOT
 	  Secure Boot setup mode, enroll Cherry's keys (scripts/
 	  secureboot.py init) and the hashes of the option ROMs the
 	  firmware loaded, from the TPM's event log, then reboot into
-	  Secure Boot. Otherwise, report whether Secure Boot is on.
+	  Secure Boot. Otherwise, report whether Secure Boot is on,
+	  and on a machine with Cherry's keys, set dbx to the revoked
+	  release keys the image carries (scripts/secureboot.py
+	  revoke) when it lacks them.
 
 if BR2_PACKAGE_CHERRY_SECUREBOOT
 
@@ -16,7 +19,11 @@ config BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS
 	default "$(BR2_EXTERNAL_CHERRY_PATH)/board/x86_64/secureboot"
 	help
 	  The directory of PK.auth, KEK.auth and db.auth, as
-	  scripts/secureboot.py init writes them. Without them, the
-	  image enrolls nothing and the service doesn't start.
+	  scripts/secureboot.py init writes them, and of dbx.auth, the
+	  revoked release keys, when revoke wrote one. Without them,
+	  the image enrolls nothing and the service doesn't start.
+	  With release.key beside release.crt in it, a local chain's
+	  (scripts/secureboot.py issue --key-out), post-image.sh signs
+	  the image with it, for machines that enrolled that chain.
 
 endif

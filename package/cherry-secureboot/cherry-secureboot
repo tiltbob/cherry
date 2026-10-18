@@ -7,9 +7,17 @@
 # The keys are the signed updates that scripts/secureboot.py init made on the
 # token, in $keys: PK.auth (the platform key's certificate, self-signed),
 # KEK.auth (the key exchange key's, signed by the PK) and db.auth (the Cherry
-# Secure Boot CA's, signed by the KEK). They go in in the order db, KEK, PK,
-# replacing whatever db and KEK held: setting the PK ends setup mode, and from
-# then on the firmware checks every change against it. dbx stays as it is.
+# Secure Boot CA's, signed by the KEK). They go in in the order db, dbx, KEK,
+# PK, replacing whatever db and KEK held: setting the PK ends setup mode, and
+# from then on the firmware checks every change against it.
+#
+# dbx: when the image carries dbx.auth (scripts/secureboot.py revoke: the
+# certificates of release keys that leaked, signed by the KEK), it sets dbx
+# too, in setup mode along with the rest, and out of setup mode on a machine
+# whose PK is Cherry's and whose dbx is not dbx.auth's: the firmware takes it,
+# as the KEK signed it with a later timestamp than what dbx holds, and from the
+# next boot refuses what the revoked keys signed. Without dbx.auth, dbx stays
+# as it is.
 #
 # Option ROMs: the firmware runs the UEFI drivers of add-in cards (network,
 # graphics, storage) from their option ROMs, and with Secure Boot on, only
@@ -90,6 +98,23 @@ value() {
 payload() {
 	len=$(od -An -tu4 -j16 -N4 "$1" | tr -d ' \n')
 	tail -c +$((17 + len)) "$1"
+}
+
+# revoked <file.auth>: how many EFI_SIGNATURE_LISTs dbx.auth's data holds, one
+# per revoked certificate (each list's size is the UINT32 after its 16-byte
+# type).
+revoked() {
+	payload "$1" >"$tmp/dbx.esl"
+	total=$(wc -c <"$tmp/dbx.esl")
+	off=0
+	n=0
+	while [ "$off" -lt "$total" ]; do
+		# shellcheck disable=SC2046 # the four bytes become $1 to $4
+		set -- $(od -An -tu1 -j$((off + 16)) -N4 "$tmp/dbx.esl")
+		off=$((off + $1 + ($2 << 8) + ($3 << 16) + ($4 << 24)))
+		n=$((n + 1))
+	done
+	echo "$n"
 }
 
 # bytes <hex>: write the bytes a hex string spells.
@@ -183,6 +208,11 @@ enroll() {
 	fi
 	# NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS | TIME_BASED_AUTHENTICATED_WRITE_ACCESS
 	setvar "db-$security" 0x27 "$tmp/db" || fail "The firmware refused db: $(cat "$tmp/error")"
+	dbx=
+	if [ -s "$keys/dbx.auth" ]; then
+		setvar "dbx-$security" 0x27 "$keys/dbx.auth" || fail "The firmware refused dbx: $(cat "$tmp/error")"
+		dbx=", and dbx: $(revoked "$keys/dbx.auth") revoked release key(s)"
+	fi
 	setvar "KEK-$global" 0x27 "$keys/KEK.auth" || fail "The firmware refused the KEK: $(cat "$tmp/error")"
 	setvar "PK-$global" 0x27 "$keys/PK.auth" || fail "The firmware refused the PK: $(cat "$tmp/error")"
 
@@ -200,7 +230,7 @@ enroll() {
 		banner "Cherry enrolled its Secure Boot keys, but cannot reboot into Secure Boot itself." "The firmware refused the variable that would stop Cherry from enrolling over and over should it drop the keys: $(cat "$tmp/error") Reboot by hand."
 		exit 1
 	fi
-	banner "Cherry enrolled its Secure Boot keys: rebooting into Secure Boot." "The platform key, the key exchange key, and db: the Cherry Secure Boot CA and $n option ROM driver(s) the firmware loaded."
+	banner "Cherry enrolled its Secure Boot keys: rebooting into Secure Boot." "The platform key, the key exchange key, and db: the Cherry Secure Boot CA and $n option ROM driver(s) the firmware loaded$dbx."
 	systemctl --no-block reboot
 }
 
@@ -226,6 +256,21 @@ status() {
 	*)
 		echo "The firmware has no Secure Boot." ;;
 	esac
+	# The revoked release keys, on a machine with Cherry's keys whose dbx
+	# lacks them; the KEK's signature on dbx.auth is what lets it in.
+	if [ "$ours" = yes ] && [ -s "$keys/dbx.auth" ]; then
+		payload "$keys/dbx.auth" >"$tmp/dbx.ours"
+		value "dbx-$security" >"$tmp/dbx"
+		if ! cmp -s "$tmp/dbx.ours" "$tmp/dbx"; then
+			n=$(revoked "$keys/dbx.auth")
+			if setvar "dbx-$security" 0x27 "$keys/dbx.auth"; then
+				echo "dbx is now the image's: $n revoked release key(s). The firmware refuses what they signed from the next boot."
+			else
+				banner "Cherry could not revoke its leaked release keys." "The firmware refused dbx, which the image carries with $n revoked release key(s), signed by the key exchange key: $(cat "$tmp/error") Images those keys signed still boot on this machine."
+				exit 1
+			fi
+		fi
+	fi
 }
 
 if [ "$(flag SetupMode)" = 1 ]; then

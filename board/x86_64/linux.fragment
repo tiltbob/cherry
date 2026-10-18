@@ -76,6 +76,25 @@ CONFIG_DMI_SYSFS=y
 # (DownloadUser=alpm); CONFIG_LSM already lists landlock.
 CONFIG_SECURITY_LANDLOCK=y
 
+# Lockdown, in integrity mode, from early boot and however the machine booted:
+# the kernel loads no module the build did not sign, and refuses what would
+# change it at run time (/dev/mem, kexec of unsigned images, hibernation, raw
+# PCI, port and MSR access, debugfs, unsafe module parameters). Secure Boot
+# keeps the firmware from starting anything but a signed release; lockdown
+# keeps what it started as it was built. /sys/kernel/security/lockdown shows
+# the mode; CONFIG_LSM already lists lockdown. Every module is signed at
+# modules_install, after Buildroot's strip (INSTALL_MOD_STRIP=1), with a key
+# the kernel build makes in its tree (certs/signing_key.pem, with the host
+# OpenSSL of BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL) and whose certificate the
+# kernel carries; smoke scenario 1 checks every module the image carries is,
+# loads one, and has a copy of it without the signature refused.
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_ALL=y
+CONFIG_MODULE_SIG_FORCE=y
+
 # Container networking.
 CONFIG_VETH=y
 CONFIG_BRIDGE=y

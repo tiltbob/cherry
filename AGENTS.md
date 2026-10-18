@@ -14,10 +14,9 @@ reads it through `CLAUDE.md`, which only imports it.
    the manual: the checks under `tests/` test "what the README says", and a
    change in behavior is incomplete until the README says the new behavior.
 2. **The roadmap,** issue [#4](https://github.com/tiltbob/cherry/issues/4),
-   and its phase issues: [#6](https://github.com/tiltbob/cherry/issues/6)
-   disks, [#7](https://github.com/tiltbob/cherry/issues/7) containers,
-   [#9](https://github.com/tiltbob/cherry/issues/9) OCI,
-   [#10](https://github.com/tiltbob/cherry/issues/10) hardening. They record
+   and its open phase issues: [#7](https://github.com/tiltbob/cherry/issues/7)
+   containers and [#10](https://github.com/tiltbob/cherry/issues/10)
+   hardening. They record
    the principles (one image for every machine; the TPM is the identity; no
    central config or enrollment; images never leave the node that built them;
    every trusted key is baked in at build time; systemd's own mechanisms over
@@ -36,7 +35,7 @@ checks it out).
 | `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
-| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys and of the PCR key) |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys and of the PCR key, and `dbx.auth`, the revoked release keys, once there is one) |
 | `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
 | `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`, `pcrsign.py`; each one's docstring is its manual |
@@ -95,9 +94,12 @@ is, what runs it and what it needs. Read that before the code.
   the disks.
 - **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
   committed public half of keys that live on a Nitrokey HSM 2 and in the
-  `release` environment's secret. Never regenerate, edit or "fix" them;
-  `scripts/secureboot.py check` verifies them. Local builds are unsigned, and
-  a machine with Cherry's keys and Secure Boot on refuses them.
+  `release` environment's secret. Never regenerate, edit or "fix" them, and
+  write `dbx.auth` through `scripts/secureboot.py revoke` alone;
+  `scripts/secureboot.py check` verifies them. Local builds are unsigned,
+  unless the build tree has a local chain of its own (README, Secure Boot),
+  and a machine with Cherry's keys and Secure Boot on refuses them either
+  way.
 - **Every download is pinned.** `BR2_DOWNLOAD_FORCE_CHECK_HASHES` is on:
   every `.hash` holds real hashes, each with a comment saying where it came
   from (upstream's checksum or signature, the npm registry's integrity field,
@@ -110,7 +112,9 @@ is, what runs it and what it needs. Read that before the code.
 - **Kernel options live in `board/x86_64/linux.fragment`,** and
   `check-kconfig.sh` fails the build when one doesn't survive into the final
   `.config`. List only symbols this kernel has, each under a comment saying
-  what needs it.
+  what needs it. The kernel is locked down (integrity mode) and loads only
+  the modules the build signed: a driver the image needs is built in, or a
+  module of this kernel's build; nothing loads one from elsewhere.
 - **systemd's own mechanisms** (credentials, repart, cryptsetup, machined,
   `.nspawn` files, template units, presets) rather than daemons or formats of
   Cherry's own.
@@ -140,8 +144,8 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `extension` | OpenChamber's Environments extension: its manifest, as the host inspects a package, and its service, against the `machines` stand-ins | node |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
-| `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
-| `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
+| `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should, and sets dbx from `dbx.auth` | openssl |
+| `ceremony` | `scripts/secureboot.py init`, `issue` and `revoke`, on a SoftHSM token | softhsm2, opensc |
 | `storage` | `cherry-storage` claims only the disks it may, drives LVM as it should, seals the keys to the boot state, and gives `/var` the pool `cherry`, in RAM at boot and moved onto its disks by `extend`, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
 | `pcrsign` | `scripts/pcrsign.py` measures, signs and checks a UKI's PCR 11 policy as systemd does: on PE binaries the test makes, against systemd's vectors | openssl |
 | `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |
@@ -395,7 +399,8 @@ two defconfigs' toolchain options must stay the same.
 | The disks' keys sealed to the boot state | `scripts/pcrsign.py`, `board/x86_64/post-image.sh`, `package/cherry-pit/src/cherry-pit.c`, `package/cherry/cherry-storage`, `scripts/secureboot.py pcr`, the `release` job of `build.yml` | `tests/pcrsign.py`, `tests/storage.py`, `tests/ceremony.sh`, s2, s4, s15 | Disks, Secure Boot |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
-| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml`, `post-image.sh` (a local chain's signature) | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Kernel lockdown, signed modules | `board/x86_64/linux.fragment`, `check-kconfig.sh` | s1 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
 | Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
 | Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |

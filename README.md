@@ -733,6 +733,13 @@ git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
   from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
+- **A leaked release key:** `scripts/secureboot.py revoke
+  board/x86_64/secureboot/release.crt` adds its certificate to `dbx.auth`,
+  the signed update that sets dbx to every revoked certificate, which the
+  KEK on the Nitrokey signs; then `issue` a new key, and commit both. Every
+  release from then on carries `dbx.auth`, and a machine applies it (below):
+  the firmware then refuses whatever the revoked key signed. Nothing takes a
+  revocation back.
 - **The PCR key** is made outside the token, by `pcr`, once: a second `pcr`
   refuses while `pcr.pem` is there. Back the key up as the token's.
 
@@ -758,10 +765,11 @@ release. Before anything else starts, `cherry-secureboot.service`:
    network, graphics and storage cards: the firmware measured each into PCR 2
    of the TPM, by the Authenticode SHA-256 that db entries hold, and the TPM's
    event log lists them;
-2. sets db to the CA and those hashes, then the KEK, then the PK, which ends
-   setup mode. Microsoft signs option ROMs, and db leaves Microsoft's CA out:
+2. sets db to the CA and those hashes, dbx to the revoked release keys when
+   the image carries `dbx.auth`, then the KEK, then the PK, which ends setup
+   mode. Microsoft signs option ROMs, and db leaves Microsoft's CA out:
    without their hashes, the cards would have no driver. Whatever db and KEK
-   held before goes;
+   held before goes, and dbx too when the image has one;
 3. shows what it enrolled on the console, and reboots. The firmware now boots
    only what the CA's certificates signed, and those option ROMs.
 
@@ -769,7 +777,11 @@ It enrolls nothing, and says why on the console, when the TPM's event log is
 missing or a driver in it has no SHA-256 (the TPM's SHA-256 PCR bank is off),
 or when the firmware refuses a variable before the PK. On every later boot it
 reports in the journal (`journalctl -u cherry-secureboot`) whether Secure Boot
-is on, with Cherry's keys. When the keys are in but Secure Boot is off, which
+is on, with Cherry's keys, and on a machine with Cherry's keys whose dbx is
+not the image's `dbx.auth`, sets it: the firmware takes the update, signed by
+the KEK and later than what dbx holds, and from the next boot refuses what
+the revoked keys signed; one that refuses it is reported on the console, and
+the unit fails. When the keys are in but Secure Boot is off, which
 is the firmware setup's own switch, out of Cherry's reach, it says so on the
 console. Some firmware asks at the next boot to confirm new keys, and drops
 them if nobody does; Cherry then reports that instead of enrolling again.
@@ -782,22 +794,56 @@ Once a machine has Cherry's keys:
   doesn't know: clear the keys and boot Cherry again, to enroll anew.
 - systemd-stub ignores command-line overrides passed by the firmware.
 
+**The kernel is locked down,** in integrity mode, from early boot and however
+the machine booted (`/sys/kernel/security/lockdown`): Secure Boot keeps the
+firmware from starting anything but a signed release, and lockdown keeps what
+it started as it was built. The kernel loads no module the build did not
+sign: every module the image carries is signed at build time, with a key the
+kernel build makes and keeps in the build tree and whose certificate the
+kernel holds, and `insmod` of anything else fails with "Key was rejected by
+service". Locked down too: `/dev/mem`, kexec of unsigned images,
+hibernation, raw PCI, port and MSR access, debugfs, and unsafe module
+parameters. The smoke test checks that every module the image carries is
+signed, loads one, and has a copy of it without its signature refused.
+
 `python3 scripts/run_qemu.py --secure-boot` boots OVMF's Secure Boot build,
 whose variable store `output/cherry_x86_64/qemu/OVMF_VARS.secboot.fd` starts
 in setup mode and persists: the first run enrolls the keys and QEMU exits as
-the VM reboots; the next one then refuses a local build, which is unsigned.
-The smoke test's last scenario goes through it all, and boots the image signed
-by a CA of its own, which it adds to db, with Secure Boot on. Without keys in
-`board/x86_64/secureboot/`, the image enrolls nothing and the scenario is
-skipped. The image carries the keys from `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS`:
-to try a key hierarchy of your own, e.g. made by `scripts/secureboot.py` on a
-SoftHSM token (as `tests/ceremony.sh` does), point it there, run `make
-br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
+the VM reboots; the next one then refuses a local build, which is unsigned
+unless the build has a local chain (below). The smoke test's Secure Boot
+scenario goes through it all, and boots the image signed by a CA of its own,
+which it adds to db, with Secure Boot on, or as it is when the build signed
+it. Without keys in `board/x86_64/secureboot/`, the image enrolls nothing and
+the scenario is skipped.
 
-Not yet: Cherry applies no dbx updates, which would revoke a leaked release
-key (the KEK would sign them), and an older release, signed with the same
-keys, still boots and unlocks the disks a newer one sealed; and the kernel's
-lockdown and module signing are off.
+**A local chain** has local builds boot with Secure Boot on, on test machines
+and VMs that enrolled it, the way releases do on machines with Cherry's keys.
+The image carries the keys of `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS`, the
+repository's directory by default. Make a hierarchy of your own with
+`scripts/secureboot.py init` and `issue` on a SoftHSM token, as
+`tests/ceremony.sh` does (`apt install softhsm2 opensc sbsigntool`), into a
+directory of its own, with the release key beside its certificate:
+
+```sh
+softhsm2-util --init-token --free --label local --so-pin 12345678 --pin 123456
+module=/usr/lib/softhsm/libsofthsm2.so   # where the distribution puts it
+scripts/secureboot.py --dir ~/cherry-chain init --module $module --token local
+scripts/secureboot.py --dir ~/cherry-chain issue --module $module --token local --key-out ~/cherry-chain/release.key
+```
+
+Point `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS` at that directory (`make
+menuconfig`, leaving the defconfig as it is) and build: the image carries
+that chain's `.auth` files, and `post-image.sh` signs it with `release.key`
+(`sbsign`), as the release job signs a release with its key. A machine in
+setup mode enrolls the local chain and boots the signed local build with
+Secure Boot on, and `make test` boots it as it is. The repository's
+directory never holds a `release.key`: releases are signed in CI, from the
+`release` environment's secret, and CI's builds stay the ones for
+distribution.
+
+Not yet: an older release still boots, and unlocks the disks a newer one
+sealed, as long as its release key is not revoked, and revoking the key
+refuses every release it signed; dbx holds no hashes of single releases.
 
 ## Running containers
 
@@ -1187,12 +1233,15 @@ This is a development image:
   was when they were sealed (see [Disks](#disks)): nothing else that boots
   the machine (an HTTP boot server, a USB stick) can unlock them. Any
   release signed with that key does, older ones with their holes included,
-  as nothing revokes one; and `root` on the console then has the disks open.
+  until their release key is revoked, which takes every release it signed
+  (see [Secure Boot](#secure-boot)); and `root` on the console then has the
+  disks open.
   A build tree's images unlock only the disks they sealed themselves. The
   SSH host key is the TPM's, and sealed to nothing: it never leaves the TPM,
   but whatever boots the machine, and root or the `tss` group on it, can
   sign with it (see [SSH host key](#ssh-host-key)).
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
-  signed. With Secure Boot on, the kernel still loads unsigned modules: its
-  lockdown is off.
+  signed, unless the build has a local chain, which only machines that
+  enrolled that chain trust. The kernel is locked down, in integrity mode,
+  and loads only the modules the build signed, however the machine booted.

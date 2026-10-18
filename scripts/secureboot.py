@@ -19,16 +19,25 @@ half into a GitHub secret too. `pcr` makes it, outside the token: the CA has no
 part in it, as the signed UKI vouches for the key. A new one leaves every disk
 sealed under the old one locked: it is never replaced lightly.
 
+A release key that leaked is revoked: `revoke` adds its certificate to dbx.auth,
+the signed update that sets dbx to every revoked certificate, which the KEK on
+the token signs. The image applies it, in setup mode and on a machine with
+Cherry's keys whose dbx lacks it (package/cherry-secureboot), and the firmware
+then refuses what those keys signed. `issue` a new release key after it.
+
 Commands:
   init    generate the three keys on the token, and write their certificates
           (PK.crt, KEK.crt, db.crt) and their signed variable updates (PK.auth,
           self-signed; KEK.auth, signed by the PK; db.auth, signed by the KEK) to
           board/x86_64/secureboot/, which the image enrolls in setup mode
   issue   a new release signing key and its certificate, release.crt, from the CA
+  revoke  add release certificates (release.crt, the leaked key's) to dbx.auth,
+          signed by the KEK: the firmware refuses what their keys signed
   pcr     the PCR key: its public half, pcr.pem, to board/x86_64/secureboot/,
           and the private key for the secret
-  check   the files in board/x86_64/secureboot/ are what init, issue and pcr
-          write, their signatures verify, and the chain holds (make check)
+  check   the files in board/x86_64/secureboot/ are what init, issue, revoke
+          and pcr write, their signatures verify, the chain holds, and the
+          release key is not revoked (make check)
 
 The token is reached through OpenSC's pkcs11-tool and PKCS#11 module (or
 --module): it generates the keys and makes every signature with them, over
@@ -72,6 +81,12 @@ KEYS = {
     "KEK": ("cherry-kek", "Cherry Key Exchange Key", "KEK", EFI_GLOBAL_VARIABLE, "PK"),
     "db": ("cherry-db", "Cherry Secure Boot CA", "db", EFI_IMAGE_SECURITY_DATABASE, "KEK"),
 }
+# A variable with no key of its own: (variable, its GUID, the key that signs its update).
+UPDATES = {
+    "dbx": ("dbx", EFI_IMAGE_SECURITY_DATABASE, "KEK"),
+}
+REQUIRED_FILES = [f"{var}.{ext}" for var in KEYS for ext in ("crt", "auth")]  # what init writes
+OPTIONAL_FILES = ["release.crt", "dbx.auth"]  # what issue and revoke write
 ROOT_DAYS = 30 * 365 + 7  # firmware never checks validity dates
 RELEASE_DAYS = 5 * 365 + 1
 
@@ -362,10 +377,17 @@ class Token:
         self.tool("--write-object", path, "--type", "cert", "--label", label, "--id", key_id(label))
 
 
+def variable(var):
+    """(name, GUID, the key that signs its update) of a variable."""
+    if var in KEYS:
+        return KEYS[var][2:]
+    return UPDATES[var]
+
+
 def signed_update(token, var, data, signer_cert, signer, when):
     """The .auth file that sets `var` to `data`, signed by the token's key `signer` of the certificate
     signer_cert (DER)."""
-    _, _, name_, guid, _ = KEYS[var]
+    name_, guid, _ = variable(var)
     timestamp = efi_time(when)
     signature = token.sign(signer, to_be_signed(name_, guid, AUTH_ATTRS, timestamp, data))
     return auth2(timestamp, signed_data(signer_cert, signature), data)
@@ -383,7 +405,7 @@ def write(path, content, mode=0o644, new=False):
 
 
 def cmd_init(args):
-    files = [f"{var}.{ext}" for var in KEYS for ext in ("crt", "auth")]
+    files = REQUIRED_FILES
     existing = [f for f in files if os.path.exists(os.path.join(args.dir, f))]
     if existing:
         fail(f"{', '.join(existing)} exist already: init makes a new root of trust only once")
@@ -493,12 +515,59 @@ def cmd_issue(args):
          "release); commit release.crt.")
 
 
+def revoked_certificates(dbx_auth):
+    """The DER certificates dbx.auth revokes, in its order."""
+    with open(dbx_auth, "rb") as f:
+        return [cert for sig_type, _, cert in parse_esl(parse_auth2(f.read())[2]) if sig_type == EFI_CERT_X509]
+
+
+def cmd_revoke(args):
+    kek, ca = (os.path.join(args.dir, f"{var}.crt") for var in ("KEK", "db"))
+    for crt in (kek, ca):
+        if not os.path.exists(crt):
+            fail(f"no {crt}: run scripts/secureboot.py init first")
+    dbx = os.path.join(args.dir, "dbx.auth")
+    revoked = revoked_certificates(dbx) if os.path.exists(dbx) else []
+    new = []
+    for crt in args.certificate:
+        cert = pem_to_der(crt)
+        if subprocess.run(["openssl", "verify", "-CAfile", ca, "-purpose", "any", "-no_check_time", crt],
+                          capture_output=True).returncode != 0:
+            fail(f"{crt}: not a certificate db.crt issued. dbx revokes release keys, which the CA issued; the "
+                 "firmware refuses anything else already")
+        if cert in revoked or cert in new:
+            fail(f"{crt} is revoked already")
+        new.append(cert)
+    with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
+        token = Token(args, tmp)
+        label = KEYS["KEK"][0]
+        if label not in token.labels("privkey"):
+            fail(f"the token holds no {label}, the key of {kek}: is it the token init used? --token picks one, by "
+                 "its label as pkcs11-tool -L shows it")
+        # One EFI_SIGNATURE_LIST per certificate, as they differ in size; the ones revoked before stay, in their
+        # order, and the update's timestamp is later than theirs, as the firmware wants of a replacement.
+        data = b"".join(esl(EFI_CERT_X509, [cert]) for cert in revoked + new)
+        update = signed_update(token, "dbx", data, pem_to_der(kek), label, datetime.datetime.now(datetime.timezone.utc))
+        try:
+            verify_signature(tmp, "dbx", update, kek)
+        except ValueError:
+            fail(f"the token's {label} is not the key of {kek}: is it the token init used? --token picks one")
+    write(dbx + ".new", update)
+    os.replace(dbx + ".new", dbx)
+    check(args.dir, release_revoked=True)
+    release = os.path.join(args.dir, "release.crt")
+    now = (" release.crt is among them: issue a new release key (scripts/secureboot.py issue) before committing."
+           if os.path.exists(release) and pem_to_der(release) in revoked + new else "")
+    note(f"wrote dbx.auth to {args.dir}: {len(revoked + new)} revoked certificate(s), signed by the KEK.{now}\n"
+         "Commit it: the next release applies it to every machine it boots, in setup mode or with Cherry's keys.")
+
+
 # --- check -----------------------------------------------------------------------------------------------------
 
 def verify_signature(tmp, var, update, signer_crt):
     """The .auth's signature verifies, signed by signer_crt itself; return the data it sets."""
     timestamp, signed_data, data = parse_auth2(update)
-    _, _, name, guid, _ = KEYS[var]
+    name, guid, _ = variable(var)
     paths = {k: os.path.join(tmp, f"{var}.{k}") for k in ("p7", "tbs", "signer")}
     with open(paths["p7"], "wb") as f:
         f.write(wrap_content_info(signed_data))
@@ -536,14 +605,14 @@ def check_pcr(keys_dir):
     return True
 
 
-def check(keys_dir, require_release=False):
-    """Every file of init (and issue, and pcr) is there and right; return the number of files, 0 when there are
-    none."""
-    names = [f"{var}.{ext}" for var in KEYS for ext in ("crt", "auth")] + ["release.crt"]
+def check(keys_dir, require_release=False, release_revoked=False):
+    """Every file of init (and issue, revoke and pcr) is there and right; return the number of files, 0 when there
+    are none. A revoked release.crt fails, unless release_revoked allows it (revoke, before issue)."""
+    names = REQUIRED_FILES + OPTIONAL_FILES
     present = [n for n in names if os.path.exists(os.path.join(keys_dir, n))]
     if not present:
         return int(check_pcr(keys_dir))
-    missing = [n for n in names[:-1] if n not in present]
+    missing = [n for n in REQUIRED_FILES if n not in present]
     if require_release and "release.crt" not in present:
         missing.append("release.crt")
     if missing:
@@ -574,6 +643,24 @@ def check(keys_dir, require_release=False):
                 fail("release.crt: not issued by db.crt")
             if rsa_bits(path["release.crt"]) != 2048:
                 fail("release.crt: not an RSA-2048 key")
+        if "dbx.auth" in path:
+            with open(path["dbx.auth"], "rb") as f:
+                update = f.read()
+            try:
+                entries = parse_esl(verify_signature(tmp, "dbx", update, path["KEK.crt"]))
+            except ValueError as e:
+                fail(f"dbx.auth: {e}")
+            if not entries or any(entry[:2] != (EFI_CERT_X509, CHERRY_OWNER) for entry in entries):
+                fail("dbx.auth does not revoke certificates of Cherry's alone")
+            for i, (_, _, cert) in enumerate(entries):
+                crt = os.path.join(tmp, f"revoked-{i}.crt")
+                write(crt, pem(cert))
+                if subprocess.run(["openssl", "verify", "-CAfile", path["db.crt"], "-purpose", "any", "-no_check_time",
+                                   crt], capture_output=True).returncode != 0:
+                    fail(f"dbx.auth: revoked certificate {i + 1} was not issued by db.crt")
+            if ("release.crt" in path and not release_revoked
+                    and pem_to_der(path["release.crt"]) in [entry[2] for entry in entries]):
+                fail("release.crt is revoked by dbx.auth: issue a new release key (scripts/secureboot.py issue)")
     return len(present) + int(check_pcr(keys_dir))
 
 
@@ -584,28 +671,37 @@ def cmd_check(args):
         print(f"secureboot: no {'Secure Boot ' if pcr else ''}keys in {args.dir} yet (scripts/secureboot.py init){pcr}")
         return
     issued = " that issued release.crt" if os.path.exists(os.path.join(args.dir, "release.crt")) else ""
+    dbx = os.path.join(args.dir, "dbx.auth")
+    revoked = ""
+    if os.path.exists(dbx):
+        revoked = f"; dbx.auth revokes {len(revoked_certificates(dbx))} release certificate(s)"
     print(f"secureboot: {args.dir}: the .auth files set PK, KEK and db to their certificates, signed by the PK, "
-          f"the PK and the KEK; db.crt is a CA{issued}{pcr}")
+          f"the PK and the KEK; db.crt is a CA{issued}{revoked}{pcr}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dir", default=os.path.normpath(KEYS_DIR), help="the key files (default: %(default)s)")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name, days in (("init", ROOT_DAYS), ("issue", RELEASE_DAYS)):
+    for name, days in (("init", ROOT_DAYS), ("issue", RELEASE_DAYS), ("revoke", None)):
         p = sub.add_parser(name)
         p.add_argument("--module", help="the token's PKCS#11 module (default: OpenSC's)")
         p.add_argument("--token", help="the token's label (default: any token holding the keys)")
-        p.add_argument("--days", type=int, default=days, help="validity of the certificates (default: %(default)s)")
+        if days:
+            p.add_argument("--days", type=int, default=days, help="validity of the certificates (default: %(default)s)")
         if name == "issue":
             p.add_argument("--key-out", required=True, metavar="FILE",
                            help="where the release signing key goes, a new file or - for stdout")
+        if name == "revoke":
+            p.add_argument("certificate", nargs="+", metavar="CRT",
+                           help="a release certificate (PEM) the CA issued, whose key leaked")
     p = sub.add_parser("pcr")
     p.add_argument("--key-out", required=True, metavar="FILE",
                    help="where the PCR key's private half goes, a new file or - for stdout")
     sub.add_parser("check")
     args = parser.parse_args()
-    {"init": cmd_init, "issue": cmd_issue, "pcr": cmd_pcr, "check": cmd_check}[args.command](args)
+    commands = {"init": cmd_init, "issue": cmd_issue, "revoke": cmd_revoke, "pcr": cmd_pcr, "check": cmd_check}
+    commands[args.command](args)
 
 
 if __name__ == "__main__":

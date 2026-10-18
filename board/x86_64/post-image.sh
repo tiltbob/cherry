@@ -2,8 +2,9 @@
 # Buildroot post-image script: check the kernel configuration, then wrap the
 # kernel, the initramfs and the kernel command line into a single EFI binary
 # (UKI) for UEFI HTTP boot, with the signed PCR 11 policy that binds the
-# disks' keys to it. The initramfs holds the root filesystem as a compressed
-# EROFS image, which its /init mounts straight from the file.
+# disks' keys to it, and signed for Secure Boot when the build has a local
+# chain. The initramfs holds the root filesystem as a compressed EROFS image,
+# which its /init mounts straight from the file.
 set -eu
 
 BOARD_DIR=$(dirname "$(readlink -f "$0")")
@@ -32,8 +33,7 @@ EOF
 # systemd doesn't build (it needs the TPM library). A build tree signs with a
 # key of its own, pcr.key next to its images, made at the first build and kept
 # after: a rebuilt image still unlocks the disks a VM sealed to the last one,
-# until `make clean`, which takes the key with it. (The local chain of #10
-# will replace it.)
+# until `make clean`, which takes the key with it.
 key=$BASE_DIR/pcr.key
 public=$BASE_DIR/pcr.pem
 if [ ! -s "$key" ]; then
@@ -63,6 +63,32 @@ rm -f "$efi"
 uki --pcr-private-key="$key" --pcr-public-key="$public" --output="$efi"
 "$HOST_DIR/bin/python3" "$tree/scripts/pcrsign.py" check "$efi"
 echo "post-image: $(du -h "$efi" | cut -f1) $efi, its PCR policy signed with $key"
+
+# A local chain (README, Secure Boot): the image carries the Secure Boot keys
+# of BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS (package/cherry-secureboot), the
+# repository's by default. When that directory also holds release.key beside
+# release.crt, as scripts/secureboot.py issue --key-out writes it for a chain
+# of the developer's own, the image is signed with it, and a machine or VM
+# that enrolled that chain boots the local build with Secure Boot on. The
+# repository's directory never holds the key: releases are signed in CI, with
+# the release environment's secret (.github/workflows/build.yml).
+keys=$(sed -n 's/^BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS="\(.*\)"$/\1/p' "$BR2_CONFIG")
+# shellcheck disable=SC2016 # the literal make reference the default value holds
+case $keys in
+'$(BR2_EXTERNAL_CHERRY_PATH)'*) keys=$tree${keys#'$(BR2_EXTERNAL_CHERRY_PATH)'} ;;
+esac
+if [ -n "$keys" ] && [ -s "$keys/release.key" ]; then
+	for tool in sbsign sbverify; do
+		if ! command -v "$tool" >/dev/null; then
+			echo "post-image: $keys/release.key is there to sign the image with, but $tool is not installed (sbsigntool)" >&2
+			exit 1
+		fi
+	done
+	sbsign --key "$keys/release.key" --cert "$keys/release.crt" --output "$efi.signed" "$efi"
+	sbverify --cert "$keys/release.crt" "$efi.signed"
+	mv "$efi.signed" "$efi"
+	echo "post-image: $efi signed for Secure Boot with $keys/release.key, the local chain's"
+fi
 
 # The release image: the same, with the release PCR key
 # (board/x86_64/secureboot/pcr.pem, from scripts/secureboot.py pcr) as its
