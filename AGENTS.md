@@ -96,8 +96,10 @@ is, what runs it and what it needs. Read that before the code.
   committed public half of keys that live on a Nitrokey HSM 2 and in the
   `release` environment's secret. Never regenerate, edit or "fix" them, and
   write `dbx.auth` through `scripts/secureboot.py revoke` alone;
-  `scripts/secureboot.py check` verifies them. Local builds are unsigned, and
-  a machine with Cherry's keys and Secure Boot on refuses them.
+  `scripts/secureboot.py check` verifies them. Local builds are unsigned,
+  unless the build tree has a local chain of its own (README, Secure Boot),
+  and a machine with Cherry's keys and Secure Boot on refuses them either
+  way.
 - **Every download is pinned.** `BR2_DOWNLOAD_FORCE_CHECK_HASHES` is on:
   every `.hash` holds real hashes, each with a comment saying where it came
   from (upstream's checksum or signature, the npm registry's integrity field,
@@ -397,7 +399,7 @@ two defconfigs' toolchain options must stay the same.
 | The disks' keys sealed to the boot state | `scripts/pcrsign.py`, `board/x86_64/post-image.sh`, `package/cherry-pit/src/cherry-pit.c`, `package/cherry/cherry-storage`, `scripts/secureboot.py pcr`, the `release` job of `build.yml` | `tests/pcrsign.py`, `tests/storage.py`, `tests/ceremony.sh`, s2, s4, s15 | Disks, Secure Boot |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
-| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml`, `post-image.sh` (a local chain's signature) | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
 | Kernel lockdown, signed modules | `board/x86_64/linux.fragment`, `check-kconfig.sh` | s1 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
 | Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |

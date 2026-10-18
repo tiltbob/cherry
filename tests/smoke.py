@@ -72,7 +72,8 @@
      the image's keys and the option ROM driver the firmware loaded (QEMU's
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
      unsigned, but boots it with Secure Boot on once signed by a CA the test
-     adds to db (skipped when the image has no keys)
+     adds to db; an image the build signed with a chain of its own (README,
+     Secure Boot) boots as it is (skipped when the image has no keys)
   14. storage, through OpenCode's storage MCP server as the cherry user, with
      the pool cherry on the machine's disk: claim refuses a disk not as
      listed, then wipes a blank hard disk, one with a partition table and an
@@ -1348,8 +1349,12 @@ class Smoke:
         if rc != 0:
             log("skipped: the image has no Secure Boot keys (scripts/secureboot.py init writes them)")
             return SKIPPED
-        for tool in ("openssl", "sbsign"):
+        for tool in ("openssl", "sbsign", "sbverify"):
             check(shutil.which(tool), f"{tool} not found: apt install openssl sbsigntool")
+        image = os.path.join(self.images, run_qemu.EFI_NAME)
+        # A build with a local chain signs its image (board/x86_64/post-image.sh): it boots under the keys it
+        # enrolls as it is, where an unsigned one needs the test's CA in db.
+        signed = "signature 1" in subprocess.run(["sbverify", "--list", image], capture_output=True, text=True).stdout
         sets = {var: secureboot.parse_auth2(base64.b64decode(vm.run(f"base64 {keys}/{var}.auth")))[2]
                 for var in ("PK", "KEK", "db")}
 
@@ -1371,12 +1376,26 @@ class Smoke:
         check("CherrySecureBootEnrolled" in variables, "the enrollment is not marked")
         log(f"enrolled PK, KEK, and db: the CA and {drivers} option ROM driver(s)")
 
-        # Secure Boot is on: the image, unsigned, is refused.
-        vm.start(secure_boot=True)
-        vm.console.expect(r"Access Denied|Security Violation", 600, allow_boot=True)
-        vm.stop()
+        if signed:
+            log("the build signed the image with a chain of its own: it boots as it is")
+            self.boot(secure_boot=True)
+        else:
+            # Secure Boot is on: the image, unsigned, is refused.
+            vm.start(secure_boot=True)
+            vm.console.expect(r"Access Denied|Security Violation", 600, allow_boot=True)
+            vm.stop()
+            self.boot_signed_by_test_ca()
+        flags = vm.run("cd /sys/firmware/efi/efivars && for v in SecureBoot SetupMode; do "
+                       "printf '%s=%s ' $v $(od -An -tu1 -j4 -N1 $v-8be4df61-93ca-11d2-aa0d-00e098032b8c); done")
+        check(flags.split() == ["SecureBoot=1", "SetupMode=0"], f"not booted with Secure Boot on: {flags}")
+        report = vm.run("journalctl -b -u cherry-secureboot --no-pager -o cat")
+        check("Secure Boot is on, with Cherry's keys." in report, f"cherry-secureboot reported:\n{report}")
+        rc, _ = vm.run("ls /sys/firmware/efi/efivars/CherrySecureBootEnrolled-*", check_rc=False)
+        check(rc != 0, "the enrollment mark was not cleared")
+        check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
 
-        # Signed by a CA added to db, it boots, with Secure Boot on.
+    def boot_signed_by_test_ca(self):
+        """Boot the image signed by a CA of the test's, added to db, with Secure Boot on."""
         tmp = os.path.join(self.workdir, "secureboot")
         os.makedirs(os.path.join(tmp, "images"))
         for cmd in (["req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{tmp}/ca.key",
@@ -1395,14 +1414,6 @@ class Smoke:
             self.boot(secure_boot=True, server=server)
         finally:
             server.shutdown()
-        flags = vm.run("cd /sys/firmware/efi/efivars && for v in SecureBoot SetupMode; do "
-                       "printf '%s=%s ' $v $(od -An -tu1 -j4 -N1 $v-8be4df61-93ca-11d2-aa0d-00e098032b8c); done")
-        check(flags.split() == ["SecureBoot=1", "SetupMode=0"], f"not booted with Secure Boot on: {flags}")
-        report = vm.run("journalctl -b -u cherry-secureboot --no-pager -o cat")
-        check("Secure Boot is on, with Cherry's keys." in report, f"cherry-secureboot reported:\n{report}")
-        rc, _ = vm.run("ls /sys/firmware/efi/efivars/CherrySecureBootEnrolled-*", check_rc=False)
-        check(rc != 0, "the enrollment mark was not cleared")
-        check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
 
     def storage(self, tool, arguments, timeout=300, error=False):
         """A tool of the storage MCP server; for those that change a pool, the pool as it is after, too."""

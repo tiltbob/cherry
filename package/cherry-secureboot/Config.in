@@ -22,5 +22,8 @@ config BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS
 	  scripts/secureboot.py init writes them, and of dbx.auth, the
 	  revoked release keys, when revoke wrote one. Without them,
 	  the image enrolls nothing and the service doesn't start.
+	  With release.key beside release.crt in it, a local chain's
+	  (scripts/secureboot.py issue --key-out), post-image.sh signs
+	  the image with it, for machines that enrolled that chain.
 
 endif

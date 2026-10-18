@@ -809,14 +809,37 @@ without its signature refused.
 `python3 scripts/run_qemu.py --secure-boot` boots OVMF's Secure Boot build,
 whose variable store `output/cherry_x86_64/qemu/OVMF_VARS.secboot.fd` starts
 in setup mode and persists: the first run enrolls the keys and QEMU exits as
-the VM reboots; the next one then refuses a local build, which is unsigned.
-The smoke test's last scenario goes through it all, and boots the image signed
-by a CA of its own, which it adds to db, with Secure Boot on. Without keys in
-`board/x86_64/secureboot/`, the image enrolls nothing and the scenario is
-skipped. The image carries the keys from `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS`:
-to try a key hierarchy of your own, e.g. made by `scripts/secureboot.py` on a
-SoftHSM token (as `tests/ceremony.sh` does), point it there, run `make
-br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
+the VM reboots; the next one then refuses a local build, which is unsigned
+unless the build has a local chain (below). The smoke test's Secure Boot
+scenario goes through it all, and boots the image signed by a CA of its own,
+which it adds to db, with Secure Boot on, or as it is when the build signed
+it. Without keys in `board/x86_64/secureboot/`, the image enrolls nothing and
+the scenario is skipped.
+
+**A local chain** has local builds boot with Secure Boot on, on test machines
+and VMs that enrolled it, the way releases do on machines with Cherry's keys.
+The image carries the keys of `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS`, the
+repository's directory by default. Make a hierarchy of your own with
+`scripts/secureboot.py init` and `issue` on a SoftHSM token, as
+`tests/ceremony.sh` does (`apt install softhsm2 opensc sbsigntool`), into a
+directory of its own, with the release key beside its certificate:
+
+```sh
+softhsm2-util --init-token --free --label local --so-pin 12345678 --pin 123456
+module=/usr/lib/softhsm/libsofthsm2.so   # where the distribution puts it
+scripts/secureboot.py --dir ~/cherry-chain init --module $module --token local
+scripts/secureboot.py --dir ~/cherry-chain issue --module $module --token local --key-out ~/cherry-chain/release.key
+```
+
+Point `BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS` at that directory (`make
+menuconfig`, leaving the defconfig as it is) and build: the image carries
+that chain's `.auth` files, and `post-image.sh` signs it with `release.key`
+(`sbsign`), as the release job signs a release with its key. A machine in
+setup mode enrolls the local chain and boots the signed local build with
+Secure Boot on, and `make test` boots it as it is. The repository's
+directory never holds a `release.key`: releases are signed in CI, from the
+`release` environment's secret, and CI's builds stay the ones for
+distribution.
 
 Not yet: an older release still boots, and unlocks the disks a newer one
 sealed, as long as its release key is not revoked, and revoking the key
@@ -1219,5 +1242,6 @@ This is a development image:
   sign with it (see [SSH host key](#ssh-host-key)).
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
-  signed. The kernel is locked down, in integrity mode, and loads only the
-  modules the build signed, however the machine booted.
+  signed, unless the build has a local chain, which only machines that
+  enrolled that chain trust. The kernel is locked down, in integrity mode,
+  and loads only the modules the build signed, however the machine booted.
