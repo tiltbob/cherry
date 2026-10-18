@@ -14,9 +14,9 @@ reads it through `CLAUDE.md`, which only imports it.
    the manual: the checks under `tests/` test "what the README says", and a
    change in behavior is incomplete until the README says the new behavior.
 2. **The roadmap,** issue [#4](https://github.com/tiltbob/cherry/issues/4),
-   and its phase issues: [#6](https://github.com/tiltbob/cherry/issues/6)
-   disks, [#7](https://github.com/tiltbob/cherry/issues/7) containers,
-   [#10](https://github.com/tiltbob/cherry/issues/10) hardening. They record
+   and its open phase issues: [#7](https://github.com/tiltbob/cherry/issues/7)
+   containers and [#10](https://github.com/tiltbob/cherry/issues/10)
+   hardening. They record
    the principles (one image for every machine; the TPM is the identity; no
    central config or enrollment; images never leave the node that built them;
    every trusted key is baked in at build time; systemd's own mechanisms over
