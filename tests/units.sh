@@ -38,6 +38,7 @@ done
 # Cherry's units, to verify: a template as an instance.
 set --
 for unit in "$units"/*.service "$units"/*.socket "$units"/*.target; do
+	[ -e "$unit" ] || continue  # a kind none of the units is: the pattern itself
 	case $unit in
 	*@.service) cp "$unit" "${unit%@.service}@box.service"; set -- "$@" "${unit%@.service}@box.service" ;;
 	*) set -- "$@" "$unit" ;;
@@ -49,14 +50,13 @@ for target in basic getty getty-pre multi-user network network-pre shutdown swap
 	printf '[Unit]\nDescription=%s (stub)\n' "$target" >"$units/$target.target"
 done
 # Executables of other packages that ExecStart= lines name.
-for exe in bin/sh sbin/mkswap sbin/swapon usr/bin/mkdir usr/bin/pacman-key usr/libexec/exocarp usr/sbin/nft usr/sbin/sshd; do
+for exe in bin/sh sbin/mkswap sbin/swapon usr/bin/mkdir usr/bin/pacman-key usr/sbin/nft; do
 	install -D -m 0755 /dev/null "$root/$exe"
 done
-# The units that the drop-ins extend (exocarp's sshd.service.d, the overlay's
-# var.mount.d), verified for the drop-ins' sake.
-printf '[Unit]\nDescription=sshd (stub)\n\n[Service]\nExecStart=/usr/sbin/sshd -D\n' >"$units/sshd.service"
+# The unit that the overlay's var.mount.d drop-in extends, verified for the
+# drop-in's sake.
 printf '[Unit]\nDescription=var (stub)\n\n[Mount]\nWhat=tmpfs\nWhere=/var\nType=tmpfs\n' >"$units/var.mount"
-set -- "$@" "$units/sshd.service" "$units/var.mount"
+set -- "$@" "$units/var.mount"
 
 if ! out=$(systemd-analyze verify --man=no --root="$root" "$@" 2>&1) || [ -n "$out" ]; then
 	printf '%s\n' "$out" >&2

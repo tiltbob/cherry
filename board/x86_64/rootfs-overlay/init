@@ -14,6 +14,13 @@
 # /run/cherry/identity/ keeps ek.der and ek-hash for later units. Without a
 # usable TPM 2.0 it keeps the reason in `error` instead, and systemd starts
 # cherry-no-tpm.target, which shows the error on the console and nothing else.
+#
+# The prod image (README, Building) has root locked out of the console: its
+# UKI's command line says cherry.prod, and root's password field becomes "*"
+# in /etc/passwd and /etc/shadow, in copies bound over the read-only originals.
+# busybox's login refuses such an account before it looks at anything else,
+# with the agetty.autologin credential as without it. The dev image's command
+# line lacks the word, and its root logs in without a password.
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -34,6 +41,21 @@ mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
 
 id_dir=/run/cherry/identity
 mkdir -p "$id_dir"
+
+# The command line is the UKI's, which the firmware cannot change
+# (systemd-stub) and PCR 11 measures: prod is a property of the signed image.
+case " $(cat /proc/cmdline) " in
+*" cherry.prod "*)
+	(
+		umask 077
+		sed 's/^root:[^:]*:/root:*:/' /etc/shadow >/run/cherry/shadow
+		sed 's/^root:[^:]*:/root:*:/' /etc/passwd >/run/cherry/passwd
+	)
+	chmod 0644 /run/cherry/passwd
+	mount --bind /run/cherry/shadow /etc/shadow
+	mount --bind /run/cherry/passwd /etc/passwd
+	;;
+esac
 
 log() {
 	echo "<$1>cherry-init: $2" >/dev/kmsg

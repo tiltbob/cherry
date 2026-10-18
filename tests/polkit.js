@@ -48,10 +48,10 @@ for (const machine of ["machine", "name"]) {
   const m = (details) => Object.assign({ [machine]: "box" }, details);
   for (const verb of ["terminate", "kill"]) yes.push(["cherry", MANAGE_MACHINES, m({ verb })]);
   // Not copy or bind, which machined does as root on any host path: machinectl copy-to, a host file into the
-  // container to read there; copy-from, a container's file onto the host, e.g. root's authorized_keys; bind, a
-  // host directory into the container.
-  for (const [verb, src, dest] of [["copy", "/var/lib/sshd/etc/ssh/ssh_host_ed25519_key", "/key"],
-                                   ["copy", "/keys", "/var/roothome/.ssh/authorized_keys"],
+  // container to read there; copy-from, a container's file onto the host, e.g. root's .profile; bind, a host
+  // directory into the container.
+  for (const [verb, src, dest] of [["copy", "/var/lib/cherry/.config/openchamber", "/stolen"],
+                                   ["copy", "/profile", "/var/roothome/.profile"],
                                    ["bind", "/var/roothome", "/mnt"]]) {
     notHandled.push(["cherry", MANAGE_MACHINES, m({ verb, src, dest })]);
   }
@@ -88,7 +88,7 @@ for (const unit of [BOOTSTRAP, IMAGE, STORAGE]) {
   for (const verb of ["stop", "restart", "kill"]) notHandled.push(["cherry", MANAGE_UNITS, { unit, verb }]);
 }
 // No other unit, however it is named.
-for (const unit of ["sshd.service", "cherry.service", "cherry-connect-url.service", "systemd-nspawn.service",
+for (const unit of ["systemd-networkd.service", "cherry.service", "cherry-connect-url.service", "systemd-nspawn.service",
                     "xsystemd-nspawn@box.service", "systemd-nspawnd@box.service", "cherry-bootstrap.service",
                     "cherry-image.service", "xcherry-image@build:box.service",
                     // The boot unit that mounts the volumes, which a stop would unmount.

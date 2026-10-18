@@ -27,9 +27,7 @@ EOT
 sed -i '/^127\.0\.1\.1[[:space:]]/d' "$TARGET_DIR/etc/hosts"
 
 # The root filesystem is read-only: root's home lives on /var (the pool
-# cherry's volume var, on its disks or in RAM), so e.g. systemd's
-# ssh.authorized_keys.root credential can
-# be applied.
+# cherry's volume var, on its disks or in RAM), so that it is writable.
 # The target must exist at build time for makedevs; Buildroot's VAR_FACTORY
 # turns it into a factory default copied into /var at boot.
 mkdir -p "$TARGET_DIR/var/roothome"

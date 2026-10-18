@@ -6,16 +6,14 @@
      cherry, the machine's own, which is in RAM (a zram device of 132 MiB,
      var 128 MiB, btrfs) as the pool has no disks yet, and the machine's blank
      disk is left alone; the machine ID comes from the TPM's endorsement key
-     (a swtpm on CRB), and the hostname from the machine ID; networking and
-     sshd work, with the host key in the TPM, exocarp's, which a client from
-     the host verifies in a key exchange, an SSH key passed as a credential is
-     installed, no unit failed; the kernel is locked down in integrity mode
+     (a swtpm on CRB), and the hostname from the machine ID; networking works,
+     no unit failed; the kernel is locked down in integrity mode
      and loads only the modules the build signed: every module the image
      carries is, one of them loads, and a copy of it without its signature is
      refused; the firewall was
      loaded before networkd started, lets IPv6 router advertisements in, and
-     keeps sshd from answering outside the VM until a rule lets it in, which
-     restarting the firewall takes back out
+     keeps a service listening on the host from answering outside the VM until
+     a rule lets it in, which restarting the firewall takes back out
   2. through OpenCode's storage MCP server, as the cherry user, the agent
      claims the blank disk, now a LUKS2 volume whose key the TPM seals to the
      boot state (PCR 7, and PCR 11 under the image's PCR key, as the header's
@@ -28,15 +26,14 @@
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
      differently (as pacstrap's pacman hooks do); through the firewall, the
      container leases its address from networkd, pings the host and reaches
-     out of the VM, but sshd on the host does not answer it
+     out of the VM, but a service listening on the host does not answer it
   4. after a poweroff, which unmounts /var cleanly, a second boot (the same
      TPM, now on TIS) unlocks the disk, whose key stays sealed as it was,
      mounts var and finds the files, with
-     the same machine ID, hostname and SSH host key; machinectl clone on it
-     makes a snapshot of an image, as environments are; another TPM cannot
-     unlock the disk, so that machine's /var is in RAM, its host key is
-     another, nothing claims the disk, and it stays as it was; back on its own
-     TPM, everything is there
+     the same machine ID and hostname; machinectl clone on it makes a snapshot
+     of an image, as environments are; another TPM cannot unlock the disk, so
+     that machine's /var is in RAM, nothing claims the disk, and it stays as
+     it was; back on its own TPM, everything is there
   5. the cherry user creates a Debian container with cherry-bootstrap@.service
      (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
@@ -67,8 +64,7 @@
   11. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   12. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd or host key agent, no OpenChamber, no
-     containers
+     console: no network, no OpenChamber, no containers
   13. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
      the image's keys and the option ROM driver the firmware loaded (QEMU's
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
@@ -93,6 +89,11 @@
      changed, which PCR 11 shows, nor under the image signed anew with
      another PCR key: the pool is not seen, /var is in RAM, and the disk is
      left as it was; under the image itself it does, and the files are there
+  16. the prod image, cherry-x86_64-prod.efi, the same build with cherry.prod
+     on its command line: it boots to the pairing link on the console, and the
+     console refuses root, which has no password that would do, without
+     asking for one, with the agetty.autologin credential as without it, where
+     the dev image, which every other scenario drives through it, logs root in
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -137,12 +138,10 @@ IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectS
                      "-p 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "
                      "-p SystemCallFilter=@system-service -p 'SystemCallFilter=~@privileged' "
                      "-p SystemCallErrorNumber=EPERM")
-TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
-# The host key's public key, which exocarp.socket writes at boot: the TPM's primary key for this template of
-# tpm2_createprimary (package/exocarp/src/exocarp.c).
-HOST_KEY_FILE = "/run/exocarp/ssh_host_ecdsa_key.pub"
-HOST_KEY_TEMPLATE = ("-C e -G ecc256:ecdsa-sha256 -g sha256 "
-                     "-a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign|noda'")
+# The probe (Smoke.start_probe): a service of the host's listening on this port, which the firewall keeps from
+# answering outside the VM and the containers; QEMU forwards a host port to it.
+PROBE_PORT = 2222
+PROBE = "smoke-probe"
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
            + (4096).to_bytes(4, "little") + bytes(48) + b"\x55\xaa")
@@ -348,17 +347,19 @@ class VM:
         self.proc = None
         self.tpm = None
         self.console = None
-        self.ssh_port = None
+        self.probe_port = None
         self.n = 0
 
-    def start(self, tpm_interface="crb", secure_boot=False, server=None, tpm="tpm", disks=(), ssds=()):
-        """Boot with a TPM on tpm_interface, or None for no TPM, from server (default: the images'), with the given
-        disk images (virtio-blk, hard disks to the guest) and SSD images (NVMe). The TPM's state is <workdir>/<tpm>:
-        the VM's own TPM, one for the whole test, unless another one is named. With secure_boot, on OVMF's Secure
-        Boot build, whose variable store lasts from one start to the next (in setup mode at first), and QEMU exits
-        when the guest reboots."""
+    def start(self, tpm_interface="crb", secure_boot=False, server=None, tpm="tpm", disks=(), ssds=(),
+              name=run_qemu.EFI_NAME, credentials=None):
+        """Boot the image `name` with a TPM on tpm_interface, or None for no TPM, from server (default: the
+        images'), with the given disk images (virtio-blk, hard disks to the guest) and SSD images (NVMe), and the
+        systemd credentials given, or the autologin one, which the scenarios get their root shell through. The TPM's
+        state is <workdir>/<tpm>: the VM's own TPM, one for the whole test, unless another one is named. With
+        secure_boot, on OVMF's Secure Boot build, whose variable store lasts from one start to the next (in setup
+        mode at first), and QEMU exits when the guest reboots."""
         self.stop()
-        url = run_qemu.boot_url(server or self.server)
+        url = run_qemu.boot_url(server or self.server, name)
         if secure_boot:
             vars_path = os.path.join(self.workdir, run_qemu.SECBOOT_VARS)
             if os.path.exists(vars_path):
@@ -370,11 +371,12 @@ class VM:
             run_qemu.write_vars(vars_path, url)
         if tpm_interface:
             self.tpm = run_qemu.Swtpm(os.path.join(self.workdir, tpm))
-        self.ssh_port = free_port()
-        cmd = run_qemu.qemu_command(vars_path, serial="stdio", ssh_port=self.ssh_port,
-                                    credentials=["agetty.autologin=root", f"ssh.authorized_keys.root={TEST_KEY}"],
-                                    tpm=self.tpm, tpm_interface=tpm_interface, secure_boot=secure_boot,
-                                    disks=disks, ssds=ssds)
+        if credentials is None:
+            credentials = ["agetty.autologin=root"]
+        self.probe_port = free_port()
+        cmd = run_qemu.qemu_command(vars_path, serial="stdio", forward=(self.probe_port, PROBE_PORT),
+                                    credentials=credentials, tpm=self.tpm, tpm_interface=tpm_interface,
+                                    secure_boot=secure_boot, disks=disks, ssds=ssds)
         log("starting QEMU: " + " ".join(cmd))
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.console = Console(self.proc, os.path.join(self.workdir, "serial.log"))
@@ -448,14 +450,22 @@ class VM:
     def fstype(self, mountpoint):
         return self.run(f"awk '$5 == \"{mountpoint}\" {{ t = $0 }} END {{ print t }}' /proc/self/mountinfo")
 
-    def ssh_answers(self):
-        """Whether sshd's banner comes back from outside the VM, through QEMU's port forward. QEMU accepts the
-        connection at once and only then connects to the guest: a dropped SYN shows as silence."""
-        with socket.create_connection(("127.0.0.1", self.ssh_port), timeout=5 * MULT) as s:
-            try:
-                return s.recv(4) == b"SSH-"
-            except TimeoutError:
-                return False
+    def probe_answers(self):
+        """Whether the probe (Smoke.start_probe) echoes a line from outside the VM, through QEMU's port forward.
+        QEMU accepts the connection at once and only then connects to the guest: a dropped SYN shows as silence, a
+        refused connection as a reset."""
+        try:
+            with socket.create_connection(("127.0.0.1", self.probe_port), timeout=5 * MULT) as s:
+                s.sendall(b"cherry\n")
+                got = b""
+                while len(got) < 7:
+                    chunk = s.recv(7 - len(got))
+                    if not chunk:
+                        break
+                    got += chunk
+                return got == b"cherry\n"
+        except OSError:
+            return False
 
 
 class Smoke:
@@ -474,16 +484,16 @@ class Smoke:
         run_qemu.make_disk(self.var_disk, 6 << 30)
 
     def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None, tpm="tpm", disks=(), ssds=(),
-             expect="running"):
+             expect="running", name=run_qemu.EFI_NAME):
         vm = self.vm
         run_qemu.ImageHandler.requests.clear()
         start = time.monotonic()
-        vm.start(tpm_interface, secure_boot=secure_boot, server=server, tpm=tpm, disks=disks, ssds=ssds)
+        vm.start(tpm_interface, secure_boot=secure_boot, server=server, tpm=tpm, disks=disks, ssds=ssds, name=name)
         if banner:
             vm.console.expect(re.escape(banner), 600, allow_boot=True)
         vm.wait_shell()
         took = time.monotonic() - start
-        check(f"/{run_qemu.EFI_NAME}" in run_qemu.ImageHandler.requests,
+        check(f"/{name}" in run_qemu.ImageHandler.requests,
               f"the firmware did not download the EFI binary over HTTP: {run_qemu.ImageHandler.requests}")
         log(f"HTTP booted to a shell in {took:.0f}s")
         state = vm.settle()
@@ -499,10 +509,21 @@ class Smoke:
                             check_rc=False)
         check(rc == 1, "systemd-networkd could not write its state files:\n" + "\n".join(errors.splitlines()[-5:]))
 
+    def start_probe(self):
+        """A service of the host's, answering on every address of the host and port PROBE_PORT, as a daemon would:
+        systemd-socket-activate accepts each connection and runs cat on it, inetd-style, which echoes a line back.
+        What the firewall keeps from answering outside the VM, and the containers."""
+        self.vm.run(f"systemd-run -q --unit={PROBE} --collect systemd-socket-activate --accept --inetd "
+                    f"-l {PROBE_PORT} /bin/cat && for i in $(seq 50); do "
+                    f"grep -qi ':{PROBE_PORT:04X} ' /proc/net/tcp /proc/net/tcp6 && exit 0; sleep 0.1; done; exit 1")
+
+    def stop_probe(self):
+        self.vm.run(f"systemctl stop {PROBE}.service")
+
     def check_firewall(self):
         """The firewall was loaded before systemd-networkd started, lets the router advertisements of QEMU's network
-        in (they give the host an IPv6 address), and keeps sshd from answering outside the VM until a rule lets it
-        in; restarting the firewall takes that rule back out."""
+        in (they give the host an IPv6 address), and keeps the probe, a service of the host's, from answering
+        outside the VM until a rule lets it in; restarting the firewall takes that rule back out."""
         vm = self.vm
         check(vm.run("systemctl is-active cherry-firewall.service") == "active", "the firewall is not loaded")
         loaded, started = (int(vm.run(f"systemctl show -p {p} --value {unit}")) for p, unit in
@@ -511,13 +532,13 @@ class Smoke:
         check(loaded <= started, "systemd-networkd started before the firewall was loaded")
         vm.run("for i in $(seq 60); do ip -6 addr show | grep -q 'inet6 fec0:' && exit 0; sleep 1; done; "
                "ip -6 addr show; exit 1", timeout=90)
-        check(not vm.ssh_answers(), "sshd answers outside the VM, through the firewall")
-        vm.run("nft add rule inet cherry input tcp dport 22 accept")
-        check(vm.ssh_answers(), "sshd does not answer outside the VM once a rule lets it in")
-        seen = self.host_key_over_ssh()
-        check(seen == self.host_key.split()[:2], f"a client got the host key {seen}, not the TPM's")
+        self.start_probe()
+        check(not vm.probe_answers(), "the probe answers outside the VM, through the firewall")
+        vm.run(f"nft add rule inet cherry input tcp dport {PROBE_PORT} accept")
+        check(vm.probe_answers(), "the probe does not answer outside the VM once a rule lets it in")
         vm.run("systemctl restart cherry-firewall.service")
-        check(not vm.ssh_answers(), "restarting the firewall did not take the rule for sshd back out")
+        check(not vm.probe_answers(), "restarting the firewall did not take the rule for the probe back out")
+        self.stop_probe()
 
     def check_identity(self, interface):
         """The machine ID comes from the endorsement key of the TPM on the given interface; return it."""
@@ -544,48 +565,6 @@ class Smoke:
         check(rc != 0, f"an identity error was recorded: {error}")
         log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
-
-    def check_host_key(self):
-        """sshd's host key is the TPM's, held by exocarp (package/exocarp): the public key exocarp.socket wrote is
-        the TPM's primary key for exocarp's template, which creating it again shows; the agent lists it and sshd
-        runs with it; no host key is on disk. Returns the public key's line."""
-        vm = self.vm
-        rc, states = vm.run("systemctl is-active exocarp.socket exocarp.service sshd.service", check_rc=False)
-        check(states.split() == ["active"] * 3, f"exocarp.socket, exocarp.service, sshd.service are:\n{states}")
-        key = vm.run(f"cat {HOST_KEY_FILE}")
-        check(key.startswith("ecdsa-sha2-nistp256 ") and key.endswith(" exocarp"), f"not exocarp's public key: {key}")
-        check(vm.run(f"stat -c %U:%a {HOST_KEY_FILE} /run/exocarp/socket") == "exocarp:600\nroot:600",
-              "the public key is not the exocarp user's alone, or the socket not root's alone")
-        shown = vm.run(f"tpm2_createprimary -T device:/dev/tpmrm0 -Q {HOST_KEY_TEMPLATE} -c /tmp/hk.ctx -f pem "
-                       "-o /tmp/hk.pem && ssh-keygen -i -m PKCS8 -f /tmp/hk.pem; rc=$?; rm -f /tmp/hk.ctx /tmp/hk.pem; "
-                       "exit $rc")
-        check(shown.split()[:2] == key.split()[:2], f"the host key is not the TPM's primary key:\n{key}\n{shown}")
-        listed = vm.run("SSH_AUTH_SOCK=/run/exocarp/socket ssh-add -L")
-        check(listed == key, f"the agent lists another key:\n{listed}")
-        check(vm.run("ls -d /etc/ssh/ssh_host_* /var/lib/sshd 2>/dev/null; true") == "", "host keys on disk")
-        # Nothing about the key from sshd, which first tries the HostKey file as a private key (tests/exocarp.py).
-        rc, complaints = vm.run("journalctl -b -u sshd --no-pager -o cat | grep -iE 'host key|unprotected|too open'",
-                                check_rc=False)
-        check(rc == 1, f"sshd complained about the host key:\n{complaints}")
-        log(f"host key: {key}")
-        return key
-
-    def host_key_over_ssh(self):
-        """[type, key] of the host key a client on the host gets from sshd, through QEMU's port forward, once the
-        firewall lets SSH in: with the key exchange done, so sshd's agent signed with it, the client gets as far as
-        authentication, where it has no key for root."""
-        known_hosts = os.path.join(self.workdir, "known_hosts")
-        if os.path.exists(known_hosts):
-            os.remove(known_hosts)
-        check(shutil.which("ssh"), "ssh not found: apt install openssh-client")
-        cmd = ["ssh", "-p", str(self.vm.ssh_port), "-F", "/dev/null", "-o", f"UserKnownHostsFile={known_hosts}",
-               "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
-               "-o", "IdentitiesOnly=yes", "-o", f"ConnectTimeout={30 * MULT:.0f}", "root@127.0.0.1", "true"]
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120 * MULT)
-        check(p.returncode == 255 and "Permission denied" in p.stdout,
-              f"ssh did not get as far as authentication (exit {p.returncode}):\n{p.stdout}")
-        with open(known_hosts) as f:
-            return f.read().split()[1:3]
 
     def check_pcr11(self, uki, phase):
         """PCR 11 holds what the image's policy expects once this boot phase is done: the stub's measurement of the UKI
@@ -708,9 +687,6 @@ class Smoke:
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
         self.check_lockdown()
-        self.host_key = self.check_host_key()
-        check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
-              "the ssh.authorized_keys.root credential was not applied")
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
                "networkctl; exit 1", timeout=90)
         self.check_firewall()
@@ -813,16 +789,16 @@ class Smoke:
         vm.run("nft list table ip io.systemd.nat")
         self.check_networkd_state()
         # Through the firewall, the container leases an address from networkd's DHCP server, pings the host, and
-        # reaches out of the VM, masqueraded, to the HTTP server that served the image; but sshd on the host
-        # answers it neither on its link, over IPv4 or IPv6, nor on the host's own address, though it answers the
-        # host itself. Commands run with the host's tools in the container's network namespace.
+        # reaches out of the VM, masqueraded, to the HTTP server that served the image; but the probe, a service
+        # of the host's, answers it neither on its link, over IPv4 or IPv6, nor on the host's own address, though
+        # it answers the host itself. Commands run with the host's tools in the container's network namespace.
         inside = ("systemd-run -q --wait --pipe --collect "
                   "-p NetworkNamespacePath=/proc/$(machinectl show smoke -p Leader --value)/ns/net")
 
-        def sshd_answers(address, prefix=""):
-            rc, out = vm.run(f"{prefix} timeout {5 * MULT:g} bash -c 'exec 3<>/dev/tcp/{address}/22 && head -c 4 <&3'",
-                             timeout=60, check_rc=False)
-            return rc == 0 and out == "SSH-"
+        def probe_answers(address, prefix=""):
+            rc, out = vm.run(f"{prefix} timeout {5 * MULT:g} bash -c 'exec 3<>/dev/tcp/{address}/{PROBE_PORT} "
+                             "&& echo cherry >&3 && head -c 7 <&3'", timeout=60, check_rc=False)
+            return rc == 0 and out == "cherry"
 
         out = vm.run(f"{inside} udhcpc -i host0 -f -q -n -t 10 -T 2 -s /bin/true", timeout=120)
         lease = re.search(r"lease of (\S+) obtained", out)
@@ -834,10 +810,13 @@ class Smoke:
         address = vm.run("ip -4 -o addr show | sed -n 's/.* inet \\(10\\.0\\.2\\.[0-9]*\\)\\/.*/\\1/p'")
         local = vm.run("ip -6 -o addr show dev ve-smoke scope link | sed -n 's/.* inet6 \\(fe80::[^/]*\\)\\/.*/\\1/p'")
         check(local, "the container's link has no IPv6 link-local address on the host")
+        self.start_probe()
         for target in (address, "::1"):
-            check(sshd_answers(target), f"sshd does not answer the host itself on {target}")
+            check(probe_answers(target), f"the probe does not answer the host itself on {target}")
         for target in (gateway, address, f"{local}%host0"):
-            check(not sshd_answers(target, inside), f"sshd answers the container on {target}, through the firewall")
+            check(not probe_answers(target, inside),
+                  f"the probe answers the container on {target}, through the firewall")
+        self.stop_probe()
         vm.run("machinectl terminate smoke; for i in $(seq 30); do machinectl show smoke >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
 
@@ -861,7 +840,6 @@ class Smoke:
               "files on /var did not survive the reboot")
         check(vm.run("systemctl is-active cherry-storage.service") == "active", "cherry-storage.service is not active")
         check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
-        check(self.check_host_key() == self.host_key, "the SSH host key changed across a reboot")
 
         # On btrfs, machinectl clone is a snapshot: an environment shares its image's blocks until it changes them. The
         # trees cherry-bootstrap and cherry-image make there are subvolumes for it (tests/bootstrap.sh); this one is by
@@ -885,7 +863,6 @@ class Smoke:
         self.boot(tpm="tpm-other", disks=[self.var_disk])
         vm.run(f"{journal} | grep -q 'the TPM cannot unlock /dev/vda1'")
         self.check_var_in_ram()
-        check(self.check_host_key() != self.host_key, "another TPM gave the same SSH host key")
         found = {d["name"]: d for d in json.loads(self.storage("list", {})[0])["disks"]}
         check(found["vda"]["state"] == "locked", f"the disk is not locked on another machine: {found['vda']}")
         vm.send("systemctl poweroff\n")
@@ -895,7 +872,6 @@ class Smoke:
         self.boot(disks=[self.var_disk])
         self.check_var_on_pool("vda1")
         check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the other machine")
-        check(self.check_host_key() == self.host_key, "the SSH host key changed")
 
     def s5_debootstrap(self):
         vm = self.vm
@@ -1339,8 +1315,8 @@ class Smoke:
         rc, _ = vm.run("test -e /run/cherry/identity/ek-hash", check_rc=False)
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
-        rc, states = vm.run("systemctl is-active multi-user.target sshd.service exocarp.socket "
-                            "systemd-networkd.service cherry.service machines.target", check_rc=False)
+        rc, states = vm.run("systemctl is-active multi-user.target systemd-networkd.service cherry.service "
+                            "machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
@@ -1640,6 +1616,48 @@ class Smoke:
         self.check_var_on_pool("vda1")
         check(vm.run("cat /var/cherry-smoke") == "boot-state", "a file on /var did not survive")
         vm.stop()
+
+    def s16_prod(self):
+        """The prod image: the dev image's build with cherry.prod on its command line, which /init turns into root
+        locked out (board/x86_64/rootfs-overlay/init). Nothing logs in, so this scenario watches the console: the
+        pairing link shows, and the login prompt refuses root without asking for a password, as does the
+        agetty.autologin credential, which the other scenarios get their shell through."""
+        vm = self.vm
+        prod = os.path.join(self.images, run_qemu.PROD_NAME)
+        check(os.path.exists(prod), f"no {run_qemu.PROD_NAME} in {self.images}")
+        for name, expected in ((run_qemu.PROD_NAME, True), (run_qemu.EFI_NAME, False)):
+            cmdline = pcrsign.read_uki(os.path.join(self.images, name))[1][".cmdline"].rstrip(b"\0").decode()
+            check((" cherry.prod" in f" {cmdline} ") == expected,
+                  f"{name}'s command line {'lacks' if expected else 'has'} cherry.prod: {cmdline}")
+
+        # Without credentials: the pairing link, and a login prompt that refuses root at once.
+        run_qemu.ImageHandler.requests.clear()
+        vm.start(name=run_qemu.PROD_NAME, credentials=[])
+        vm.console.expect(r"openchamber://connect\?v=2&p=", 900, allow_boot=True)
+        check(f"/{run_qemu.PROD_NAME}" in run_qemu.ImageHandler.requests,
+              f"the firmware did not download the prod image: {run_qemu.ImageHandler.requests}")
+        try:
+            # The prompt may have come before the link, which agetty does not print again.
+            vm.console.expect(r"login: $", 60)
+        except Timeout:
+            pass
+        vm.send("root\n")
+        m, _ = vm.console.expect(r"Login incorrect|Password: ?$", 60)
+        check(m[0] == "Login incorrect", f"the prod image's console asked root for a password: {m[0]!r}")
+
+        # With the autologin credential: refused all the same, and no shell answers.
+        vm.start(name=run_qemu.PROD_NAME)
+        vm.console.expect(r"login: root \(automatic login\)", 900, allow_boot=True)
+        m, _ = vm.console.expect(r"Login incorrect|Password: ?$", 60)
+        check(m[0] == "Login incorrect", f"the prod image's console asked autologin's root for a password: {m[0]!r}")
+        vm.send("echo @@SH\"\"ELL@@\n")
+        try:
+            vm.console.expect(r"@@SHELL@@$", 15)
+        except Timeout:
+            pass
+        else:
+            check(False, "a shell answered on the prod image's console")
+        log("the prod image refused root on the console, with the autologin credential and without")
 
     def run(self):
         names = scenario_names(type(self))

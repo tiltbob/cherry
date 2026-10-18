@@ -7,8 +7,8 @@
 # their own, io.systemd.nat, for the containers' masquerading (IPMasquerade=)
 # and port forwards (--port=). Loading this file replaces this table at once.
 #
-# To let something in until the next boot, add a rule, e.g. for SSH:
-#   nft add rule inet cherry input tcp dport 22 accept
+# To let something in until the next boot, add a rule, e.g. for a port:
+#   nft add rule inet cherry input tcp dport 8080 accept
 # `systemctl restart cherry-firewall` puts the image's rules back.
 
 table inet cherry
