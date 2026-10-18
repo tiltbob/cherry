@@ -372,8 +372,11 @@ the pool disks. It does that through its storage tools, with the user's yes
 to the disks that get erased (`create_pool` named `cherry`, see
 [Storage](#storage)): the disks are claimed, the pool is extended with them,
 and `var` moves onto them live, a `pvmove` of its 128 MiB, with nothing
-stopped or restarted; the zram device then goes. `var` is then grown
-(`resize_volume`), and `/var` with it. From then on, `/var` persists.
+stopped or restarted; the zram device then goes (LVM is told to mix its
+4 KiB logical blocks with the disks' 512-byte ones: `var` moves from the
+larger to the smaller, and its btrfs writes 4 KiB sectors either way). `var`
+is then grown (`resize_volume`), and `/var` with it. From then on, `/var`
+persists.
 
 `cherry-storage.service` (`cherry-storage boot start`, see
 [`cherry-storage`](package/cherry/cherry-storage)) does it before systemd
