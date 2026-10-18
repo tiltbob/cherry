@@ -581,7 +581,7 @@ def cmd_check(args):
     n = check(args.dir)
     pcr = "; pcr.pem is the PCR key" if os.path.exists(os.path.join(args.dir, "pcr.pem")) else ""
     if n == 0 or (n == 1 and pcr):
-        print(f"secureboot: no Secure Boot keys in {args.dir} yet (scripts/secureboot.py init){pcr}")
+        print(f"secureboot: no {'Secure Boot ' if pcr else ''}keys in {args.dir} yet (scripts/secureboot.py init){pcr}")
         return
     issued = " that issued release.crt" if os.path.exists(os.path.join(args.dir, "release.crt")) else ""
     print(f"secureboot: {args.dir}: the .auth files set PK, KEK and db to their certificates, signed by the PK, "
