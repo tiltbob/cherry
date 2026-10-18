@@ -1,23 +1,24 @@
 [Unit]
-# The storage pools of the disks the cherry user claimed (cherry-storage@):
-# at boot, the TPM unlocks each claimed disk, each pool is activated and each
-# of its volumes checked and mounted on /var/lib/cherry/volumes/<pool>/<volume>;
-# at shutdown, the other way round.
-Description=Cherry Storage Pools
+# The storage pools of the disks the cherry user claimed (cherry-storage@),
+# once /var is there, mounted from the pool cherry by cherry-var.service: at
+# boot, every pool is activated and each of its volumes checked and mounted on
+# /var/lib/cherry/volumes/<pool>/<volume>; at shutdown, the volumes are
+# unmounted and every pool but cherry, which holds /var, deactivated.
+Description=Cherry Storage Volumes
 Documentation=https://github.com/tiltbob/cherry#storage
 # Only with a usable TPM (see /init), which holds the disks' keys.
 ConditionPathExists=/run/cherry/identity/ek-hash
-# The disks as udev set them up at boot (sysinit.target), the TPM, and /var,
-# where the volumes are mounted. Before the agent, which uses them: at
-# shutdown, it is gone before they are unmounted.
-After=tpm2.target systemd-tpm2-setup-early.service cherry-var.service
+# After /var, where the volumes are mounted, and the pool it came from; before
+# the agent, which uses them: at shutdown, it is gone before they are
+# unmounted.
+After=cherry-var.service var.mount
 Before=cherry.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/libexec/cherry-storage boot start
-ExecStop=-/usr/libexec/cherry-storage boot stop
+ExecStart=/usr/libexec/cherry-storage boot volumes start
+ExecStop=-/usr/libexec/cherry-storage boot volumes stop
 # Checking the volumes' filesystems can take a while after a crash.
 TimeoutStartSec=30min
 

@@ -15,12 +15,12 @@ change it, `manage-storage`.
 | `list` | the disks: kind (ssd, hdd), state, fingerprint; the pools and their volumes |
 | `claim` | **erases** disks and makes them Cherry's, ready for a pool |
 | `release` | **erases** claimed disks that are in no pool, and leaves them blank |
-| `create_pool` | a pool of claimed disks: data disks, and SSDs as its cache |
+| `create_pool` | a pool of claimed disks: data disks, and SSDs as its cache; named `cherry`, the machine's pool gets its disks, and `/var` moves onto them |
 | `add_disks` | more data disks for a pool |
 | `set_cache` | a pool's cache disks and cache mode |
 | `remove_disk` | a disk out of a pool, its data moved off first |
 | `destroy_pool` | a pool that has no volumes |
-| `create_volume` / `resize_volume` / `remove_volume` | volumes, mounted for you |
+| `create_volume` / `resize_volume` / `remove_volume` | volumes, mounted for you; `resize_volume` of `cherry`/`var` grows `/var` |
 
 ## How it fits together
 
@@ -31,8 +31,7 @@ change it, `manage-storage`.
   - `locked`: claimed by another machine, or by this one before its TPM was
     cleared. Its data is unreadable here, and `claim` may take it, erasing it
     for good.
-  - `in-use`: mounted, swap, held by something else, or this machine's
-    `/var` disk. Not to be claimed.
+  - `in-use`: mounted, swap, or held by something else. Not to be claimed.
   - `unsuitable`: removable, read-only, on USB, or under 1 GiB.
 
   `kind` is what the kernel reports: an SSD behind a RAID controller, or a
@@ -54,6 +53,15 @@ change it, `manage-storage`.
   that you own, mounted on `/var/lib/cherry/volumes/<pool>/<volume>` now and
   at every boot. Work in it as in any directory of yours. Volumes grow but
   do not shrink.
+- **The pool `cherry`** is the machine's own, there from boot, and its volume
+  `var` is `/var`, btrfs: containers, images, environments and your home.
+  Until the pool has disks, it is in RAM (`list` shows the pool with `ram`
+  and `var` with `ram: true`), 128 MiB, where no container fits and nothing
+  lasts past a reboot. `create_pool` with the name `cherry` gives it its
+  disks, and `/var` moves onto them at once, live, with nothing stopped or
+  restarted; then `resize_volume` grows `var`. `cherry` is never destroyed,
+  `var` never removed, and the pool's last data disk never taken out; nothing
+  else is done to the pool while it is in RAM.
 
 Storage here is always LVM: these tools make nothing else.
 
@@ -71,15 +79,11 @@ Storage here is always LVM: these tools make nothing else.
 
 ## Good to know
 
-- **/var:** containers, their images and your home, `/var/lib/cherry`, live
-  on `/var`: this machine's encrypted disk if it has one (`list` shows `var`
-  on `/dev/mapper/cherry-var`, and that disk in use), otherwise in RAM
-  (`tmpfs`), where nothing lasts past a reboot. A pool never holds `/var`. A
-  machine without a `/var` disk takes its first blank disk at boot: to give it
-  one, leave a disk out of the claim (or `release` one, which leaves it
-  blank), and have the machine rebooted.
-- **Volumes last** across reboots even when `/var` is in RAM: they are on the
-  pool's disks, mounted again at boot.
+- **/var** is `cherry`/`var`: on the pool's disks once it has them, where it
+  persists, otherwise in RAM, 128 MiB, gone at reboot, as `list` shows. Make
+  it persistent before anything else: `configure-storage`.
+- **Volumes last** across reboots: they are on the pool's disks, mounted again
+  at boot.
 - **Containers** cannot use volumes yet: there is no way to bind one into a
   container. Volumes are for your own files: projects, data, caches.
 - **No TPM, no claims:** the TPM holds the claimed disks' keys.

@@ -40,7 +40,6 @@ on:
       - 'tests/secureboot.sh'
       - 'tests/syntax.sh'
       - 'tests/units.sh'
-      - 'tests/var.sh'
       - 'tests/version.sh'
       - '.shellcheckrc'
   pull_request:

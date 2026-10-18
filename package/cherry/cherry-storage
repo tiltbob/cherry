@@ -8,7 +8,9 @@
 #   claim:<disk>:<fingerprint>    wipe a disk and make it Cherry's
 #   release:<disk>:<fingerprint>  wipe a claimed disk that is in no pool
 #   create:<pool>:<disk>...       a pool of claimed disks
-#   extend:<pool>:<disk>...       more claimed disks for a pool's data
+#   extend:<pool>:<disk>...       more claimed disks for a pool's data; for the
+#                                 pool cherry while it is in RAM, this moves
+#                                 /var onto them
 #   cache:<pool>:<mode>:<disk>... the pool's SSD cache: these claimed disks
 #                                 (none: no cache), writethrough or writeback
 #   reduce:<pool>:<disk>          a disk out of a pool, its data moved off
@@ -18,35 +20,47 @@
 #   volume-resize:<pool>:<volume>:<size>
 #   volume-remove:<pool>:<volume>
 #
-# cherry-storage.service runs `cherry-storage boot start` at boot and `boot
-# stop` at shutdown: it unlocks the claimed disks, activates the pools and
-# mounts their volumes, and the other way round.
+# The pool cherry is the machine's own, and its volume var is /var. At boot,
+# before var.mount, cherry-var.service runs `cherry-storage boot var start`:
+# it unlocks the claimed disks and, if the pool cherry is among them, activates
+# it and mounts var on /var; otherwise it makes the pool in RAM, on a zram
+# device of 132 MiB (zstd), with var of 128 MiB, btrfs, the least a btrfs can
+# be, so that OpenChamber and the agent run until the agent gives the pool
+# disks: extend then moves var onto them (pvmove, 128 MiB) and the zram device
+# goes. Nothing claims a disk at boot. Then cherry-storage.service runs `boot
+# volumes start`: the other pools activated, every volume checked and mounted
+# under /var/lib/cherry/volumes. At shutdown, `boot volumes stop` unmounts the
+# volumes and deactivates those pools, and once var.mount has unmounted /var,
+# `boot var stop` deactivates the pool cherry and closes every disk.
 #
 # A claimed disk holds one GPT partition labelled cherry-pv (systemd-repart,
 # with /usr/lib/cherry/storage/repart.d): a LUKS2 volume whose key the TPM
-# seals, as /var's, unlocked as /dev/mapper/cherry-pv-<its partition>, holding
-# an LVM physical volume. LVM sees no other device
+# seals, unlocked as /dev/mapper/cherry-pv-<its partition>, holding an LVM
+# physical volume. LVM sees no other device but the zram one
 # (/etc/lvm/lvm.conf). A pool is a volume group of claimed disks: data disks,
 # tagged data, and cache disks, tagged cache, the pool tagged writeback if its
-# cache is. A volume is a linear logical volume on the pool's data disks,
-# holding ext4 whose root the cherry user owns, mounted on
-# /var/lib/cherry/volumes/<pool>/<volume>; on a pool with cache disks, it is
-# cached on them (dm-cache, a cache pool), in proportion to its share of the
-# data disks. Sizes are a number and M, G or T (MiB, GiB, TiB), or all: the
-# pool's free space.
+# cache is; the pool cherry's zram device is tagged ram while it has it. A
+# volume is a linear logical volume on the pool's data disks, holding ext4
+# whose root the cherry user owns, mounted on
+# /var/lib/cherry/volumes/<pool>/<volume> (var: btrfs, on /var); on a pool with
+# cache disks, it is cached on them (dm-cache, a cache pool), in proportion to
+# its share of the data disks. Sizes are a number and M, G or T (MiB, GiB,
+# TiB), or all: the pool's free space. The pool cherry is never destroyed, var
+# never removed, and the pool's last data disk never taken out; nothing but
+# extend is done to the pool while it is in RAM.
 #
 # A disk is claimed only if it is listed with that fingerprint, so as it was
 # listed: the same disk with the same partition table. Never a disk in use
-# (mounted, swap, held by device mapper or md, this machine's /var), nor a
-# removable, read-only, USB or smaller than 1 GiB one.
+# (mounted, swap, held by device mapper or md), nor a removable, read-only,
+# USB or smaller than 1 GiB one.
 #
 # The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
-# read. One operation at a time: another one fails at once. $CHERRY_SYSFS,
-# $CHERRY_UDEV, $CHERRY_MOUNTINFO, $CHERRY_SWAPS, $CHERRY_IDENTITY,
-# $CHERRY_VOLUMES, $CHERRY_STORAGE_USER and $CHERRY_STORAGE_LOCK replace /sys,
-# /run/udev/data, /proc/self/mountinfo, /proc/swaps, /run/cherry/identity,
-# /var/lib/cherry/volumes, cherry and /run/cherry-storage.lock
-# (tests/storage.py).
+# read; the boot verbs' to the journal. One operation at a time: another one
+# fails at once. $CHERRY_SYSFS, $CHERRY_UDEV, $CHERRY_MOUNTINFO, $CHERRY_SWAPS,
+# $CHERRY_IDENTITY, $CHERRY_VOLUMES, $CHERRY_STORAGE_USER and
+# $CHERRY_STORAGE_LOCK replace /sys, /run/udev/data, /proc/self/mountinfo,
+# /proc/swaps, /run/cherry/identity, /var/lib/cherry/volumes, cherry and
+# /run/cherry-storage.lock (tests/storage.py).
 set -eu
 
 block=${CHERRY_SYSFS:-/sys}/class/block
@@ -58,6 +72,17 @@ volumes=${CHERRY_VOLUMES:-/var/lib/cherry/volumes}
 user=${CHERRY_STORAGE_USER:-cherry}
 lock=${CHERRY_STORAGE_LOCK:-/run/cherry-storage.lock}
 definitions=/usr/lib/cherry/storage/repart.d
+# The machine's own pool, and its volume that is /var.
+system_pool=cherry
+var_volume=var
+var_dev=/dev/mapper/$system_pool-$var_volume
+var_mount=/var
+# The pool in RAM: a zram device of 132 MiB, of which LVM takes the first MiB
+# for its metadata and the rest is 32 extents of 4 MiB, var's 128 MiB, the
+# least a btrfs can be (mkfs.btrfs wants 109 MiB).
+zram_control=${CHERRY_SYSFS:-/sys}/class/zram-control
+ram_var_size=128M
+ram_zram_bytes=138412032
 # 1 GiB, in the 512-byte sectors of /sys/class/block/*/size.
 min_sectors=2097152
 # The smallest cache worth making for a volume, and the most its metadata
@@ -127,7 +152,7 @@ unlocked() {
 #   locked      a cherry-pv volume this machine's TPM does not unlock (another
 #               machine's disk, or this one's before its TPM was cleared):
 #               claim may wipe it
-#   in-use      mounted, swap, held, or this machine's /var
+#   in-use      mounted, swap, or held
 #   unsuitable  removable, read-only, on USB or too small
 classify() {
 	dir=$block/$1 state='' reason='' part=''
@@ -148,15 +173,8 @@ classify() {
 		state=unsuitable reason="smaller than 1 GiB"
 		return
 	fi
-	parts=$(partitions "$1")
-	for p in $parts; do
-		if [ "$(partname "$p")" = cherry-var ]; then
-			state=in-use reason="this machine's /var disk (/dev/$p, cherry-var)"
-			return
-		fi
-	done
-	# shellcheck disable=SC2086 # kernel names, one word each
-	set -- "$1" $parts
+	# shellcheck disable=SC2046 # kernel names, one word each
+	set -- "$1" $(partitions "$1")
 	if [ $# -eq 2 ] && [ "$(partname "$2")" = cherry-pv ]; then
 		part=$2
 		if unlocked "$part"; then
@@ -278,8 +296,21 @@ pool_pvs() {
 	pv_table | tagged "$1" "$2" | cut -d '|' -f 1
 }
 
+# The pool cherry is in RAM while a zram device, tagged ram, is its data.
+pool_in_ram() {
+	[ -n "$(pool_pvs "$1" ram)" ]
+}
+
+ram_device() {
+	pool_pvs "$system_pool" ram
+}
+
 pools() {
 	lvm vgs --noheadings -o vg_name | sed 's/^[[:space:]]*//'
+}
+
+missing_pvs() {
+	lvm vgs --noheadings -o vg_missing_pv_count "$1" | sed 's/^[[:space:]]*//'
 }
 
 extent_size() {
@@ -304,9 +335,22 @@ volume_names() {
 	volume_table "$1" | cut -d '|' -f 1
 }
 
+# The pool's volumes that are mounted under $volumes: all but /var's.
+user_volume_names() {
+	if [ "$1" = "$system_pool" ]; then
+		volume_names "$1" | awk -v skip="$var_volume" '$0 != skip'
+	else
+		volume_names "$1"
+	fi
+}
+
+is_var() {
+	[ "$1" = "$system_pool" ] && [ "$2" = "$var_volume" ]
+}
+
 # Pool and volume names: a valid volume group or logical volume name, and a
-# directory name, without the '_' of LVM's own names. A pool named cherry
-# could have a volume named var, /dev/mapper/cherry-var.
+# directory name, without the '_' of LVM's own names. The pool cherry's volume
+# var is /dev/mapper/cherry-var, /var's.
 check_name() {
 	case $2 in
 	'' | [!A-Za-z0-9]* | *[!A-Za-z0-9-]*)
@@ -315,8 +359,12 @@ check_name() {
 	if [ ${#2} -gt 32 ]; then
 		fail "bad $1 name '$2': longer than 32 characters"
 	fi
-	if [ "$1" = pool ] && [ "$2" = cherry ]; then
-		fail "bad pool name 'cherry': it is Cherry's own"
+}
+
+# Nothing but extend is done to the pool cherry while it is in RAM.
+check_on_disks() {
+	if [ "$1" = "$system_pool" ] && pool_in_ram "$1"; then
+		fail "the pool $1 is in RAM: give it disks first (extend), which moves /var onto them"
 	fi
 }
 
@@ -446,7 +494,14 @@ list() {
 	if [ -e "$identity/ek-hash" ]; then
 		tpm=true
 	fi
-	var=$(awk '$5 == "/var" { for (i = 7; $i != "-"; i++); print $(i + 1) "|" $(i + 2) }' "$mountinfo" | tail -n 1)
+	var=$(awk -v mp="$var_mount" '$5 == mp { for (i = 7; $i != "-"; i++); print $(i + 1) "|" $(i + 2) }' "$mountinfo" |
+		tail -n 1)
+	# In RAM: the pool cherry on its zram device, or the tmpfs var.mount falls
+	# back on.
+	ram=false
+	if [ "${var%%|*}" = tmpfs ] || { pools | grep -qxF "$system_pool" && pool_in_ram "$system_pool"; }; then
+		ram=true
+	fi
 	pvs=$(lvm pvs --reportformat json --units b --nosuffix -o pv_name,vg_name,pv_size,pv_free,pv_tags) || pvs=null
 	vgs=$(lvm vgs --reportformat json --units b --nosuffix \
 		-o vg_name,vg_size,vg_free,vg_tags,vg_extent_size,pv_count,lv_count,vg_missing_pv_count) || vgs=null
@@ -456,7 +511,7 @@ list() {
 	{
 		printf '{\n"tpm": %s,\n"var": ' "$tpm"
 		if [ -n "$var" ]; then
-			printf '{"fstype": %s, "source": %s}' "$(json "${var%%|*}")" "$(json "${var#*|}")"
+			printf '{"fstype": %s, "source": %s, "ram": %s}' "$(json "${var%%|*}")" "$(json "${var#*|}")" "$ram"
 		else
 			printf null
 		fi
@@ -488,7 +543,8 @@ list() {
 		done
 		printf '\n],\n"pvs": %s,\n"vgs": %s,\n"lvs": %s,\n"mounts": [' "$pvs" "$vgs" "$lvs"
 		sep=
-		awk -v dir="$volumes/" 'index($5, dir) == 1 { print $5 }' "$mountinfo" | while read -r mp; do
+		awk -v dir="$volumes/" -v var="$var_mount" 'index($5, dir) == 1 || $5 == var { print $5 }' "$mountinfo" |
+			while read -r mp; do
 			usage=$(df -B 1 --output=size,used,avail "$mp" | tail -n 1)
 			# shellcheck disable=SC2086 # three numbers
 			set -- $usage
@@ -603,6 +659,9 @@ create() {
 	pool=$1
 	shift
 	check_name pool "$pool"
+	if [ "$pool" = "$system_pool" ]; then
+		fail "the pool $system_pool is the machine's own, there from boot: extend it"
+	fi
 	if pools | grep -qxF "$pool"; then
 		fail "the pool $pool exists already"
 	fi
@@ -623,7 +682,38 @@ extend() {
 	lvm vgextend "$pool" $pvs
 	# shellcheck disable=SC2086
 	lvm pvchange --addtag data $pvs
+	if [ "$pool" = "$system_pool" ] && pool_in_ram "$pool"; then
+		# shellcheck disable=SC2086
+		persist_var $pvs
+	fi
 	echo "extended the pool $pool"
+}
+
+# persist_var <pv>...: /var, in RAM so far, moves onto these data disks of the
+# pool cherry (pvmove of var's 128 MiB), and the zram device leaves the pool
+# and goes. Should the move fail, the disks leave the pool again, claimed and
+# in no pool, and /var stays in RAM, as it was.
+persist_var() {
+	ram=$(ram_device)
+	echo "moving /var from RAM onto the pool's disks"
+	if ! lvm pvmove "$ram" "$@"; then
+		lvm pvmove --abort "$ram" >/dev/null 2>&1 || true
+		lvm vgreduce "$system_pool" "$@" || true
+		fail "cannot move /var onto the disks: the pool $system_pool is as it was, in RAM"
+	fi
+	lvm vgreduce "$system_pool" "$ram"
+	lvm pvremove -y "$ram"
+	zram_remove "$ram"
+	echo "/var is on the pool's disks now, and persists; its volume $var_volume is $ram_var_size: grow it (volume-resize)"
+}
+
+# zram_remove /dev/zram<n>: its memory given back, and the device gone, once
+# udev's probe of it is done with it.
+zram_remove() {
+	n=${1#/dev/zram}
+	udevadm settle --timeout=60 || true
+	echo 1 >"$block/zram$n/reset" || echo "cannot reset $1"
+	echo "$n" >"$zram_control/hot_remove" || echo "cannot remove $1"
 }
 
 # set_cache <pool> <mode> <pv>...: the pool's cache disks are now these, in
@@ -660,6 +750,7 @@ cache() {
 	pool=$1 mode=$2
 	shift 2
 	check_pool "$pool"
+	check_on_disks "$pool"
 	case $mode in
 	writethrough | writeback) ;;
 	*) fail "bad cache mode '$mode': writethrough or writeback" ;;
@@ -696,6 +787,9 @@ reduce() {
 	fi
 	others=$(pool_pvs "$pool" data | grep -vxF "$pv" || true)
 	if [ -z "$others" ]; then
+		if [ "$pool" = "$system_pool" ]; then
+			fail "/dev/$2 is the last data disk of the pool $pool, which holds /var: it stays"
+		fi
 		fail "/dev/$2 is the last data disk of the pool $pool: destroy the pool instead"
 	fi
 	pvt=$(pv_table)
@@ -723,6 +817,9 @@ reduce() {
 
 destroy() {
 	check_pool "$1"
+	if [ "$1" = "$system_pool" ]; then
+		fail "the pool $system_pool holds /var: it is never destroyed"
+	fi
 	names=$(volume_names "$1" | tr '\n' ' ')
 	if [ -n "$names" ]; then
 		fail "the pool $1 still has volumes: ${names% }: remove them first"
@@ -736,6 +833,10 @@ volume_create() {
 	check_pool "$1"
 	check_name volume "$2"
 	check_size "$3"
+	check_on_disks "$1"
+	if is_var "$1" "$2"; then
+		fail "$1/$2 is /var: it is there already"
+	fi
 	if volume_names "$1" | grep -qxF "$2"; then
 		fail "the pool $1 has a volume $2 already"
 	fi
@@ -759,9 +860,19 @@ volume_create() {
 	cache_volume "$pool" "$name"
 }
 
+# grow_filesystem <pool> <volume>: its filesystem, to the volume's size, mounted.
+grow_filesystem() {
+	if is_var "$1" "$2"; then
+		btrfs filesystem resize max "$var_mount"
+	else
+		resize2fs "/dev/$1/$2"
+	fi
+}
+
 volume_resize() {
 	check_volume "$1" "$2"
 	check_size "$3"
+	check_on_disks "$1"
 	pool=$1 name=$2
 	before=$(volume_table "$pool" | awk -F '|' -v name="$name" '$1 == name { print $2 }')
 	if [ "$3" = all ]; then
@@ -780,7 +891,7 @@ volume_resize() {
 		cache_volume "$pool" "$name"
 		fail "cannot grow $pool/$name: volumes only grow, as far as the pool's data disks have room"
 	fi
-	if ! resize2fs "/dev/$pool/$name"; then
+	if ! grow_filesystem "$pool" "$name"; then
 		cache_volume "$pool" "$name"
 		fail "cannot grow the filesystem of $pool/$name"
 	fi
@@ -791,17 +902,19 @@ volume_resize() {
 
 volume_remove() {
 	check_volume "$1" "$2"
+	if is_var "$1" "$2"; then
+		fail "$1/$2 is /var: it is never removed"
+	fi
 	unmount_volume "$1" "$2"
 	lvm lvremove -y "$1/$2"
 	rmdir "$volumes/$1" 2>/dev/null || true
 	echo "removed the volume $1/$2"
 }
 
-# At boot: every claimed disk unlocked, every pool activated, every volume
-# checked and mounted. What fails is reported, and the rest goes on.
-boot_start() {
-	rc=0
-	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
+# --- Boot --------------------------------------------------------------------
+
+# Every claimed disk unlocked; what the TPM cannot unlock is reported.
+unlock_disks() {
 	for disk in $(disks); do
 		for p in $(partitions "$disk"); do
 			if [ "$(partname "$p")" = cherry-pv ] && ! unlocked "$p"; then
@@ -810,6 +923,107 @@ boot_start() {
 			fi
 		done
 	done
+}
+
+detach_disks() {
+	for name in "$block"/dm-*/dm/name; do
+		if [ -e "$name" ]; then
+			case $(cat "$name") in
+			cherry-pv-*) systemd-cryptsetup detach "$(cat "$name")" || true ;;
+			esac
+		fi
+	done
+}
+
+var_fail() {
+	fail "$1: /var is a tmpfs"
+}
+
+# The pool cherry on its disks: activated, and var mounted on /var.
+activate_var() {
+	# What is whole activates with a disk missing too (lvm.conf's
+	# activation_mode, degraded).
+	lvm vgchange -ay "$system_pool" || true
+	if [ "$(missing_pvs "$system_pool")" -gt 0 ]; then
+		# A missing disk that no volume uses goes: the zram device, after a
+		# crash between the move of var off it and its removal. One a volume
+		# uses stays, as does the disk it is on, and /var is a tmpfs.
+		if ! lvm vgreduce --removemissing "$system_pool"; then
+			lvm vgchange -an "$system_pool" || true
+			var_fail "the pool $system_pool is missing a disk that its volumes use (vgreduce --removemissing --force gives them up)"
+		fi
+	fi
+	if [ "$(volume_table "$system_pool" | awk -F '|' -v name="$var_volume" '$1 == name { print $4 }')" != active ]; then
+		lvm vgchange -an "$system_pool" || true
+		var_fail "the pool $system_pool has no active volume $var_volume"
+	fi
+	# As var.mount mounts the tmpfs: nodev, but not nosuid, which would break
+	# setuid binaries in containers.
+	if ! mount -t btrfs -o nodev "$var_dev" "$var_mount"; then
+		lvm vgchange -an "$system_pool" || true
+		var_fail "cannot mount $var_dev on $var_mount"
+	fi
+	echo "$var_mount is $system_pool/$var_volume (btrfs) on the pool's disks, unlocked with the TPM"
+}
+
+# The pool cherry in RAM: a zram device as its one physical volume, var of
+# 128 MiB on it, btrfs, mounted on /var. Nothing persists until extend gives
+# the pool disks. Whatever fails here is undone, and /var is a tmpfs.
+make_ram_var() {
+	n=$(cat "$zram_control/hot_add") || var_fail "no zram device for the pool $system_pool in RAM"
+	dev=/dev/zram$n
+	# zstd, as the swap's; without it, the kernel's default.
+	echo zstd >"$block/zram$n/comp_algorithm" || echo "$dev: no zstd: compressing with its default"
+	# Its node, once udev has made it. Mounted with discard, so that the
+	# memory of what is deleted comes back; nodev as var.mount's tmpfs, and
+	# not nosuid, which would break setuid binaries in containers.
+	if ! echo "$ram_zram_bytes" >"$block/zram$n/disksize" ||
+		! { udevadm settle --timeout=60 || true; } ||
+		! lvm pvcreate -y "$dev" ||
+		! lvm vgcreate --setautoactivation n "$system_pool" "$dev" ||
+		! lvm pvchange --addtag ram "$dev" ||
+		! lvm lvcreate -y -n "$var_volume" -L "$ram_var_size" "$system_pool" ||
+		! mkfs.btrfs -q "$var_dev" ||
+		! mount -t btrfs -o nodev,discard=async "$var_dev" "$var_mount"; then
+		lvm vgremove -y -f "$system_pool" >/dev/null 2>&1 || true
+		lvm pvremove -y "$dev" >/dev/null 2>&1 || true
+		zram_remove "$dev"
+		var_fail "cannot make the pool $system_pool in RAM on $dev"
+	fi
+	echo "$var_mount is $system_pool/$var_volume (btrfs), $ram_var_size in RAM on $dev: nothing persists until the pool has disks"
+}
+
+# Before var.mount: /var from the pool cherry, on its disks or made in RAM.
+boot_var_start() {
+	if is_mounted "$var_mount"; then
+		echo "$var_mount is mounted already"
+		return 0
+	fi
+	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
+	unlock_disks
+	udevadm settle --timeout=60 || true
+	if pools | grep -qxF "$system_pool"; then
+		activate_var
+	else
+		make_ram_var
+	fi
+}
+
+# Once var.mount has unmounted /var: the pool cherry deactivated, and any
+# other pool still active, and every disk closed.
+boot_var_stop() {
+	for pool in $(pools); do
+		lvm vgchange -an "$pool" || true
+	done
+	detach_disks
+}
+
+# After /var: every pool activated, every volume but var checked and mounted.
+# What fails is reported, and the rest goes on.
+boot_volumes_start() {
+	rc=0
+	udevadm settle --timeout=60 || echo "udev has not settled: going on with the devices there are"
+	unlock_disks
 	udevadm settle --timeout=60 || true
 	for pool in $(pools); do
 		if ! lvm vgchange -ay "$pool"; then
@@ -817,7 +1031,7 @@ boot_start() {
 			rc=1
 		fi
 		table=$(volume_table "$pool")
-		for name in $(printf '%s\n' "$table" | cut -d '|' -f 1); do
+		for name in $(user_volume_names "$pool"); do
 			if is_mounted "$(mountpoint_of "$pool" "$name")"; then
 				continue
 			fi
@@ -841,34 +1055,36 @@ boot_start() {
 	return "$rc"
 }
 
-boot_stop() {
+# Before var.mount unmounts /var: the volumes unmounted, and every pool but
+# cherry, which holds /var, deactivated.
+boot_volumes_stop() {
 	awk -v dir="$volumes/" 'index($5, dir) == 1 { print $5 }' "$mountinfo" | while read -r mp; do
 		umount "$mp" || echo "cannot unmount $mp"
 	done
 	for pool in $(pools); do
-		lvm vgchange -an "$pool" || true
-	done
-	for name in "$block"/dm-*/dm/name; do
-		if [ -e "$name" ]; then
-			case $(cat "$name") in
-			cherry-pv-*) systemd-cryptsetup detach "$(cat "$name")" || true ;;
-			esac
+		if [ "$pool" != "$system_pool" ]; then
+			lvm vgchange -an "$pool" || true
 		fi
 	done
 }
 
-if [ $# -eq 2 ] && [ "$1" = boot ]; then
+if [ "${1:-}" = boot ]; then
+	if [ $# -ne 3 ]; then
+		fail "usage: cherry-storage boot var|volumes start|stop"
+	fi
 	exec 9>"$lock"
 	flock 9
-	case $2 in
-	start) boot_start ;;
-	stop) boot_stop ;;
-	*) fail "bad boot verb '$2': start or stop" ;;
+	case $2:$3 in
+	var:start) boot_var_start ;;
+	var:stop) boot_var_stop ;;
+	volumes:start) boot_volumes_start ;;
+	volumes:stop) boot_volumes_stop ;;
+	*) fail "bad boot verb '$2 $3': var or volumes, start or stop" ;;
 	esac
 	exit
 fi
 if [ $# -ne 1 ]; then
-	fail "usage: cherry-storage <verb>[:<argument>...], or cherry-storage boot start|stop"
+	fail "usage: cherry-storage <verb>[:<argument>...], or cherry-storage boot var|volumes start|stop"
 fi
 
 instance=$1
