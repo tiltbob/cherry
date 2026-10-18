@@ -782,6 +782,18 @@ Once a machine has Cherry's keys:
   doesn't know: clear the keys and boot Cherry again, to enroll anew.
 - systemd-stub ignores command-line overrides passed by the firmware.
 
+**The kernel is locked down,** in integrity mode, from early boot and however
+the machine booted (`/sys/kernel/security/lockdown`): Secure Boot keeps the
+firmware from starting anything but a signed release, and lockdown keeps what
+it started as it was built. The kernel loads no module the build did not
+sign: every module the image carries is signed at build time, with a key the
+kernel build makes and keeps in the build tree and whose certificate the
+kernel holds, and `insmod` of anything else fails with "Key was rejected by
+service". Locked down too: `/dev/mem`, kexec of unsigned images,
+hibernation, raw PCI, port and MSR access, debugfs, and unsafe module
+parameters. The smoke test loads the image's module, and has a copy of it
+without its signature refused.
+
 `python3 scripts/run_qemu.py --secure-boot` boots OVMF's Secure Boot build,
 whose variable store `output/cherry_x86_64/qemu/OVMF_VARS.secboot.fd` starts
 in setup mode and persists: the first run enrolls the keys and QEMU exits as
@@ -796,8 +808,7 @@ br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
 
 Not yet: Cherry applies no dbx updates, which would revoke a leaked release
 key (the KEK would sign them), and an older release, signed with the same
-keys, still boots and unlocks the disks a newer one sealed; and the kernel's
-lockdown and module signing are off.
+keys, still boots and unlocks the disks a newer one sealed.
 
 ## Running containers
 
@@ -1194,5 +1205,5 @@ This is a development image:
   sign with it (see [SSH host key](#ssh-host-key)).
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
-  signed. With Secure Boot on, the kernel still loads unsigned modules: its
-  lockdown is off.
+  signed. The kernel is locked down, in integrity mode, and loads only the
+  modules the build signed, however the machine booted.

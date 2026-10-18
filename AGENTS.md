@@ -109,7 +109,9 @@ is, what runs it and what it needs. Read that before the code.
 - **Kernel options live in `board/x86_64/linux.fragment`,** and
   `check-kconfig.sh` fails the build when one doesn't survive into the final
   `.config`. List only symbols this kernel has, each under a comment saying
-  what needs it.
+  what needs it. The kernel is locked down (integrity mode) and loads only
+  the modules the build signed: a driver the image needs is built in, or a
+  module of this kernel's build; nothing loads one from elsewhere.
 - **systemd's own mechanisms** (credentials, repart, cryptsetup, machined,
   `.nspawn` files, template units, presets) rather than daemons or formats of
   Cherry's own.
@@ -395,6 +397,7 @@ two defconfigs' toolchain options must stay the same.
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
 | Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Kernel lockdown, signed modules | `board/x86_64/linux.fragment`, `check-kconfig.sh` | s1 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
 | Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
 | Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
