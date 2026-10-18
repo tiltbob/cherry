@@ -2,77 +2,84 @@
 """End-to-end smoke test for Cherry: UEFI HTTP boot in QEMU + OVMF (stdlib only).
 
   1. the firmware HTTP boots the EFI binary; the root filesystem is the EROFS
-     image from the initramfs, read-only; /var is a tmpfs, as the machine has
-     no disk; the machine ID comes from the TPM's endorsement key (a swtpm on
-     CRB), and the hostname from the machine ID; networking and sshd work, an
-     SSH key passed as a credential is installed, no unit failed; the firewall
-     was loaded before networkd started, lets IPv6 router advertisements in,
-     and keeps sshd from answering outside the VM until a rule lets it in,
-     which restarting the firewall takes back out
-  2. a systemd-nspawn container runs with a veth link, and systemd-networkd
+     image from the initramfs, read-only; /var is the volume var of the pool
+     cherry, the machine's own, which is in RAM (a zram device of 132 MiB,
+     var 128 MiB, btrfs) as the pool has no disks yet, and the machine's blank
+     disk is left alone; the machine ID comes from the TPM's endorsement key
+     (a swtpm on CRB), and the hostname from the machine ID; networking and
+     sshd work, with the host key in the TPM, exocarp's, which a client from
+     the host verifies in a key exchange, an SSH key passed as a credential is
+     installed, no unit failed; the firewall was loaded before networkd
+     started, lets IPv6 router advertisements in, and keeps sshd from
+     answering outside the VM until a rule lets it in, which restarting the
+     firewall takes back out
+  2. through OpenCode's storage MCP server, as the cherry user, the agent
+     claims the blank disk, now a LUKS2 volume the TPM unlocks, and gives it
+     to the pool cherry: /var moves onto it live, with cherry.service, its
+     OpenChamber and the files written before untouched, and the zram device
+     goes; var then grows to 4 GiB, and /var with it
+  3. a systemd-nspawn container runs with a veth link, and systemd-networkd
      sets up masquerading for it and can write its state files, even after
      systemd-tmpfiles ran in an arch-chroot of a root that numbers its users
      differently (as pacstrap's pacman hooks do); through the firewall, the
      container leases its address from networkd, pings the host and reaches
      out of the VM, but sshd on the host does not answer it
-  3. a second boot starts from scratch again (nothing persists), except the
-     machine's identity: the same TPM, now on TIS, gives the same machine ID
-     and hostname
-  4. the cherry user creates a Debian container with cherry-bootstrap@.service
+  4. after a poweroff, which unmounts /var cleanly, a second boot (the same
+     TPM, now on TIS) unlocks the disk, mounts var and finds the files, with
+     the same machine ID, hostname and SSH host key; machinectl clone on it
+     makes a snapshot of an image, as environments are; another TPM cannot
+     unlock the disk, so that machine's /var is in RAM, its host key is
+     another, nothing claims the disk, and it stays as it was; back on its own
+     TPM, everything is there
+  5. the cherry user creates a Debian container with cherry-bootstrap@.service
      (debootstrap, as root), boots, stops and removes it with machinectl
      (skipped when the guest cannot reach deb.debian.org)
-  5. rpmstrap installs Fedora into /var/lib/machines and the container boots
+  6. rpmstrap installs Fedora into /var/lib/machines and the container boots
      (skipped when the guest cannot reach mirrors.fedoraproject.org)
-  6. pacstrap installs Arch Linux into /var/lib/machines, the container's own
+  7. pacstrap installs Arch Linux into /var/lib/machines, the container's own
      pacman downloads in its Landlock sandbox, and the container boots
      (skipped when the guest cannot reach the Arch Linux mirrors)
-  7. the OpenCode binary is the packaged version (stripped, it would be a bare
+  8. the OpenCode binary is the packaged version (stripped, it would be a bare
      Bun), and only the binary: no opencode user, state directory or service
-  8. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
+  9. cherry.service runs OpenChamber on Bun as the cherry user, serving its web
      UI and running the packaged OpenCode as that user too, both on loopback
      only and under its system call filter; once it was online,
      cherry-connect-url.service showed the pairing link and its QR code on the
      console, as that user; the user's polkit privileges cover machinectl and
      cherry-bootstrap@ and nothing else; no openchamber user, state directory
      or service
-  9. OpenCode reads its system configuration, /etc/opencode, and through the
-     MCP server it names, as the cherry user in cherry.service's sandbox, a
-     Debian image is built from a recipe (cherry-image@.service), booted with
-     its network up, entered, stopped, and removed; cherry-image@ writes
-     nothing out, as images never leave the machine (skipped when the guest
-     cannot reach deb.debian.org)
-  10. zram is the swap device, and under memory pressure tmpfs pages go to it,
+  10. OpenCode reads its system configuration, /etc/opencode, which denies the
+     agent every tool but the MCP servers'; through the machines server, as
+     the cherry user in cherry.service's sandbox, a Debian image is built from
+     a profile of the machine's own (cherry-image@.service) and refused a
+     start, an environment is cloned from it with its settings, started with
+     its network up, read with status, stopped, and removed before the image
+     is; OpenChamber lists the Environments extension as a granted built-in,
+     whose service answers in the same sandbox; cherry-image@ writes nothing
+     out, as images never leave the machine (skipped when the guest cannot
+     reach deb.debian.org)
+  11. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
-  11. without a TPM, boot stops at cherry-no-tpm.target with the error on the
-     console: no network, no sshd, no OpenChamber, no containers
-  12. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
+  12. without a TPM, boot stops at cherry-no-tpm.target with the error on the
+     console: no network, no sshd or host key agent, no OpenChamber, no
+     containers
+  13. on Secure Boot firmware in setup mode, cherry-secureboot.service enrolls
      the image's keys and the option ROM driver the firmware loaded (QEMU's
      iPXE for virtio-net) and reboots; the firmware then refuses the image,
      unsigned, but boots it with Secure Boot on once signed by a CA the test
      adds to db (skipped when the image has no keys)
-  13. with disks, the machine makes its blank one its /var: a LUKS2 volume
-     whose key the TPM seals to the boot state (PCR 7, and PCR 11 under the
-     image's PCR key, as the header's token shows; the image's policy is
-     signed, and PCR 11 is what it says), holding ext4, and leaves the disk
-     with a partition table alone; after a poweroff, which unmounts it cleanly,
-     the TPM unlocks it and /var kept its files and the SSH host key; another
-     TPM cannot unlock it, so that machine's /var is a tmpfs and the disk
-     stays as it was, until wipefs, as the README says, makes it blank again
   14. storage, through OpenCode's storage MCP server as the cherry user, with
-     /var on a disk of its own, which is in use: claim refuses a disk not as
+     the pool cherry on the machine's disk: claim refuses a disk not as
      listed, then wipes a blank hard disk, one with a partition table and an
-     NVMe SSD with one too, each now a LUKS2 volume the TPM unlocks, the only
-     physical volumes LVM sees; a pool of the hard disks cached on the SSD, a
-     volume in it, cached, mounted, the cherry user's, which cherry.service
-     sees writable; a hard disk out of the pool, its data moved, and the
-     volume grown; after a poweroff, which closes it all cleanly, the next
-     boot unlocks, activates and mounts it again; then the cache, the volume
+     NVMe SSD with one too, each now a LUKS2 volume the TPM unlocks, with
+     cherry's the only physical volumes LVM sees; the pool cherry is cached on
+     the SSD, var with it, and is never destroyed, var never removed, its disk
+     never taken out; a pool of the hard disks cached on the SSD, a volume in
+     it, cached, mounted, the cherry user's, which cherry.service sees
+     writable; a hard disk out of the pool, its data moved, and the volume
+     grown; after a poweroff, which closes it all cleanly, the next boot
+     unlocks, activates and mounts it all again; then the cache, the volume
      and the pool go, and the disks are released blank
-  15. the disks' keys are bound to the boot state: with /var on a disk sealed
-     to the image's policy, the TPM does not unlock it under the same image
-     with one byte of its command line changed, which PCR 11 shows, nor under
-     the image signed anew with another PCR key; under the image itself it
-     does, and the files are there
 
 The scenarios are Smoke's s<N>_ methods, run in the order of N, which must be
 1, 2, ... with no gap or duplicate (tests/scenarios.py checks that too).
@@ -94,7 +101,6 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
-import pcrsign  # noqa: E402
 import run_qemu  # noqa: E402
 import secureboot  # noqa: E402
 
@@ -118,6 +124,11 @@ IN_CHERRY_SERVICE = ("-E HOME=/var/lib/cherry -p NoNewPrivileges=yes -p ProtectS
                      "-p SystemCallFilter=@system-service -p 'SystemCallFilter=~@privileged' "
                      "-p SystemCallErrorNumber=EPERM")
 TEST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZ6tCIi2mVyuCoH1GzkcdXxsTSu6cAvpCOAGWT3d6JJ cherry-smoke"
+# The host key's public key, which exocarp.socket writes at boot: the TPM's primary key for this template of
+# tpm2_createprimary (package/exocarp/src/exocarp.c).
+HOST_KEY_FILE = "/run/exocarp/ssh_host_ecdsa_key.pub"
+HOST_KEY_TEMPLATE = ("-C e -G ecc256:ecdsa-sha256 -g sha256 "
+                     "-a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign|noda'")
 # A DOS partition table with one Linux partition, of 2 MiB from 1 MiB on: a disk in use, not a blank one.
 DOS_MBR = (bytes(446) + bytes([0, 0, 0, 0, 0x83, 0, 0, 0]) + (2048).to_bytes(4, "little")
            + (4096).to_bytes(4, "little") + bytes(48) + b"\x55\xaa")
@@ -444,6 +455,9 @@ class Smoke:
         check(os.path.exists(os.path.join(self.images, run_qemu.EFI_NAME)), f"no {run_qemu.EFI_NAME} in {self.images}")
         self.server = run_qemu.serve(self.images)
         self.vm = VM(self.workdir, self.server)
+        # The machine's disk: blank, until the agent gives it to the pool cherry (s2), and kept along with the TPM.
+        self.var_disk = os.path.join(self.workdir, "var.img")
+        run_qemu.make_disk(self.var_disk, 6 << 30)
 
     def boot(self, tpm_interface="crb", banner=None, secure_boot=False, server=None, tpm="tpm", disks=(), ssds=(),
              expect="running"):
@@ -486,6 +500,8 @@ class Smoke:
         check(not vm.ssh_answers(), "sshd answers outside the VM, through the firewall")
         vm.run("nft add rule inet cherry input tcp dport 22 accept")
         check(vm.ssh_answers(), "sshd does not answer outside the VM once a rule lets it in")
+        seen = self.host_key_over_ssh()
+        check(seen == self.host_key.split()[:2], f"a client got the host key {seen}, not the TPM's")
         vm.run("systemctl restart cherry-firewall.service")
         check(not vm.ssh_answers(), "restarting the firewall did not take the rule for sshd back out")
 
@@ -515,54 +531,118 @@ class Smoke:
         log(f"machine identity: EK hash {ek_hash} via {driver}, hostname {hostname}")
         return machine_id
 
-    def check_pcr11(self, uki, phase):
-        """PCR 11 holds what the image's policy expects once this boot phase is done: the stub's measurement of the UKI
-        (its sections, as read from the file), extended by systemd's phases."""
-        expected = pcrsign.measure(uki, phase).hex()
-        pcr = self.vm.run("tpm2_pcrread sha256:11 | sed -n 's/.*0x//p'").lower()
-        check(pcr == expected, f"PCR 11 is {pcr}, not {expected}, which the image's policy expects after {phase!r}")
+    def check_host_key(self):
+        """sshd's host key is the TPM's, held by exocarp (package/exocarp): the public key exocarp.socket wrote is
+        the TPM's primary key for exocarp's template, which creating it again shows; the agent lists it and sshd
+        runs with it; no host key is on disk. Returns the public key's line."""
+        vm = self.vm
+        rc, states = vm.run("systemctl is-active exocarp.socket exocarp.service sshd.service", check_rc=False)
+        check(states.split() == ["active"] * 3, f"exocarp.socket, exocarp.service, sshd.service are:\n{states}")
+        key = vm.run(f"cat {HOST_KEY_FILE}")
+        check(key.startswith("ecdsa-sha2-nistp256 ") and key.endswith(" exocarp"), f"not exocarp's public key: {key}")
+        check(vm.run(f"stat -c %U:%a {HOST_KEY_FILE} /run/exocarp/socket") == "exocarp:600\nroot:600",
+              "the public key is not the exocarp user's alone, or the socket not root's alone")
+        shown = vm.run(f"tpm2_createprimary -T device:/dev/tpmrm0 -Q {HOST_KEY_TEMPLATE} -c /tmp/hk.ctx -f pem "
+                       "-o /tmp/hk.pem && ssh-keygen -i -m PKCS8 -f /tmp/hk.pem; rc=$?; rm -f /tmp/hk.ctx /tmp/hk.pem; "
+                       "exit $rc")
+        check(shown.split()[:2] == key.split()[:2], f"the host key is not the TPM's primary key:\n{key}\n{shown}")
+        listed = vm.run("SSH_AUTH_SOCK=/run/exocarp/socket ssh-add -L")
+        check(listed == key, f"the agent lists another key:\n{listed}")
+        check(vm.run("ls -d /etc/ssh/ssh_host_* /var/lib/sshd 2>/dev/null; true") == "", "host keys on disk")
+        # Nothing about the key from sshd, which first tries the HostKey file as a private key (tests/exocarp.py).
+        rc, complaints = vm.run("journalctl -b -u sshd --no-pager -o cat | grep -iE 'host key|unprotected|too open'",
+                                check_rc=False)
+        check(rc == 1, f"sshd complained about the host key:\n{complaints}")
+        log(f"host key: {key}")
+        return key
 
-    def check_sealed(self, partition, uki):
-        """The LUKS2 volume's one TPM token seals its key to PCR 7, and to PCR 11 under the image's PCR key."""
-        tokens = json.loads(self.vm.run(f"cryptsetup luksDump --dump-json-metadata /dev/{partition}"))["tokens"]
-        tpm2 = [t for t in tokens.values() if t.get("type") == "systemd-tpm2"]
-        check(len(tpm2) == 1 and tpm2[0].get("tpm2-pcrs") == [7] and tpm2[0].get("tpm2_pubkey_pcrs") == [11]
-              and base64.b64decode(tpm2[0].get("tpm2_pubkey", "")) == bytes(uki[".pcrpkey"]),
-              f"/dev/{partition}'s key is not sealed to PCR 7 and PCR 11 under the image's key: {tpm2}")
+    def host_key_over_ssh(self):
+        """[type, key] of the host key a client on the host gets from sshd, through QEMU's port forward, once the
+        firewall lets SSH in: with the key exchange done, so sshd's agent signed with it, the client gets as far as
+        authentication, where it has no key for root."""
+        known_hosts = os.path.join(self.workdir, "known_hosts")
+        if os.path.exists(known_hosts):
+            os.remove(known_hosts)
+        check(shutil.which("ssh"), "ssh not found: apt install openssh-client")
+        cmd = ["ssh", "-p", str(self.vm.ssh_port), "-F", "/dev/null", "-o", f"UserKnownHostsFile={known_hosts}",
+               "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes", "-o", "IdentityAgent=none",
+               "-o", "IdentitiesOnly=yes", "-o", f"ConnectTimeout={30 * MULT:.0f}", "root@127.0.0.1", "true"]
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120 * MULT)
+        check(p.returncode == 255 and "Permission denied" in p.stdout,
+              f"ssh did not get as far as authentication (exit {p.returncode}):\n{p.stdout}")
+        with open(known_hosts) as f:
+            return f.read().split()[1:3]
 
-    def check_var_on_disk(self, partition):
-        """/var is the ext4 of cherry-var, the LUKS2 volume on the given partition, which is labelled cherry-var."""
+    def dm_of(self, name):
+        """The kernel name (dm-N) of the device-mapper device called name."""
+        return self.vm.run(f"grep -lx {name} /sys/class/block/dm-*/dm/name | cut -d / -f 5")
+
+    def check_var_mount(self):
+        """/var is the btrfs of /dev/mapper/cherry-var, the pool cherry's volume var, without nosuid: its dm-N."""
         vm = self.vm
         var = vm.fstype("/var")
-        check(" - ext4 " in var, f"/var is not an ext4: {var}")
+        check(" - btrfs " in var, f"/var is not a btrfs: {var}")
         check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
-        dm = vm.run("grep -lx cherry-var /sys/class/block/dm-*/dm/name | cut -d / -f 5")
-        check(var.split()[2] == vm.run(f"cat /sys/class/block/{dm}/dev"), f"/var is not on {dm}, cherry-var: {var}")
-        check(vm.run(f"cat /sys/class/block/{dm}/dm/uuid").startswith("CRYPT-LUKS2-"), "cherry-var is not LUKS2")
-        check(vm.run(f"ls /sys/class/block/{dm}/slaves") == partition, f"cherry-var is not on {partition}")
-        vm.run(f"grep -qx PARTNAME=cherry-var /sys/class/block/{partition}/uevent")
+        # The mount's device number is btrfs's own (an anonymous one per subvolume), not the block device's: the
+        # source names the device, which is the volume's mapping.
+        source = var.split(" - ")[1].split()[1]
+        check(source == "/dev/mapper/cherry-var", f"/var is not on /dev/mapper/cherry-var: {var}")
+        dm = self.dm_of("cherry-var")
+        # That node is the device itself, not a link to /dev/dm-N: compare the numbers (stat prints them in hex).
+        major, minor = vm.run("stat -L -c %t:%T /dev/mapper/cherry-var").split(":")
+        check(f"{int(major, 16)}:{int(minor, 16)}" == vm.run(f"cat /sys/class/block/{dm}/dev"),
+              f"/dev/mapper/cherry-var is not {dm}")
+        check(vm.run(f"cat /sys/class/block/{dm}/dm/uuid").startswith("LVM-"), "cherry-var is not a logical volume")
+        return dm
+
+    def check_var_in_ram(self):
+        """/var is cherry/var on a zram device of 132 MiB, zstd, the pool cherry's one physical volume, tagged ram:
+        the pool in RAM, var 128 MiB, as cherry-storage.service made it."""
+        vm = self.vm
+        dm = self.check_var_mount()
+        zram = vm.run(f"ls /sys/class/block/{dm}/slaves")
+        check(re.fullmatch(r"zram[1-9][0-9]*", zram), f"cherry/var is not on a zram device alone: {zram}")
+        check(vm.run(f"cat /sys/block/{zram}/disksize") == str(132 << 20)
+              and "[zstd]" in vm.run(f"cat /sys/block/{zram}/comp_algorithm"), f"{zram} is not 132 MiB, zstd")
+        check(vm.run("lvs --noheadings --units m --nosuffix -o lv_size cherry/var").strip() == "128.00",
+              "cherry/var is not 128 MiB")
+        check(vm.run("pvs --noheadings -o pv_name,pv_tags").split() == [f"/dev/{zram}", "ram"],
+              "LVM sees other physical volumes than the pool cherry's zram device, tagged ram")
+        vm.run(f"journalctl -b -u cherry-storage --no-pager -o cat | grep -q 'in RAM on /dev/{zram}'")
+
+    def check_var_on_pool(self, partition):
+        """/var is cherry/var on the LUKS2 volume of the given partition, labelled cherry-pv, which the TPM unlocks:
+        the pool cherry on its disk, uncached; no zram device but the swap's is left."""
+        vm = self.vm
+        dm = self.check_var_mount()
+        pv = vm.run(f"ls /sys/class/block/{dm}/slaves")
+        check(vm.run(f"cat /sys/class/block/{pv}/dm/name") == f"cherry-pv-{partition}"
+              and vm.run(f"cat /sys/class/block/{pv}/dm/uuid").startswith("CRYPT-LUKS2-"),
+              f"cherry/var is not on the LUKS2 volume cherry-pv-{partition}: {pv}")
+        check(vm.run(f"ls /sys/class/block/{pv}/slaves") == partition, f"cherry-pv-{partition} is not on {partition}")
+        vm.run(f"grep -qx PARTNAME=cherry-pv /sys/class/block/{partition}/uevent")
+        check(vm.run("ls /dev/zram*") == "/dev/zram0", "a zram device besides the swap's is left")
 
     def s1_http_boot(self):
         vm = self.vm
-        self.boot()
+        self.boot(disks=[self.var_disk])
 
         root = vm.fstype("/")
         check(re.match(r"\S+ \S+ \S+ / / ro[ ,]", root), f"/ is not mounted read-only: {root}")
         check(" - erofs /rootfs.erofs " in root, f"/ is not the EROFS image from the initramfs: {root}")
         rc, _ = vm.run("touch /cherry-rw-test", check_rc=False)
         check(rc != 0, "the root filesystem is writable")
-        var = vm.fstype("/var")
-        check(" - tmpfs " in var, f"/var is not a tmpfs: {var}")
-        check("nosuid" not in var.split(" - ")[0], f"/var is nosuid, which breaks setuid in containers: {var}")
-        vm.run("journalctl -b -u cherry-var --no-pager | grep -q 'no partition labelled cherry-var and no blank disk'")
+        self.check_var_in_ram()
+        # Nothing claims a disk at boot: the blank disk is as it was.
+        check(vm.run("wipefs --no-act --noheadings /dev/vda; ls -d /sys/class/block/vda/vda* 2>/dev/null; true") == "",
+              "the blank disk was written to at boot")
         check(vm.run("readlink -f /root") == "/var/roothome", "/root is not on /var")
         check("NAME=Cherry" in vm.run("cat /etc/os-release"), "unexpected os-release")
         check("console=ttyS0" in vm.run("cat /proc/cmdline"), "the UKI command line was not used")
         self.machine_id = self.check_identity("crb")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
-        check(vm.run("systemctl is-active sshd.service") == "active", "sshd is not running")
-        vm.run("test -s /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
+        self.host_key = self.check_host_key()
         check(vm.run("cat /root/.ssh/authorized_keys") == TEST_KEY,
               "the ssh.authorized_keys.root credential was not applied")
         vm.run("for i in $(seq 60); do ip -4 addr show | grep -q 'inet 10\\.0\\.2\\.' && exit 0; sleep 1; done; "
@@ -576,7 +656,62 @@ class Smoke:
             "grep -E '^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Shmem|Slab|KernelStack|PageTables):' "
             "/proc/meminfo"))
 
-    def s2_nspawn(self):
+    def s2_persist(self):
+        vm = self.vm
+        url = "http://127.0.0.1:3000"
+        # Through the storage MCP server, as the agent would (s14 checks the configuration that gives it the server):
+        # the pool cherry in RAM alone, var its volume, and the blank disk free.
+        state = json.loads(self.storage("list", {})[0])
+        found = {d["name"]: d for d in state["disks"]}
+        pools = {p["name"]: p for p in state["pools"]}
+        check(state["var"]["ram"] is True and list(pools) == ["cherry"] and pools["cherry"].get("ram")
+              and pools["cherry"]["disks"] == [] and pools["cherry"]["volumes"][0]["path"] == "/var",
+              f"the pool cherry is not in RAM alone, with var: {state}")
+        check((found["vda"]["state"], found["vda"]["blank"]) == ("free", True),
+              f"vda is not a free, blank disk: {found['vda']}")
+        # What is there before the move: cherry.service's server, online, a file of the cherry user's in its home,
+        # and one of root's.
+        vm.run(f"for i in $(seq 120); do wget -q -O - {url}/health && exit 0; sleep 1; done; "
+               "journalctl -b -u cherry --no-pager | tail -n 20; exit 1", timeout=240)
+        pid = vm.run("systemctl show -p MainPID --value cherry.service")
+        vm.run(f"{AS_CHERRY} {IN_CHERRY_SERVICE} sh -c 'echo before >/var/lib/cherry/work/smoke-persist'")
+        vm.run("echo cherry-smoke >/var/cherry-smoke")
+        # The disk claimed: a LUKS2 volume with the TPM's key alone, holding a physical volume.
+        text = self.storage("claim", {"disks": [{"name": "vda", "fingerprint": found["vda"]["fingerprint"]}]},
+                            timeout=600)[0]
+        check("claimed /dev/vda: /dev/vda1, unlocked with the TPM as /dev/mapper/cherry-pv-vda1" in text,
+              f"vda not claimed:\n{text}")
+        luks = vm.run("cryptsetup luksDump /dev/vda1")
+        check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M) and len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1,
+              f"/dev/vda1 is not a LUKS2 volume with the TPM's key alone:\n{luks}")
+        # Given to the pool cherry: /var moves onto it, live.
+        text, pool = self.storage("create_pool", {"name": "cherry", "disks": ["vda"]}, timeout=900)
+        log("create_pool cherry:\n" + text)
+        check("moving /var from RAM onto the pool's disks" in text and "/var is on the pool's disks now" in text,
+              f"/var did not move:\n{text}")
+        check(pool["disks"] == ["vda"] and not pool.get("ram") and pool["volumes"][0]["name"] == "var"
+              and pool["volumes"][0]["path"] == "/var" and pool["volumes"][0]["size"] == "128.0 MiB",
+              f"the pool is not as made: {pool}")
+        self.check_var_on_pool("vda1")
+        # Nothing stopped or restarted, and the files are there.
+        check(vm.run("systemctl show -p MainPID --value cherry.service") == pid, "cherry.service restarted")
+        health = json.loads(vm.run(f"wget -q -O - {url}/health"))
+        check(health["status"] == "ok", f"OpenChamber is not well after the move: {health}")
+        check(vm.run("cat /var/cherry-smoke /var/lib/cherry/work/smoke-persist") == "cherry-smoke\nbefore",
+              "files written before the move are gone")
+        check(vm.run("pvs --noheadings -o pv_name").split() == ["/dev/mapper/cherry-pv-vda1"],
+              "LVM sees other physical volumes than the pool cherry's disk")
+        # var grows to 4 GiB, and /var with it.
+        pool = self.storage("resize_volume", {"pool": "cherry", "name": "var", "size": "4G"})[1]
+        size = int(vm.run("df -B 1 --output=size /var | tail -n 1"))
+        check(pool["volumes"][0]["size"] == "4.0 GiB" and size > 3.5 * (1 << 30), f"/var did not grow: {size}, {pool}")
+        state = json.loads(self.storage("list", {})[0])
+        found = {d["name"]: d for d in state["disks"]}
+        check(state["var"]["ram"] is False
+              and (found["vda"]["state"], found["vda"]["pool"], found["vda"]["role"]) == ("claimed", "cherry", "data"),
+              f"after the move: {state}")
+
+    def s3_nspawn(self):
         vm = self.vm
         root = "/var/lib/machines/smoke"
         vm.run(f"rm -rf {root} && mkdir -p {root}/usr {root}/etc && "
@@ -628,16 +763,63 @@ class Smoke:
         vm.run("machinectl terminate smoke; for i in $(seq 30); do machinectl show smoke >/dev/null 2>&1 || exit 0; "
                "sleep 1; done; exit 1", timeout=60)
 
-    def s3_stateless_reboot(self):
+    def s4_persistent_reboot(self):
         vm = self.vm
-        vm.run("touch /var/cherry-smoke")
-        # The same TPM state, attached through the other interface.
-        self.boot(tpm_interface="tis")
-        rc, _ = vm.run("test -e /var/cherry-smoke", check_rc=False)
-        check(rc != 0, "/var survived a reboot")
+        # Powered off, not pulled: the volumes, /var and the pool go down in order.
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+        # The same TPM, attached through the other interface: the disk unlocked, var mounted, the files there.
+        self.boot(tpm_interface="tis", disks=[self.var_disk])
+        journal = "journalctl -b -u cherry-storage --no-pager -o cat"
+        shown = vm.run(journal)
+        log("cherry-storage.service:\n" + shown)
+        check("/var is cherry/var (btrfs) on the pool's disks, unlocked with the TPM" in shown and "RAM" not in shown,
+              f"cherry-storage.service did not mount the pool's var alone:\n{shown}")
+        # Left clean, it has no tree log for the mount to replay.
+        check("tree-log replay" not in vm.run("dmesg | grep BTRFS || true"),
+              "/var was not unmounted cleanly at the poweroff: the mount replayed a tree log")
+        self.check_var_on_pool("vda1")
+        check(vm.run("cat /var/cherry-smoke /var/lib/cherry/work/smoke-persist") == "cherry-smoke\nbefore",
+              "files on /var did not survive the reboot")
+        check(vm.run("systemctl is-active cherry-storage.service") == "active", "cherry-storage.service is not active")
         check(self.check_identity("tis") == self.machine_id, "the machine ID changed across a reboot")
+        check(self.check_host_key() == self.host_key, "the SSH host key changed across a reboot")
 
-    def s4_debootstrap(self):
+        # On btrfs, machinectl clone is a snapshot: an environment shares its image's blocks until it changes them. The
+        # trees cherry-bootstrap and cherry-image make there are subvolumes for it (tests/bootstrap.sh); this one is by
+        # hand.
+        vm.run("btrfs subvolume create /var/lib/machines/cow-image >/dev/null && "
+               "echo shared >/var/lib/machines/cow-image/file && machinectl clone cow-image cow-env")
+        image_uuid = vm.run("btrfs subvolume show /var/lib/machines/cow-image | awk '$1 == \"UUID:\" { print $2 }'")
+        clone = vm.run("btrfs subvolume show /var/lib/machines/cow-env")
+        check(re.search(rf"^\s*Parent UUID:\s+{image_uuid}\s*$", clone, re.M),
+              f"cow-env is not a snapshot of cow-image ({image_uuid}):\n{clone}")
+        check(vm.run("cat /var/lib/machines/cow-env/file") == "shared", "the snapshot lacks the image's file")
+        types = vm.run("machinectl list-images --no-legend | awk '$1 ~ /^cow-/ { print $1, $2 }' | sort")
+        check(types == "cow-env subvolume\ncow-image subvolume", f"not two subvolumes: {types}")
+        vm.run("machinectl remove cow-env cow-image && test ! -e /var/lib/machines/cow-env")
+
+        # Another machine's TPM cannot unlock the disk: the pool is not seen, so /var is in RAM, the host key is
+        # another, nothing claims the disk, and it is left as it was.
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+        before = file_sha256(self.var_disk)
+        self.boot(tpm="tpm-other", disks=[self.var_disk])
+        vm.run(f"{journal} | grep -q 'the TPM cannot unlock /dev/vda1'")
+        self.check_var_in_ram()
+        check(self.check_host_key() != self.host_key, "another TPM gave the same SSH host key")
+        found = {d["name"]: d for d in json.loads(self.storage("list", {})[0])["disks"]}
+        check(found["vda"]["state"] == "locked", f"the disk is not locked on another machine: {found['vda']}")
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+        check(file_sha256(self.var_disk) == before, "the disk was written to on another machine")
+        # Back on its own TPM, everything is there.
+        self.boot(disks=[self.var_disk])
+        self.check_var_on_pool("vda1")
+        check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the other machine")
+        check(self.check_host_key() == self.host_key, "the SSH host key changed")
+
+    def s5_debootstrap(self):
         vm = self.vm
         mirror = "http://deb.debian.org/debian"
         # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
@@ -674,7 +856,7 @@ class Smoke:
         rc, _ = vm.run(f"test -e {root}", check_rc=False)
         check(rc != 0, "machinectl remove left the container tree behind")
 
-    def s5_rpmstrap(self):
+    def s6_rpmstrap(self):
         vm = self.vm
         host = "mirrors.fedoraproject.org"
         # systemd-resolved can fail lookups for a while after boot (DNSSEC, DoT probing), so retry.
@@ -706,7 +888,7 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
-    def s6_pacstrap(self):
+    def s7_pacstrap(self):
         vm = self.vm
         root = "/var/lib/machines/arch"
         # The keyring is built offline at every boot, without holding up boot.
@@ -730,7 +912,7 @@ class Smoke:
         vm.run(f"systemd-nspawn -q --pipe -D {root} ${{https_proxy:+--setenv=https_proxy=$https_proxy}} "
                "pacman -Syy --noconfirm | cat", timeout=600)
         vm.run("machinectl start arch")
-        # As in s4_debootstrap: `systemctl -M` fails until the container's bus is up, so wait for
+        # As in s5_debootstrap: `systemctl -M` fails until the container's bus is up, so wait for
         # its console output in the host journal first. Arch's systemd names targets by their
         # description only ("Reached target Multi-User System.").
         vm.run("for i in $(seq 300); do journalctl -u systemd-nspawn@arch --no-pager "
@@ -749,7 +931,7 @@ class Smoke:
                "sleep 1; done; exit 1", timeout=60)
         vm.run(f"rm -rf {root}")
 
-    def s7_opencode(self):
+    def s8_opencode(self):
         vm = self.vm
         version = package_version("opencode")
         # Stripped by Buildroot, the Bun single-file executable would run as a bare Bun and print Bun's version.
@@ -758,13 +940,13 @@ class Smoke:
         # Its grep tool is the image's ripgrep, and git is on the image for its snapshots and worktrees.
         vm.run("test -x /usr/bin/rg && test -x /usr/bin/git")
         # Only the binary: the opencode user, /var/lib/opencode and opencode.service come with
-        # BR2_PACKAGE_OPENCODE_SERVICE, off in Cherry. OpenChamber runs the server, as the cherry user (s8).
+        # BR2_PACKAGE_OPENCODE_SERVICE, off in Cherry. OpenChamber runs the server, as the cherry user (s9).
         rc, _ = vm.run("getent passwd opencode", check_rc=False)
         check(rc != 0, "there is an opencode user")
         rc, _ = vm.run("test -e /var/lib/opencode || test -e /usr/lib/systemd/system/opencode.service", check_rc=False)
         check(rc != 0, "/var/lib/opencode or opencode.service is on the image")
 
-    def s8_cherry(self):
+    def s9_cherry(self):
         vm = self.vm
         version = package_version("openchamber")
         check(vm.run("systemctl is-active cherry.service") == "active", "cherry.service is not running")
@@ -888,70 +1070,167 @@ class Smoke:
                 return text
         raise TestFailure(f"no reply from the MCP tool {tool}:\n{out}")
 
-    def s9_images(self):
+    def s10_images(self):
         vm = self.vm
         mirror = "http://deb.debian.org/debian"
-        # As in s4_debootstrap.
+        # As in s5_debootstrap.
         rc, out = vm.run(f"for i in $(seq 12); do wget -q -T 10 -t 1 -O /dev/null {mirror}/dists/trixie/InRelease "
                          "&& exit 0; sleep 5; done; resolvectl query deb.debian.org; exit 1",
                          timeout=240, check_rc=False)
         if rc != 0:
             log(f"skipped: the guest cannot reach {mirror}: {out}")
             return SKIPPED
-        # OpenCode's system configuration names the MCP server; the skill comes with it. (A home of its own, apart
-        # from the OpenCode that OpenChamber runs.)
+        # OpenCode's system configuration names the MCP server and denies the agent every other tool; the skill, the
+        # verbs and the shipped profiles come with it. (A home of its own, apart from the OpenCode that OpenChamber
+        # runs.)
         config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
         check('"path": "/etc/opencode/opencode.json"' in config and "machines-mcp.js" in config,
               f"OpenCode does not read /etc/opencode/opencode.json:\n{config}")
-        vm.run("test -s /etc/opencode/skills/machine-images.md")
+        # OpenCode reads the permission block into rules, printed in the file's order, and the last rule that matches
+        # wins: the deny of everything first, then what the agent may use.
+        documents = json.loads(config[config.index("["):])
+        system = next(d for d in documents if d.get("path") == "/etc/opencode/opencode.json")
+        rules = [(r["action"], r["resource"], r["effect"]) for r in system["info"]["permissions"]]
+        check(rules == [("*", "*", "deny"), ("machines_*", "*", "allow"), ("storage_*", "*", "allow"),
+                        ("skill", "*", "allow"), ("question", "*", "allow")],
+              f"OpenCode's permissions do not deny the agent's own tools:\n{rules}")
+        vm.run("test -s /etc/opencode/skills/machine-images.md && test -s /usr/lib/cherry/environments.js")
+        vm.run("test -s /usr/lib/cherry/profiles/debian-trixie/image.conf && "
+               "test -x /usr/lib/cherry/profiles/debian-trixie/postinst")
+        ids = [p["id"] for p in json.loads(self.mcp("list", {}))["profiles"]]
+        check({"debian-trixie", "ubuntu-noble", "fedora-44", "arch"} <= set(ids),
+              f"the shipped profiles are not listed: {ids}")
 
-        name, root = "smoke-image", "/var/lib/machines/smoke-image"
+        # A profile of the machine's own, written as the cherry user: the smoke test's recipe.
+        image, env = "smoke-base", "smoke-env"
+        root, clone = f"/var/lib/machines/{image}", f"/var/lib/machines/{env}"
         motd = "built by cherry-image for the smoke test"
-        text = self.mcp("build", {
-            "name": name, "distribution": "debian", "release": "trixie", "packages": ["iproute2"],
-            "files": [{"path": "/etc/motd", "content": motd + "\n"},
-                      {"path": "/usr/bin/smoke-hello", "mode": "0755",
-                       "content": "#!/bin/sh\necho hello from $(cat /proc/sys/kernel/hostname)\n"}],
-            "postinst": "systemctl enable systemd-networkd\necho postinst ran >/var/postinst-ran",
-            "nspawn": "[Exec]\nEnvironment=SMOKE=1"}, timeout=1800)
+        profile = "/var/lib/cherry/profiles/smoke"
+        files = {
+            "image.conf": ("0644", "Distribution=debian\nRelease=trixie\nPackages=iproute2\n"),
+            "profile.conf": ("0644", "Title=Smoke test\nDescription=The smoke test's own profile\n"),
+            "extra/etc/motd": ("0644", motd + "\n"),
+            "extra/usr/bin/smoke-hello": ("0755", "#!/bin/sh\necho hello from $(cat /proc/sys/kernel/hostname)\n"),
+            "postinst": ("0755", "#!/bin/sh\nset -eu\nsystemctl enable systemd-networkd\n"
+                                 "echo postinst ran >/var/postinst-ran\n"),
+            "image.nspawn": ("0644", "[Exec]\nEnvironment=SMOKE=1\n"),
+        }
+        vm.run(f"{AS_CHERRY} rm -rf {profile}")
+        for rel, (mode, content) in files.items():
+            data = base64.b64encode(content.encode()).decode()
+            vm.run(f"echo {data} | base64 -d >/tmp/smoke-file && "
+                   f"{AS_CHERRY} install -D -m {mode} /tmp/smoke-file {profile}/{rel}")
+        check("smoke" in [p["id"] for p in json.loads(self.mcp("list", {}))["profiles"]],
+              "the machine's own profile is not listed")
+
+        # The image: built from the profile, never started.
+        text = self.mcp("build", {"name": image, "profile": "smoke"}, timeout=1800)
         log("build:\n" + text)
-        check(f"built {root} " in text, f"the build's log does not end as it should:\n{text}")
-        check(vm.run(f"stat -c %a /var/log/cherry-image/build:{name}.log") == "644",
+        check(text.startswith(f"Built the image {image} from the profile smoke.") and f"built {root} " in text,
+              f"the build's log does not end as it should:\n{text}")
+        check(vm.run(f"stat -c %a /var/log/cherry-image/build:{image}.log") == "644",
               "the build log is not readable by the cherry user")
-        check(vm.run(f"stat -c %U /var/lib/cherry/images/{name}/image.conf") == "cherry",
+        check(vm.run(f"stat -c %U /var/lib/cherry/images/{image}/image.conf") == "cherry",
               "the recipe was not written as the cherry user")
+        check(vm.run(f"cat /var/lib/cherry/images/{image}/profile.conf").endswith("Profile=smoke"),
+              "the recipe does not name its profile")
         check(vm.run(f"cat {root}.nspawn") == "[Exec]\nEnvironment=SMOKE=1", "the image's settings were not installed")
         vm.run(f"test -e {root}/etc/machine-id && ! test -s {root}/etc/machine-id && "
                f"test -z \"$(ls {root}/var/lib/apt/lists)\" && ! test -e {root}/.cherry-image")
-        log(f"{name}: " + vm.run(f"du -sh {root} | cut -f 1"))
+        check(vm.run(f"cat {root}/etc/motd {root}/var/postinst-ran") == f"{motd}\npostinst ran",
+              "the profile's files and postinst did not land in the image")
+        log(f"{image}: " + vm.run(f"du -sh {root} | cut -f 1"))
+        text = self.mcp("start", {"name": image}, error=True)
+        check("is an image" in text, f"starting the image was not refused as such:\n{text}")
 
-        check(self.mcp("start", {"name": name}, timeout=300) == f"{name} is running", f"{name} did not start")
-        # The command runs in a login session: its messages may come first.
-        text = self.mcp("exec", {"name": name, "command": "cat /etc/motd /var/postinst-ran; smoke-hello"})
-        check(text.startswith("exit status 0\n") and text.endswith(f"{motd}\npostinst ran\nhello from {name}"),
-              f"exec in {name} gave:\n{text}")
-        text = self.mcp("exec", {"name": name, "command": "systemctl status systemd-networkd; exit 3"})
-        check(text.startswith("exit status 3\n") and "Active: active" in text,
-              f"exec does not report the exit status, or systemctl paged:\n{text}")
-        # Its network: host0, configured by the image's networkd with DHCP from the host.
-        text = self.mcp("exec", {"name": name, "command": "for i in $(seq 60); do ip -4 -br addr show host0 | "
-                                 "grep -q / && break; sleep 1; done; ip -4 -br addr show host0"}, timeout=180)
-        check(re.search(r"^host0\S*\s+UP\s+\d+\.\d+\.\d+\.\d+/\d+", text, re.M), f"host0 has no address:\n{text}")
-        check(self.mcp("stop", {"name": name}, timeout=180) == f"{name} is stopped", f"{name} did not stop")
+        # The environment: a clone of the image, with its settings, recorded as the cherry user.
+        text = self.mcp("create", {"name": env, "image": image}, timeout=600)
+        check(text == f"Created the environment {env} from the image {image}.", f"create answered:\n{text}")
+        vm.run(f"test -d {clone} && test -f {clone}/usr/bin/smoke-hello")
+        check(vm.run(f"cat {clone}.nspawn") == "[Exec]\nEnvironment=SMOKE=1",
+              "the clone did not get the image's settings")
+        record = f"/var/lib/cherry/environments/{env}/environment.conf"
+        check(vm.run(f"stat -c %U {record}") == "cherry" and vm.run(f"cat {record}").startswith(f"Image={image}\n"),
+              f"the environment's record is not the cherry user's, naming its image: {vm.run(f'cat {record}')}")
+        listed = json.loads(self.mcp("list", {}))
+        check([i["name"] for i in listed["images"]] == [image] and listed["images"][0]["environments"] == [env] and
+              [(e["name"], e["image"]) for e in listed["environments"]] == [(env, image)],
+              f"list does not tell the image from its environment:\n{listed}")
+        text = self.mcp("remove_image", {"name": image}, error=True)
+        check("still has environments" in text, f"removing the image under its environment was not refused:\n{text}")
+
+        check(self.mcp("start", {"name": env}, timeout=300) == f"{env} is running", f"{env} did not start")
+        # The agent has no tool to run a command in it; root on the host has (stdin kept open: the pty forwarder
+        # ends at EOF). Its login messages may come first.
+        command = "cat /etc/motd /var/postinst-ran; smoke-hello"
+        text = vm.run(f"sleep 10 | machinectl -q shell {env} /bin/sh -c '{command}' | tr -d '\\r'", timeout=60)
+        check(f"{motd}\npostinst ran\nhello from {env}" in text,
+              f"the environment does not answer as it should:\n{text}")
+        # Its network: host0, configured by the image's networkd with DHCP from the host, as status reads it.
+        status = None
+        for _ in range(20):
+            status = json.loads(self.mcp("status", {"name": env}, timeout=180))
+            if status.get("address"):
+                break
+            vm.run("sleep 3")
+        check(status["kind"] == "environment" and status["image"] == image and status["running"] and status["exists"],
+              f"status does not describe the environment:\n{status}")
+        check(re.match(r"\d+\.\d+\.\d+\.\d+/\d+$", status.get("address") or ""), f"host0 has no address:\n{status}")
+        check(status["system"] in ("running", "degraded", "starting") and
+              "systemd-networkd.service" not in status["failed"], f"systemd in {env} is not up:\n{status}")
+        log(f"{env}: systemd {status['system']}, host0 {status['address']}, failed units {status['failed']}")
+        status = json.loads(self.mcp("status", {"name": image}))
+        check(status["kind"] == "image" and status["profile"] == {"id": "smoke", "title": "Smoke test"} and
+              not status["running"], f"status does not describe the image:\n{status}")
+
+        # OpenChamber's Environments extension: a built-in, listed with its grants and nothing to click, whose
+        # service, started by the first request, answers as the cherry user in cherry.service's sandbox.
+        url = "http://127.0.0.1:3000"
+        guest_id = "openchamber-builtin-cherry-environments"
+        guests = json.loads(vm.run(f"wget -q -O - {url}/api/guests"))["guests"]
+        guest = next((g for g in guests if g["id"] == guest_id), None)
+        check(guest is not None, f"OpenChamber does not list the Environments extension:\n{guests}")
+        check(guest["source"] == "bundled" and guest["enabled"] and guest["service"]["granted"] and
+              "service" in guest["capabilities"]["granted"] and any(c["name"] == "env" for c in guest["commands"]),
+              f"the Environments extension is not a granted built-in with the /env command:\n{guest}")
+        body = json.dumps({"method": "GET", "path": "/environments"})
+        reply = json.loads(vm.run(f"wget -q -O - --header 'Content-Type: application/json' --post-data '{body}' "
+                                  f"{url}/api/guests/{guest_id}/service/request", timeout=120))
+        check(reply.get("status") == 200, f"the Environments service did not answer:\n{reply}")
+        listed = json.loads(reply["body"])
+        check([i["name"] for i in listed["images"]] == [image] and
+              [(e["name"], e["image"], e["running"]) for e in listed["environments"]] == [(env, image, True)] and
+              "smoke" in [p["id"] for p in listed["profiles"]],
+              f"the service lists otherwise than the MCP server:\n{listed}")
+        # (A loop's status is its last iteration's: the last process is not the service.)
+        pids = vm.run("for p in /proc/[0-9]*; do grep -qF cherry-environments/service/main.js $p/cmdline 2>/dev/null "
+                      "&& echo ${p#/proc/}; done; true")
+        check(pids, "the Environments service is not running")
+        for pid in pids.split():
+            check(vm.run(f"stat -c %U /proc/{pid}") == "cherry" and
+                  vm.run(f"readlink /proc/{pid}/exe") == "/usr/bin/bun" and
+                  vm.run(f"awk '/^Seccomp:/ {{ print $2 }}' /proc/{pid}/status") == "2",
+                  f"the Environments service (pid {pid}) does not run as cherry, on Bun, under the system call filter")
+
+        check(self.mcp("stop", {"name": env}, timeout=180) == f"{env} is stopped", f"{env} did not stop")
 
         # Images never leave the machine: cherry-image@ takes no export verb, and writes nothing out.
-        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{name}.service", check_rc=False)
+        rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{image}.service", check_rc=False)
         check(rc != 0 and "denied" not in out.lower() and "authentication" not in out.lower(),
-              f"cherry-image@tar:{name} as cherry did not fail on its instance alone: {out}")
+              f"cherry-image@tar:{image} as cherry did not fail on its instance alone: {out}")
         rc, _ = vm.run("test -e /var/lib/cherry/exports", check_rc=False)
         check(rc != 0, "cherry-image@ wrote an export")
 
-        check(self.mcp("remove", {"name": name}) == f"{name} removed", f"{name} was not removed")
+        # The environment goes with its record, then the image.
+        check(self.mcp("remove", {"name": env}) == f"{env} removed", f"{env} was not removed")
+        rc, _ = vm.run(f"test -e {clone} || test -e {clone}.nspawn || test -e {record}", check_rc=False)
+        check(rc != 0, "the environment, its settings or its record are still there")
+        check(self.mcp("remove_image", {"name": image}) == f"{image} removed", f"{image} was not removed")
         rc, _ = vm.run(f"test -e {root} || test -e {root}.nspawn", check_rc=False)
         check(rc != 0, "the image or its settings are still there")
-        vm.run(f"rm -rf /var/lib/cherry/images/{name}")
+        vm.run(f"rm -rf /var/lib/cherry/images/{image} {profile}")
 
-    def s10_zram(self):
+    def s11_zram(self):
         vm = self.vm
         mem_kb = int(vm.run("awk '/^MemTotal:/ { print $2 }' /proc/meminfo"))
         swaps = vm.run("tail -n +2 /proc/swaps")
@@ -961,20 +1240,20 @@ class Smoke:
               f"zram0 is not the only swap device, as large as the RAM ({mem_kb} kB):\n{swaps}")
         check("[zstd]" in vm.run("cat /sys/block/zram0/comp_algorithm"), "zram does not compress with zstd")
         check(vm.run("cat /proc/sys/vm/page-cluster") == "0", "vm.page-cluster is not 0")
-        # Write 400 MiB of text to a tmpfs from a cgroup limited to 128 MiB: its own shmem pages
-        # have to go to zram, compressed.
+        # Write 400 MiB of text to a tmpfs (/dev/shm: /var is the pool's btrfs) from a cgroup limited to 128 MiB:
+        # its own shmem pages have to go to zram, compressed.
         size = 400 << 20
         data = f"yes cherry-zram | head -c {size}"
-        vm.run(f"systemd-run --wait -q -p MemoryMax=128M sh -c '{data} >/var/tmp/zram-test'", timeout=300)
+        vm.run(f"systemd-run --wait -q -p MemoryMax=128M sh -c '{data} >/dev/shm/zram-test'", timeout=300)
         stats = vm.run("cat /sys/block/zram0/mm_stat").split()
         stored, compressed = int(stats[0]), int(stats[1])
         check(stored >= 200 << 20, f"only {stored} bytes went to zram under memory pressure: {stats}")
         log(f"zram holds {stored >> 20} MiB in {compressed >> 20} MiB")
-        check(vm.run("md5sum </var/tmp/zram-test") == vm.run(f"{data} | md5sum"),
+        check(vm.run("md5sum </dev/shm/zram-test") == vm.run(f"{data} | md5sum"),
               "data that went through zram came back changed")
-        vm.run("rm /var/tmp/zram-test")
+        vm.run("rm /dev/shm/zram-test")
 
-    def s11_no_tpm(self):
+    def s12_no_tpm(self):
         vm = self.vm
         self.boot(tpm_interface=None, banner=NO_TPM_BANNER)
         error = vm.run("cat /run/cherry/identity/error")
@@ -982,8 +1261,8 @@ class Smoke:
         rc, _ = vm.run("test -e /run/cherry/identity/ek-hash", check_rc=False)
         check(rc != 0, "an EK hash without a TPM")
         check(vm.run("systemctl is-active cherry-no-tpm.target") == "active", "cherry-no-tpm.target is not active")
-        rc, states = vm.run("systemctl is-active multi-user.target sshd.service systemd-networkd.service "
-                            "cherry.service machines.target", check_rc=False)
+        rc, states = vm.run("systemctl is-active multi-user.target sshd.service exocarp.socket "
+                            "systemd-networkd.service cherry.service machines.target", check_rc=False)
         check(set(states.split()) == {"inactive"}, f"units started without a TPM:\n{states}")
         failed = vm.run("systemctl --failed --no-legend --plain")
         check(failed == "", f"failed units:\n{failed}")
@@ -997,7 +1276,7 @@ class Smoke:
         with open(path) as f:
             return {v["name"]: bytes.fromhex(v["data"]) for v in json.load(f)["variables"]}
 
-    def s12_secure_boot(self):
+    def s13_secure_boot(self):
         vm = self.vm
         keys = "/usr/share/cherry/secureboot"
         rc, _ = vm.run(f"test -s {keys}/PK.auth", check_rc=False)
@@ -1060,73 +1339,6 @@ class Smoke:
         check(rc != 0, "the enrollment mark was not cleared")
         check(vm.run("systemctl --failed --no-legend --plain") == "", "units failed with Secure Boot on")
 
-    def s13_encrypted_var(self):
-        vm = self.vm
-        # vda has a partition table, so it is in use; vdb is blank. Both are large enough to be claimed.
-        used, blank = os.path.join(self.workdir, "used.img"), os.path.join(self.workdir, "blank.img")
-        run_qemu.make_disk(used, 1 << 30)
-        with open(used, "r+b") as f:
-            f.write(DOS_MBR)
-        run_qemu.make_disk(blank, 4 << 30)
-        used_sha256 = file_sha256(used)
-        disks = [used, blank]
-        journal = "journalctl -b -u cherry-var --no-pager -o cat"
-
-        # The image's PCR policy is signed, with the key it carries.
-        image = os.path.join(self.images, run_qemu.EFI_NAME)
-        p = subprocess.run([sys.executable, pcrsign.__file__, "check", image], capture_output=True, text=True)
-        check(p.returncode == 0, f"the image's PCR policy does not check out: {p.stdout}{p.stderr}")
-        log(p.stdout.strip())
-        _, uki = pcrsign.read_uki(image)
-
-        # The machine makes the blank disk its encrypted /var, sealed by its TPM to the boot state: PCR 7, and PCR
-        # 11 under the image's key, which holds what the policy says once the machine is ready.
-        self.boot(disks=disks)
-        shown = vm.run(journal)
-        log("cherry-var.service:\n" + shown)
-        check("making the blank disk /dev/vdb " in shown, "cherry-var.service did not set up vdb")
-        check("sealing" not in shown, f"a new volume's key was sealed anew:\n{shown}")
-        self.check_var_on_disk("vdb1")
-        luks = vm.run("cryptsetup luksDump /dev/vdb1")
-        check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M), f"no systemd-tpm2 token on /dev/vdb1:\n{luks}")
-        check(len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1, f"not one key slot, the TPM's:\n{luks}")
-        self.check_sealed("vdb1", uki)
-        self.check_pcr11(uki, "sysinit:ready")
-        vm.run("test -s /run/systemd/tpm2-pcr-signature.json && test -s /run/systemd/tpm2-pcr-public-key.pem")
-        vm.run("echo cherry-smoke >/var/cherry-smoke")
-        host_key = vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub")
-        # Powered off, not pulled: /var is unmounted and the volume closed on the way down.
-        vm.send("systemctl poweroff\n")
-        vm.wait_exit(300)
-
-        # The TPM unlocks it at the next boot, its filesystem was left clean, and /var kept its files.
-        self.boot(disks=disks)
-        shown = vm.run(journal)
-        check("/var is on /dev/vdb1, unlocked with the TPM" in shown and "making" not in shown
-              and "sealing" not in shown, f"cherry-var.service did not unlock vdb1 alone:\n{shown}")
-        check("recovering journal" not in shown, f"/var was not unmounted cleanly at the poweroff:\n{shown}")
-        self.check_var_on_disk("vdb1")
-        check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "a file on /var did not survive the reboot")
-        check(vm.run("cat /var/lib/sshd/etc/ssh/ssh_host_ed25519_key.pub") == host_key, "the SSH host key changed")
-
-        # Another machine's TPM cannot: its /var is a tmpfs, and the disk is left as it was.
-        self.boot(tpm="tpm-other", disks=[blank], expect="degraded")
-        check(vm.run("systemctl --failed --no-legend --plain | awk '{ print $1 }'") == "cherry-var.service",
-              "cherry-var.service is not the one failed unit")
-        vm.run(f"{journal} | grep -q 'the TPM cannot unlock /dev/vda1'")
-        check(" - tmpfs " in vm.fstype("/var"), "/var is not a tmpfs on another machine")
-        check(re.search(r"^\s+\d+: systemd-tpm2$", vm.run("cryptsetup luksDump /dev/vda1"), re.M),
-              "the disk changed on another machine")
-        # Erased as the README says, it is blank again: no partition, and nothing wipefs finds.
-        # With --force, wipefs opens the disk without O_EXCL, so it never has the kernel re-read the partition table;
-        # udev does when it sees the disk closed, unless its probe of the wiped vda1 still holds it. The README's
-        # reboot re-reads it; here, wait for udev, then re-read it.
-        vm.run("wipefs --all --force /dev/vda1 /dev/vda && udevadm settle && partprobe /dev/vda")
-        check(vm.run("wipefs --no-act --noheadings /dev/vda; ls -d /sys/class/block/vda/vda* 2>/dev/null; true") == "",
-              "wipefs did not leave the disk blank")
-        vm.stop()
-        check(file_sha256(used) == used_sha256, "the disk with a partition table was written to")
-
     def storage(self, tool, arguments, timeout=300, error=False):
         """A tool of the storage MCP server; for those that change a pool, the pool as it is after, too."""
         text = self.mcp(tool, arguments, timeout=timeout, server="storage", error=error)
@@ -1135,16 +1347,17 @@ class Smoke:
 
     def s14_storage(self):
         vm = self.vm
-        # A blank disk, which becomes /var; two hard disks, one blank and one with a partition table; an SSD with a
-        # partition table too, as cherry-var takes the first blank disk in the kernel's order, nvme0n1 before vda.
-        images = {name: os.path.join(self.workdir, f"storage-{name}.img") for name in ("var", "hdd0", "hdd1", "ssd0")}
-        for name, size in (("var", 4 << 30), ("hdd0", 8 << 30), ("hdd1", 8 << 30), ("ssd0", 2 << 30)):
+        # The machine's disk, with the pool cherry on it; two hard disks, one blank and one with a partition table; an
+        # SSD with a partition table too.
+        images = {name: os.path.join(self.workdir, f"storage-{name}.img") for name in ("hdd0", "hdd1", "ssd0")}
+        for name, size in (("hdd0", 8 << 30), ("hdd1", 8 << 30), ("ssd0", 2 << 30)):
             run_qemu.make_disk(images[name], size)
         for name in ("hdd1", "ssd0"):
             with open(images[name], "r+b") as f:
                 f.write(DOS_MBR)
-        disks, ssds = [images["var"], images["hdd0"], images["hdd1"]], [images["ssd0"]]
+        disks, ssds = [self.var_disk, images["hdd0"], images["hdd1"]], [images["ssd0"]]
         self.boot(disks=disks, ssds=ssds)
+        self.check_var_on_pool("vda1")
         config = vm.run(f"{AS_CHERRY} -p PrivateTmp=yes -E HOME=/tmp opencode debug config")
         check("storage-mcp.js" in config, f"OpenCode's configuration has no storage MCP server:\n{config}")
         vm.run("for s in storage configure-storage manage-storage; do test -s /etc/opencode/skills/$s.md || exit; done")
@@ -1152,8 +1365,9 @@ class Smoke:
         state = json.loads(self.storage("list", {})[0])
         found = {d["name"]: d for d in state["disks"]}
         log("disks: " + ", ".join(f"{d['name']} {d['kind']} {d['size']} {d['state']}" for d in state["disks"]))
-        check(found["vda"]["state"] == "in-use" and "cherry-var" in found["vda"]["reason"]
-              and state["var"]["source"] == "/dev/mapper/cherry-var", f"vda is not /var's disk, in use: {state}")
+        check((found["vda"]["state"], found["vda"]["pool"], found["vda"]["role"]) == ("claimed", "cherry", "data")
+              and state["var"] == {"fstype": "btrfs", "source": "/dev/mapper/cherry-var", "ram": False},
+              f"vda is not the pool cherry's, with /var on it: {state}")
         check((found["vdb"]["state"], found["vdb"]["kind"], found["vdb"]["blank"]) == ("free", "hdd", True),
               f"vdb is not a free, blank hard disk: {found['vdb']}")
         check((found["vdc"]["state"], found["vdc"]["blank"]) == ("free", False) and "dos" in found["vdc"]["signatures"],
@@ -1161,7 +1375,7 @@ class Smoke:
         nvme = found["nvme0n1"]
         check((nvme["state"], nvme["kind"], nvme["blank"]) == ("free", "ssd", False),
               f"nvme0n1 is not a free SSD with a partition table: {nvme}")
-        check(state["pools"] == [], f"pools before any: {state['pools']}")
+        check([p["name"] for p in state["pools"]] == ["cherry"], f"pools before any but cherry: {state['pools']}")
 
         # A disk is claimed only as it was listed.
         text = self.storage("claim", {"disks": [{"name": "vdb", "fingerprint": "000000000000"}]}, error=True)[0]
@@ -1177,10 +1391,28 @@ class Smoke:
             check(re.search(r"^\s+\d+: systemd-tpm2$", luks, re.M)
                   and len(re.findall(r"^\s+\d+: luks2$", luks, re.M)) == 1,
                   f"/dev/{part} is not a LUKS2 volume with the TPM's key alone:\n{luks}")
-        # LVM sees Cherry's physical volumes only: not /var's volume, nor anything else.
+        # LVM sees Cherry's physical volumes only: the pool cherry's and the claimed disks', nothing else.
         pvs = vm.run("pvs --noheadings -o pv_name 2>/dev/null | sort").split()
-        check(pvs == ["/dev/mapper/cherry-pv-nvme0n1p1", "/dev/mapper/cherry-pv-vdb1", "/dev/mapper/cherry-pv-vdc1"],
-              f"LVM's physical volumes: {pvs}")
+        check(pvs == ["/dev/mapper/cherry-pv-nvme0n1p1", "/dev/mapper/cherry-pv-vda1", "/dev/mapper/cherry-pv-vdb1",
+                      "/dev/mapper/cherry-pv-vdc1"], f"LVM's physical volumes: {pvs}")
+
+        # The pool cherry is a pool like any: cached on the SSD, var with it, under /var's files; and the machine's
+        # own: never destroyed, var never removed, its disk never taken out.
+        pool = self.storage("set_cache", {"pool": "cherry", "disks": ["nvme0n1"]})[1]
+        check(pool["cache"]["disks"] == ["nvme0n1"] and pool["volumes"][0]["cache"]
+              and vm.run("lvs --noheadings -o segtype cherry/var").strip() == "cache",
+              f"cherry/var is not cached: {pool}")
+        check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "/var lost a file under the cache")
+        refused = [("destroy_pool", {"name": "cherry"}, "the pool cherry holds /var: it is never destroyed"),
+                   ("remove_volume", {"pool": "cherry", "name": "var"}, "cherry/var is /var: it is never removed"),
+                   ("remove_disk", {"pool": "cherry", "disk": "vda"},
+                    "the last data disk of the pool cherry, which holds /var: it stays")]
+        for tool, args, message in refused:
+            text = self.storage(tool, args, error=True)[0]
+            check(message in text, f"{tool} on the pool cherry was not refused as it should:\n{text}")
+        pool = self.storage("set_cache", {"pool": "cherry", "disks": []})[1]
+        check(pool["cache"] is None and vm.run("lvs --noheadings -o segtype cherry/var").strip() == "linear",
+              f"cherry/var is still cached: {pool}")
 
         # A pool of the hard disks, cached on the SSD; a volume, cached, mounted, the cherry user's.
         pool = self.storage("create_pool", {"name": "tank", "disks": ["vdb", "vdc"], "cache": ["nvme0n1"]})[1]
@@ -1196,10 +1428,10 @@ class Smoke:
 
         def check_volume():
             mount = vm.fstype(mp)
-            dev = vm.run("cat /sys/class/block/$(basename $(readlink -f /dev/tank/data))/dev")
             options = set(mount.split()[5].split(","))
-            check(mount.split()[2] == dev and " - ext4 " in mount and {"nodev", "nosuid"} <= options,
-                  f"{mp} is not tank/data's ext4 ({dev}), nodev and nosuid: {mount}")
+            # The mount's device number is btrfs's own, not the volume's: the source names the volume.
+            check(" - btrfs /dev/mapper/tank-data " in mount and {"nodev", "nosuid"} <= options,
+                  f"{mp} is not tank/data's btrfs, nodev and nosuid: {mount}")
             check(vm.run("lvs --noheadings -o segtype tank/data").strip() == "cache", "tank/data is not cached")
             check(vm.run(f"stat -c %U {mp}") == "cherry", f"{mp} is not the cherry user's")
 
@@ -1222,16 +1454,19 @@ class Smoke:
         check(rc != 0 and ("denied" in out.lower() or "authentication" in out.lower()),
               f"the cherry user may stop cherry-storage.service: {out}")
 
-        # Powered off, which unmounts and closes it all, and booted again: unlocked, activated, checked, mounted.
+        # Powered off, which unmounts and closes it all, and booted again: unlocked, activated, mounted, clean.
         vm.send("systemctl poweroff\n")
         vm.wait_exit(300)
         self.boot(disks=disks, ssds=ssds)
         check(vm.run("systemctl is-active cherry-storage.service") == "active", "cherry-storage.service is not active")
         shown = vm.run("journalctl -b -u cherry-storage --no-pager -o cat")
-        check("recovering journal" not in shown and not re.search(r"cannot|not active|missing disks|errors", shown),
-              f"the volume was not left clean, or not set up:\n{shown}")
+        check(not re.search(r"cannot|not active|missing disks", shown), f"the storage was not set up:\n{shown}")
+        check("tree-log replay" not in vm.run("dmesg | grep BTRFS || true"),
+              "a volume was not unmounted cleanly at the poweroff: the mount replayed a tree log")
         check_volume()
         check(vm.run(f"cat {mp}/hello") == "cherry-storage", "the volume's data did not survive the reboot")
+        self.check_var_on_pool("vda1")
+        check(vm.run("cat /var/cherry-smoke") == "cherry-smoke", "/var's file did not survive the reboot")
 
         # Taken apart: the cache, the volume, the pool; then the disks, given back blank.
         pool = self.storage("set_cache", {"pool": "tank", "disks": []})[1]
@@ -1242,72 +1477,15 @@ class Smoke:
         self.storage("destroy_pool", {"name": "tank"})
         state = json.loads(self.storage("list", {})[0])
         found = {d["name"]: d for d in state["disks"]}
-        check(state["pools"] == [] and all((found[n]["state"], found[n]["pool"]) == ("claimed", None)
-                                           for n in ("vdb", "vdc", "nvme0n1")), f"not claimed, in no pool: {state}")
+        check([p["name"] for p in state["pools"]] == ["cherry"]
+              and all((found[n]["state"], found[n]["pool"]) == ("claimed", None) for n in ("vdb", "vdc", "nvme0n1")),
+              f"not claimed, in no pool: {state}")
         self.storage("release", {"disks": [{"name": n, "fingerprint": found[n]["fingerprint"]}
                                            for n in ("vdb", "vdc", "nvme0n1")]}, timeout=600)
         found = {d["name"]: d for d in json.loads(self.storage("list", {})[0])["disks"]}
         check(all((found[n]["state"], found[n]["blank"]) == ("free", True) for n in ("vdb", "vdc", "nvme0n1")),
               f"the disks were not given back blank: {found}")
-        check("cherry-pv" not in vm.run("ls /dev/mapper"), "a cherry-pv volume is still open")
-        vm.stop()
-
-    def s15_boot_state(self):
-        vm = self.vm
-        blank = os.path.join(self.workdir, "sealed.img")
-        run_qemu.make_disk(blank, 4 << 30)
-        journal = "journalctl -b -u cherry-var --no-pager -o cat"
-        data, uki = pcrsign.read_uki(os.path.join(self.images, run_qemu.EFI_NAME))
-        tmp = os.path.join(self.workdir, "boot-state")
-        os.makedirs(tmp)
-
-        # /var on a disk sealed to the image's policy, as in 13.
-        self.boot(disks=[blank])
-        self.check_var_on_disk("vda1")
-        self.check_sealed("vda1", uki)
-        vm.run("echo boot-state >/var/cherry-smoke")
-        vm.send("systemctl poweroff\n")
-        vm.wait_exit(300)
-
-        # The same image with one byte of its command line changed, which is measured, and the image signed anew
-        # with another PCR key, which the disk's token does not name: the TPM unlocks the disk under neither.
-        tampered = bytearray(data)
-        cmdline = bytes(uki[".cmdline"])
-        check(b"panic=10" in cmdline, f"no panic=10 on the command line to change: {cmdline}")
-        tampered[pcrsign.pe_sections(data)[".cmdline"].offset + cmdline.index(b"panic=10") + 7] = ord("1")
-        key = os.path.join(tmp, "other.key")
-        subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key],
-                       check=True, capture_output=True)
-        resigned = bytearray(data)
-        pcrsign.write_pcrsig(resigned, json.dumps(pcrsign.entries(uki, pcrsign.public_key(key), key)))
-        for name, image in (("tampered", tampered), ("resigned", resigned)):
-            images = os.path.join(tmp, name)
-            os.makedirs(images)
-            with open(os.path.join(images, run_qemu.EFI_NAME), "wb") as f:
-                f.write(image)
-            server = run_qemu.serve(images)
-            try:
-                self.boot(disks=[blank], server=server, expect="degraded")
-            finally:
-                server.shutdown()
-            check(vm.run("systemctl --failed --no-legend --plain | awk '{ print $1 }'") == "cherry-var.service",
-                  f"{name}: cherry-var.service is not the one failed unit")
-            shown = vm.run(journal)
-            check("the TPM cannot unlock /dev/vda1" in shown, f"{name}: cherry-var.service reported:\n{shown}")
-            check(" - tmpfs " in vm.fstype("/var"), f"{name}: /var is not a tmpfs")
-            if name == "tampered":
-                check("panic=11" in vm.run("cat /proc/cmdline"), "the changed command line was not booted")
-                _, tampered_uki = pcrsign.read_uki(os.path.join(images, run_qemu.EFI_NAME))
-                self.check_pcr11(tampered_uki, "sysinit:ready")
-            else:
-                self.check_pcr11(uki, "sysinit:ready")
-            log(f"{name}: the TPM did not unlock the disk")
-
-        # Under the image itself, it does, and the files are there. Then the disk is blank again.
-        self.boot(disks=[blank])
-        self.check_var_on_disk("vda1")
-        check(vm.run("cat /var/cherry-smoke") == "boot-state", "a file on /var did not survive")
-        vm.run("wipefs --all --force /dev/vda1 /dev/vda && udevadm settle && partprobe /dev/vda")
+        check(vm.run("ls /dev/mapper | grep cherry-pv") == "cherry-pv-vda1", "a released disk's volume is still open")
         vm.stop()
 
     def run(self):

@@ -11,8 +11,8 @@ User=cherry
 Group=cherry
 # Its home: OpenChamber keeps its data in .config/openchamber under it, and so
 # does the OpenCode it runs. The agent works in work/ unless a project picks
-# another directory. Without the machine's disk, /var is a tmpfs, so all of it
-# is new at every boot.
+# another directory. Until the pool cherry has disks, /var is in RAM, so all
+# of it is new at every boot (README: Disks).
 StateDirectory=cherry cherry/work
 Environment=HOME=/var/lib/cherry
 WorkingDirectory=/var/lib/cherry/work

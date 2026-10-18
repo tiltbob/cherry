@@ -7,7 +7,9 @@
 // Tools: list, claim, release, create_pool, add_disks, set_cache, remove_disk,
 // destroy_pool, create_volume, resize_volume, remove_volume. Each runs
 // cherry-storage@<verb>:<arguments>.service, and those that change something
-// return its log's end and what the pool is now. $CHERRY_STORAGE_LOGS and
+// return its log's end and what the pool is now. The pool cherry is the
+// machine's own, there from boot, and its volume var is /var: create_pool on
+// it is an extend, which moves /var from RAM onto the disks. $CHERRY_STORAGE_LOGS and
 // $CHERRY_VOLUMES replace /var/log/cherry-storage and /var/lib/cherry/volumes
 // (tests/storage-mcp.js). The protocol is mcp-stdio.js's, next to it.
 "use strict";
@@ -19,8 +21,10 @@ const LOGS = process.env.CHERRY_STORAGE_LOGS || "/var/log/cherry-storage";
 const VOLUMES = process.env.CHERRY_VOLUMES || "/var/lib/cherry/volumes";
 const INSTRUCTIONS = `These tools manage this Cherry machine's storage with LVM: they list its disks, claim \
 disks (which erases them) for Cherry, make storage pools of claimed disks, hard disks or SSDs, with SSDs as \
-the pool's cache, and volumes in the pools, which are mounted for you under ${VOLUMES}. Load the storage skill \
-before changing anything, then configure-storage to set the machine's storage up, or manage-storage to change it.`;
+the pool's cache, and volumes in the pools, which are mounted for you under ${VOLUMES}. The pool cherry is the \
+machine's own and its volume var is /var, in RAM until the pool has disks: giving it disks (create_pool with \
+the name cherry) makes /var persistent. Load the storage skill before changing anything, then \
+configure-storage to set the machine's storage up, or manage-storage to change it.`;
 
 // As cherry-storage checks them.
 const NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,31}$/;
@@ -32,7 +36,6 @@ const MODES = ["writethrough", "writeback"];
 function name(kind, value) {
   check(typeof value === "string" && NAME.test(value),
     `bad ${kind} name ${JSON.stringify(value)}: up to 32 letters, digits and '-', starting with a letter or digit`);
-  check(kind !== "pool" || value !== "cherry", "bad pool name \"cherry\": it is Cherry's own");
   return value;
 }
 
@@ -72,7 +75,9 @@ const tags = (s) => (s ? s.split(",") : []);
 const sum = (items, key) => items.reduce((n, item) => n + Number(item[key]), 0);
 
 // What cherry-storage@list found, as the agent reads it: the disks, which
-// claim may take and why not, and the pools with their disks and volumes.
+// claim may take and why not, and the pools with their disks and volumes; the
+// pool cherry with its volume var, which is /var, and in RAM while its data is
+// a zram device, tagged ram.
 function view(facts) {
   const pvs = report(facts.pvs, "pv");
   const lvs = report(facts.lvs, "lv");
@@ -103,11 +108,14 @@ function view(facts) {
     const mine = pvs.filter((p) => p.vg_name === vg.vg_name);
     const data = mine.filter((p) => tags(p.pv_tags).includes("data"));
     const cache = mine.filter((p) => tags(p.pv_tags).includes("cache"));
+    // The zram device of the pool cherry in RAM: its size is the pool's, and it is no disk.
+    const ram = mine.filter((p) => tags(p.pv_tags).includes("ram"));
     const names = (list) => list.map((p) => diskOf.get(p.pv_name) ?? p.pv_name);
     const volumes = lvs.filter((lv) => lv.vg_name === vg.vg_name && !/[_[]/.test(lv.lv_name)).map((lv) => {
-      const mountpoint = path.join(VOLUMES, vg.vg_name, lv.lv_name);
+      const isVar = vg.vg_name === "cherry" && lv.lv_name === "var";
+      const mountpoint = isVar ? "/var" : path.join(VOLUMES, vg.vg_name, lv.lv_name);
       const mounted = mounts.get(mountpoint);
-      const cvol = lvs.find((c) => c.vg_name === vg.vg_name && c.lv_name === `[${lv.lv_name}_cache_cvol]`);
+      const cvol = lvs.find((c) => c.vg_name === vg.vg_name && c.lv_name === `[${lv.lv_name}_cache_cpool]`);
       return {
         name: lv.lv_name, size: human(Number(lv.lv_size)), path: mountpoint, mounted: Boolean(mounted),
         ...(mounted && { used: human(mounted.used), available: human(mounted.available) }),
@@ -115,11 +123,13 @@ function view(facts) {
       };
     });
     const pool = {
-      name: vg.vg_name, disks: names(data), size: human(sum(data, "pv_size")), free: human(sum(data, "pv_free")),
+      name: vg.vg_name, disks: names(data), size: human(sum([...data, ...ram], "pv_size")),
+      free: human(sum([...data, ...ram], "pv_free")),
       cache: cache.length ? { disks: names(cache), size: human(sum(cache, "pv_size")),
         mode: tags(vg.vg_tags).includes("writeback") ? "writeback" : "writethrough" } : null,
       volumes,
     };
+    if (ram.length) pool.ram = true;
     if (Number(vg.vg_missing_pv_count) > 0) pool.missing_disks = Number(vg.vg_missing_pv_count);
     return pool;
   });
@@ -178,10 +188,11 @@ const TOOLS = [
     description: "List this machine's disks and storage pools. Each disk: its kernel name, size, kind (ssd or hdd, " +
       "as the kernel reports it), model, serial, and state: free (claim may take it; blank, or what is on it), " +
       "claimed (Cherry's: in a pool, as data or cache, or not yet), locked (another machine's claimed disk, or " +
-      "this one's before its TPM was cleared: claim may take it), in-use (mounted, swap, held, or this machine's " +
-      "/var), unsuitable (removable, read-only, USB, under 1 GiB); and its fingerprint, which claim and release " +
-      "take. Each pool: its data disks, size and free space, its cache, and its volumes, where they are mounted and " +
-      "how full. Also whether /var, where containers live, is on a disk or in RAM.",
+      "this one's before its TPM was cleared: claim may take it), in-use (mounted, swap, held), unsuitable " +
+      "(removable, read-only, USB, under 1 GiB); and its fingerprint, which claim and release take. Each pool: " +
+      "its data disks, size and free space, its cache, and its volumes, where they are mounted and how full. The " +
+      "pool cherry is the machine's own: its volume var is /var, where containers, images and your home live, and " +
+      "the pool is in RAM (ram: true, as is var) until it has disks, 128 MiB where nothing lasts past a reboot.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true },
     async call(args, signal) {
@@ -213,7 +224,9 @@ const TOOLS = [
     name: "create_pool",
     description: "Make a storage pool, an LVM volume group, of claimed disks that are in no pool: the data disks, " +
       "which hold the volumes (their sizes add up; no redundancy), and optionally cache disks, SSDs that cache " +
-      "every volume of the pool (dm-cache).",
+      "every volume of the pool (dm-cache). With the name cherry, the machine's own pool, which is there from " +
+      "boot and holds /var: the disks become its data disks and /var moves onto them at once, live, with nothing " +
+      "stopped; then grow its volume var with resize_volume.",
     inputSchema: {
       type: "object",
       properties: {
@@ -234,7 +247,9 @@ const TOOLS = [
       check(args.cache_mode === undefined || (MODES.includes(args.cache_mode) && cache.length),
         "cache_mode is writethrough or writeback, for a pool with cache disks");
       check(!cache.some((d) => data.includes(d)), "a disk cannot be both data and cache");
-      const logs = [await storage(`create:${pool}:${data.join(":")}`, signal)];
+      // The pool cherry is there from boot: its disks are an extend, which moves /var onto them.
+      const verb = pool === "cherry" ? "extend" : "create";
+      const logs = [await storage(`${verb}:${pool}:${data.join(":")}`, signal)];
       if (cache.length) logs.push(await storage(`cache:${pool}:${args.cache_mode ?? "writethrough"}:${cache.join(":")}`, signal));
       return changed(logs.join("\n\n"), pool, signal);
     },
@@ -242,7 +257,8 @@ const TOOLS = [
   {
     name: "add_disks",
     description: "Add claimed disks that are in no pool to a pool's data disks: the pool grows by their size. " +
-      "For cache disks, use set_cache.",
+      "For cache disks, use set_cache. For the pool cherry while it is in RAM, its first disks: /var moves onto " +
+      "them, as with create_pool.",
     inputSchema: { type: "object", properties: { pool: POOL, disks: DISKS }, required: ["pool", "disks"],
       additionalProperties: false },
     async call(args, signal) {
@@ -278,7 +294,8 @@ const TOOLS = [
     name: "remove_disk",
     description: "Take a disk out of a pool; it stays claimed. A data disk's data is moved to the pool's other data " +
       "disks first (pvmove: as long as copying it takes), which must have room for it; the volumes' caches are " +
-      "detached meanwhile. A cache disk: as set_cache without it. Not the pool's last data disk.",
+      "detached meanwhile. A cache disk: as set_cache without it. Not the pool's last data disk, and never the " +
+      "pool cherry's, which holds /var.",
     inputSchema: { type: "object", properties: { pool: POOL, disk: { type: "string", description: "Its kernel name" } },
       required: ["pool", "disk"], additionalProperties: false },
     async call(args, signal) {
@@ -288,7 +305,8 @@ const TOOLS = [
   },
   {
     name: "destroy_pool",
-    description: "Destroy a pool that has no volumes left (remove them first): its disks stay claimed, in no pool.",
+    description: "Destroy a pool that has no volumes left (remove them first): its disks stay claimed, in no pool. " +
+      "Never the pool cherry, which holds /var.",
     inputSchema: { type: "object", properties: { name: POOL }, required: ["name"], additionalProperties: false },
     annotations: { destructiveHint: true },
     async call(args, signal) {
@@ -298,7 +316,7 @@ const TOOLS = [
   {
     name: "create_volume",
     description: "Make a volume in a pool: an LVM logical volume on its data disks, cached on its cache disks if it " +
-      `has any, holding ext4 that you own, mounted on ${VOLUMES}/<pool>/<name> now and at every boot.`,
+      `has any, holding btrfs that you own, mounted on ${VOLUMES}/<pool>/<name> now and at every boot.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -318,7 +336,7 @@ const TOOLS = [
   {
     name: "resize_volume",
     description: "Grow a volume, and its filesystem, while mounted: to this size, or by all of the pool's free " +
-      "space. Volumes do not shrink.",
+      "space. Volumes do not shrink. cherry/var is /var: growing it grows /var, which starts at 128 MiB.",
     inputSchema: {
       type: "object",
       properties: { pool: POOL, name: { type: "string", description: "The volume's name" }, size: SIZE_ARG },
@@ -333,7 +351,8 @@ const TOOLS = [
   },
   {
     name: "remove_volume",
-    description: "Remove a volume and ALL ITS DATA: unmounted (nothing may be using it), then deleted.",
+    description: "Remove a volume and ALL ITS DATA: unmounted (nothing may be using it), then deleted. Never " +
+      "cherry/var, which is /var.",
     inputSchema: { type: "object", properties: { pool: POOL, name: { type: "string", description: "The volume's name" } },
       required: ["pool", "name"], additionalProperties: false },
     annotations: { destructiveHint: true },

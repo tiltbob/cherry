@@ -14,8 +14,8 @@
 #   extra/        a tree copied onto the image's root, owned by root
 #   postinst      a script run last in the image, as its root
 #   image.nspawn  the image's settings, as /var/lib/machines/<name>.nspawn
-# cherry-bootstrap creates the image under /var/lib/machines/.cherry-image/,
-# then cherry-image-setup runs in it, under systemd-nspawn with a user
+# cherry-bootstrap creates the image under /var/lib/machines/.cherry-image/
+# (on btrfs, a subvolume), then cherry-image-setup runs in it, under systemd-nspawn with a user
 # namespace: it installs the packages, copies extra/, runs postinst, empties
 # /etc/machine-id and clears the package caches. The finished image takes its
 # name in /var/lib/machines; a failed build leaves nothing behind.

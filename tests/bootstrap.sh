@@ -4,7 +4,9 @@
 # and systemctl on PATH, LOGS_DIRECTORY in a temporary directory, and the
 # machines directory redirected there (CHERRY_MACHINES_DIR). Each stand-in
 # prints its name and arguments (into the bootstrap log), records the call,
-# creates the tree it is given, and fails when FAKE_FAIL names it.
+# creates the tree it is given, and fails when FAKE_FAIL names it. A stand-in
+# stat answers -f, the filesystem of the machines directory, with FAKE_FSTYPE
+# (tmpfs unless set), and a stand-in btrfs makes the subvolume it is asked.
 set -eu
 cd "$(dirname "$0")/.."
 script=$PWD/package/cherry/cherry-bootstrap
@@ -35,7 +37,18 @@ for arg; do
 done
 exec /bin/rm "$@"
 EOF
-chmod +x "$tmp/bin/rm"
+cat >"$tmp/bin/stat" <<'EOF'
+#!/bin/sh
+[ "$1" = -f ] || exec /usr/bin/stat "$@"
+echo "${FAKE_FSTYPE:-tmpfs}"
+EOF
+cat >"$tmp/bin/btrfs" <<'EOF'
+#!/bin/sh
+echo "btrfs $*"
+echo "btrfs $*" >>"$CALLS"
+[ "$1 $2" != "subvolume create" ] || mkdir "$3"
+EOF
+chmod +x "$tmp/bin/rm" "$tmp/bin/stat" "$tmp/bin/btrfs"
 
 n=0
 die() {
@@ -97,6 +110,12 @@ unset FAKE_FAIL
 [ ! -e "$machines/gone" ] || die "a failing debootstrap left its tree behind"
 grep -q "failing as told" "$LOGS_DIRECTORY/debian:trixie:gone.log" || die "the failing tool's output is not in the log"
 
+run 'ubuntu:noble:u1'
+[ "$rc" -eq 0 ] || die "ubuntu:noble:u1 failed: $out"
+expected="debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus --keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg noble $machines/u1 http://archive.ubuntu.com/ubuntu"
+[ "$(cat "$CALLS")" = "$expected" ] || die "ubuntu:noble:u1 called: $(cat "$CALLS")"
+[ -d "$machines/u1" ] || die "ubuntu:noble:u1 left no tree"
+
 run 'fedora:44:f1'
 [ "$rc" -eq 0 ] || die "fedora:44:f1 failed: $out"
 [ "$(cat "$CALLS")" = "rpmstrap fedora 44 $machines/f1" ] || die "fedora:44:f1 called: $(cat "$CALLS")"
@@ -125,5 +144,20 @@ debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie $machin
 [ "$out" = "$expected" ] || die "without LOGS_DIRECTORY, unexpected output: $out"
 [ ! -e "$LOGS_DIRECTORY/debian:trixie:quiet.log" ] || die "without LOGS_DIRECTORY, a log was written"
 [ -d "$machines/quiet" ] || die "without LOGS_DIRECTORY, no tree"
+
+# On btrfs, the tree is a subvolume, made before the tool fills it, and a
+# failing tool leaves none behind.
+export FAKE_FSTYPE=btrfs
+run 'debian:trixie:cow'
+[ "$rc" -eq 0 ] || die "debian:trixie:cow failed: $out"
+expected="btrfs subvolume create $machines/cow
+debootstrap --variant=minbase --include=systemd,systemd-sysv,dbus trixie $machines/cow"
+[ "$(cat "$CALLS")" = "$expected" ] || die "debian:trixie:cow called: $(cat "$CALLS")"
+[ -d "$machines/cow" ] || die "debian:trixie:cow left no tree"
+export FAKE_FAIL=rpmstrap
+run 'fedora:44:lost'
+unset FAKE_FAIL FAKE_FSTYPE
+[ "$rc" -ne 0 ] || die "a failing rpmstrap on btrfs was reported as success"
+[ ! -e "$machines/lost" ] || die "a failing rpmstrap left its subvolume behind"
 
 echo "bootstrap: $n cases passed"

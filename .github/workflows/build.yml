@@ -7,9 +7,9 @@ name: build
 # release is built from its tag, and gets the image as an asset (the release
 # job below); so does a run by hand on main given a release name, v<version>,
 # which creates the release and its tag on the commit it built. Once the
-# repository has a PCR key and Secure Boot keys (board/x86_64/secureboot/),
-# the release job signs the image's PCR policy and the image first. SDK
-# releases, tagged sdk-*, are sdk.yml's and skip this.
+# repository has Secure Boot keys (board/x86_64/secureboot/), the release job
+# signs the image first. SDK releases, tagged sdk-*, are sdk.yml's and skip
+# this.
 on:
   push:
     branches: [main]
@@ -26,19 +26,20 @@ on:
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
       - 'tests/ceremony.sh'
+      - 'tests/exocarp.py'
+      - 'tests/extension.js'
       - 'tests/firewall.sh'
       - 'tests/image.sh'
+      - 'tests/machines-standins.js'
       - 'tests/mcp.js'
       - 'tests/storage-mcp.js'
       - 'tests/storage.py'
-      - 'tests/pcrsign.py'
       - 'tests/polkit.js'
       - 'tests/postbuild.sh'
       - 'tests/scenarios.py'
       - 'tests/secureboot.sh'
       - 'tests/syntax.sh'
       - 'tests/units.sh'
-      - 'tests/var.sh'
       - 'tests/version.sh'
       - '.shellcheckrc'
   pull_request:
@@ -100,7 +101,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(mcp\.js|storage-mcp\.js|polkit\.js|pcrsign\.py|scenarios\.py|storage\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(extension\.js|machines-standins\.js|mcp\.js|storage-mcp\.js|polkit\.js|scenarios\.py|storage\.py|exocarp\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -134,7 +135,10 @@ jobs:
       # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit and
       # MCP tests node, which the runner has; the firewall and cherry-image
       # tests busybox and user namespaces, which Ubuntu's AppArmor keeps from
-      # unprivileged users unless told otherwise, and the firewall test nft.
+      # unprivileged users unless told otherwise, and the firewall test nft;
+      # the host key agent's test a C compiler, which the runner has, tpm2-tss's
+      # development files, swtpm, tpm2-tools and sshd, with the ssh client the
+      # runner has.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -143,7 +147,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static softhsm2 opensc
+            nftables busybox-static softhsm2 opensc \
+            libtss2-dev swtpm tpm2-tools openssh-server
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
@@ -292,19 +297,12 @@ jobs:
       - name: Smoke test
         run: make test
 
-      # For a release, the release image too: the one with the release PCR key,
-      # whose policy the release job signs (board/x86_64/post-image.sh).
       - name: Collect artifacts
         if: always()
-        env:
-          RELEASE: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}
         run: |
           mkdir -p artifacts
           cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
           cp output/cherry_x86_64/test/serial.log artifacts/ || true
-          if [ -n "$RELEASE" ]; then
-            cp output/cherry_x86_64/images/cherry-x86_64-release.efi artifacts/ || true
-          fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -317,9 +315,8 @@ jobs:
   # the build and the smoke test passed: a published release was built from
   # its tag and gets the files; a run by hand given a release name creates the
   # release, and its tag on this commit, with them. Only this job may write to
-  # the repository, and only this job sees the release signing key and the PCR
-  # key: secrets of the release environment, which should admit main and the
-  # v* tags only.
+  # the repository, and only this job sees the release signing key: a secret
+  # of the release environment, which should admit main and the v* tags only.
   release:
     needs: build
     if: success() && (github.event_name == 'release' || inputs.release != '')
@@ -328,60 +325,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The keys and the signing script only, and no token in the git
-      # configuration: the release goes out through gh, with GH_TOKEN, and
-      # nothing here pushes.
+      # The keys only, and no token in the git configuration: the release
+      # goes out through gh, with GH_TOKEN, and nothing here pushes.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: |
-            board/x86_64/secureboot
-            scripts
+          sparse-checkout: board/x86_64/secureboot
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cherry-x86_64
           path: artifacts
-
-      # The release image carries the release PCR key, pcr.pem, and the
-      # digests of its PCR 11 policy, unsigned (board/x86_64/post-image.sh):
-      # signed here with the key's private half (PCR_KEY, from
-      # scripts/secureboot.py pcr), it unlocks the disks every release sealed,
-      # and the image the smoke test ran, signed with the build's own key, is
-      # left behind. Before the repository has the key, the tested image goes
-      # out as it is, and unlocks only the disks it sealed itself; once it has,
-      # a missing or wrong key fails the release.
-      - name: Sign the PCR policy
-        id: pcr
-        env:
-          PCR_KEY: ${{ secrets.PCR_KEY }}
-        run: |
-          keys=board/x86_64/secureboot
-          if [ ! -e "$keys/pcr.pem" ]; then
-            echo "::warning::no PCR key in $keys yet (scripts/secureboot.py pcr): the image unlocks only the disks it seals itself"
-            exit 0
-          fi
-          if [ ! -e artifacts/cherry-x86_64-release.efi ]; then
-            echo "::error::the build left no cherry-x86_64-release.efi to sign (board/x86_64/post-image.sh)"
-            exit 1
-          fi
-          if [ -z "$PCR_KEY" ]; then
-            echo "::error::$keys has pcr.pem but the release environment no PCR_KEY (scripts/secureboot.py pcr)"
-            exit 1
-          fi
-          key=$RUNNER_TEMP/pcr.key
-          (umask 077 && printf '%s\n' "$PCR_KEY" >"$key")
-          if [ "$(openssl pkey -in "$key" -pubout)" != "$(cat "$keys/pcr.pem")" ]; then
-            rm -f "$key"
-            echo "::error::PCR_KEY is not the key of $keys/pcr.pem"
-            exit 1
-          fi
-          python3 scripts/pcrsign.py sign --key "$key" --output "$RUNNER_TEMP/cherry-x86_64.efi" artifacts/cherry-x86_64-release.efi
-          rm -f "$key"
-          python3 scripts/pcrsign.py check "$RUNNER_TEMP/cherry-x86_64.efi"
-          mv "$RUNNER_TEMP/cherry-x86_64.efi" artifacts/cherry-x86_64.efi
-          rm -f artifacts/cherry-x86_64-release.efi
-          echo "signed=yes" >>"$GITHUB_OUTPUT"
 
       # Signed with the release key (SECUREBOOT_KEY, from scripts/secureboot.py
       # issue), whose certificate release.crt the Cherry Secure Boot CA on the
@@ -426,7 +380,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release }}
           SIGNED: ${{ steps.sign.outputs.signed }}
-          PCR_SIGNED: ${{ steps.pcr.outputs.signed }}
         run: |
           cd artifacts
           sha256sum cherry-x86_64.efi | tee cherry-x86_64.efi.sha256
@@ -440,10 +393,6 @@ jobs:
               echo
               if [ -n "$SIGNED" ]; then
                 echo "Signed for Secure Boot by $SIGNED, whose certificate the Cherry Secure Boot CA issued. A machine in Secure Boot setup mode that boots it enrolls Cherry's keys (the README's Secure Boot section)."
-                echo
-              fi
-              if [ -n "$PCR_SIGNED" ]; then
-                echo "Its PCR 11 policy is signed with Cherry's PCR key: it unlocks the disks any release sealed, and they unlock under nothing else (the README's Disks section)."
                 echo
               fi
               echo '```'

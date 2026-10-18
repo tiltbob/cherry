@@ -1,0 +1,23 @@
+config BR2_PACKAGE_EXOCARP
+	bool "exocarp"
+	depends on !BR2_STATIC_LIBS # tpm2-tss
+	depends on BR2_PACKAGE_OPENSSH # sshd, whose host key agent it is
+	select BR2_PACKAGE_OPENSSL
+	select BR2_PACKAGE_TPM2_TSS
+	help
+	  Cherry's SSH host key agent: sshd's host key is a key of the
+	  machine's TPM, which signs with it, so the private key never
+	  leaves the TPM. The key is the TPM's primary ECC NIST P-256
+	  signing key under its endorsement hierarchy, from a fixed
+	  template, so the TPM derives the same key at every boot, from
+	  the endorsement seed that also gives the machine its identity:
+	  nothing is stored, and a machine without a disk keeps its host
+	  key across boots too.
+
+	  exocarp.socket writes the public key to /run/exocarp at boot
+	  and exocarp.service answers sshd's signing requests on
+	  /run/exocarp/socket, in the ssh-agent protocol (sshd's
+	  HostKeyAgent); its sshd.service drop-in points sshd at both.
+
+comment "exocarp needs a toolchain w/ dynamic library"
+	depends on BR2_STATIC_LIBS

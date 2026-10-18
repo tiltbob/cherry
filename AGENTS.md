@@ -5,7 +5,8 @@ over UEFI HTTP boot, with just enough OS to run systemd-nspawn containers, and
 an AI agent (OpenCode, behind OpenChamber) on every machine to run them. This
 file is for agents and people changing the repository: how it is put together,
 what a change must keep, how to verify one, and how it gets in. What Cherry
-does is in [README.md](README.md); this file doesn't repeat it.
+does is in [README.md](README.md); this file doesn't repeat it. Claude Code
+reads it through `CLAUDE.md`, which only imports it.
 
 ## Read first
 
@@ -22,8 +23,6 @@ does is in [README.md](README.md); this file doesn't repeat it.
    every trusted key is baked in at build time; systemd's own mechanisms over
    daemons of Cherry's own), the decisions, and what was dropped. Don't reopen
    a decision in a pull request; raise it on the issue.
-3. **[CLAUDE.md](CLAUDE.md):** every commit, pull request, comment and issue
-   names the session that wrote it, with a `Claude-Session:` trailer.
 
 ## The repository
 
@@ -37,10 +36,10 @@ checks it out).
 | `external.mk`, `external.desc`, `Config.in` | the tree's glue: `external.mk` includes every `package/*/*.mk` and adjusts options of Buildroot's own packages; `Config.in` has one `source` line per package, sorted |
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
-| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the `/var` and no-TPM scripts); `secureboot/` (the public half of the Secure Boot keys and of the PCR key) |
-| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
+| `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys) |
+| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
-| `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`, `pcrsign.py`; each one's docstring is its manual |
+| `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`; each one's docstring is its manual |
 | `tests/` | the checks that `make check` runs, one file each, and `smoke.py`, the end-to-end test in QEMU |
 | `.github/workflows/` | `build.yml` (checks, build, smoke test, image releases) and `sdk.yml` (toolchain releases) |
 | `output/`, `dl/`, `.ccache/` | build output, downloads and ccache: ignored, never committed |
@@ -51,18 +50,25 @@ is, what runs it and what it needs. Read that before the code.
 ## What a change must keep
 
 - **One image, identical on every machine.** Nothing machine-specific is
-  built in. A machine takes what it finds: its TPM, its first blank disk,
-  firmware in Secure Boot setup mode. No central config, no enrollment, and
-  no control plane beyond HTTP and DHCP.
+  built in. A machine takes what it finds: its TPM, firmware in Secure Boot
+  setup mode. Its disks, only the agent claims, with the user's yes: nothing
+  touches a disk at boot. No central config, no enrollment, and no control
+  plane beyond HTTP and DHCP.
 - **The root is read-only, `/etc` included.** Users and groups are created
   at build time with Buildroot's `<PKG>_USERS`; nothing can add one at boot.
   Whatever a service writes goes under `/var` (`StateDirectory=`,
   `LogsDirectory=`); `/root` is a symlink into `/var`; files the image
-  carries under `/var` are factory defaults, copied in at boot.
+  carries under `/var` are factory defaults, copied in at boot. `/var` is
+  the pool `cherry`'s volume `var`, 128 MiB in RAM until the agent gives the
+  pool disks: nothing that runs before that may need more.
 - **Everything is in RAM.** The README records the sizes (Memory, OpenCode,
   OpenChamber); update them when a change moves them, and leave out what a
   container host doesn't need. `post-image.sh` prints the UKI's size.
-- **The `cherry` user is the agent, and it is unprivileged.** Its only
+- **The `cherry` user is the agent, and it is unprivileged.** The agent's
+  tools are the MCP servers' verbs alone: `/etc/opencode/opencode.json`
+  denies OpenCode's own (a shell, files, the web), and the `machines` verbs
+  take a name and a profile a person wrote, or a name and an image to clone,
+  never a package list, a file or a script. The user's only
   privileges are `package/cherry/50-cherry.rules` (machined's verbs on
   containers, and starting `systemd-nspawn@`, `cherry-bootstrap@`,
   `cherry-image@` and `cherry-storage@` units) and what those three template
@@ -76,16 +82,9 @@ is, what runs it and what it needs. Read that before the code.
   `io.systemd.nat`. What comes in is the README's list, and nothing more:
   `tests/firewall.sh` and the smoke test pin it.
 - **A TPM 2.0 is mandatory.** The machine ID and hostname come from its
-  endorsement key, in `/init`, before systemd starts. Without one, boot stops
-  at `cherry-no-tpm.target`.
-- **The disks' keys are sealed to the boot state:** PCR 7, and PCR 11 under
-  the image's signed policy (`scripts/pcrsign.py`, which `post-image.sh` signs
-  it with; `cherry-pit` hands the signature and key to `/run/systemd`). Every
-  path that seals or unlocks a key, in `usr/lib/cherry/var` and
-  `cherry-storage`, passes that policy, and reseals a key sealed another way;
-  smoke scenario 15 proves that a changed or re-signed image unlocks nothing.
-  A release is signed with the repository's PCR key, in the release job, so
-  that an update still unlocks the disks.
+  endorsement key, in `/init`, before systemd starts, and sshd's host key is
+  its primary key, which `exocarp` signs with: no host key is stored. Without
+  one, boot stops at `cherry-no-tpm.target`.
 - **The Secure Boot keys are real.** `board/x86_64/secureboot/` is the
   committed public half of keys that live on a Nitrokey HSM 2 and in the
   `release` environment's secret. Never regenerate, edit or "fix" them;
@@ -129,25 +128,25 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `polkit` | `50-cherry.rules` allows the `cherry` user what the README says, nothing more | node |
 | `bootstrap` | `cherry-bootstrap` checks its instance and calls the tools right, with stand-ins | |
 | `image` | `cherry-image` builds from a recipe, in a busybox root under `unshare -r` | static busybox, user namespaces |
-| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl and busctl; the `storage` one, against a stand-in systemctl | node |
+| `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl, busctl and ip; the `storage` one, against a stand-in systemctl | node |
+| `extension` | OpenChamber's Environments extension: its manifest, as the host inspects a package, and its service, against the `machines` stand-ins | node |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should | openssl |
 | `ceremony` | `scripts/secureboot.py init` and `issue`, on a SoftHSM token | softhsm2, opensc |
-| `var` | `cherry-var.service` claims only a blank disk, unlocks the right partition, and seals its key to the boot state | |
-| `storage` | `cherry-storage` claims only the disks it may, and drives LVM as it should, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
-| `pcrsign` | `scripts/pcrsign.py` measures, signs and checks a UKI's PCR 11 policy as systemd does: on PE binaries the test makes, against systemd's vectors | openssl |
+| `storage` | `cherry-storage` claims only the disks it may, drives LVM as it should, and gives `/var` the pool `cherry`, in RAM at boot and moved onto its disks by `extend`, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
+| `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
-`image`, `firewall`, `ceremony`); `package`, `flake8` and `syntax` fail
-without theirs. CI installs all of them (`build.yml`, "Install check tools").
-An agent sandbox usually has python3, node, make, git, systemd and openssl,
-and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the submodule: then
-`make -k check` runs twelve checks, skips three and fails three for want of
-tools. Get the submodule with `git submodule update --init --depth 1
-buildroot` and install what you can; in the pull request, say which checks
-ran.
+`extension`, `image`, `firewall`, `ceremony`, `exocarp`); `package`, `flake8`
+and `syntax` fail without theirs. CI installs all of them (`build.yml`,
+"Install check tools"). An agent sandbox usually has python3, node, make,
+git, systemd and openssl, and lacks shellcheck, busybox, `ip`, softhsm2,
+opensc, swtpm, libtss2-dev and the submodule: then `make -k check` runs
+eleven checks, skips four and fails three for want of tools. Get the
+submodule with `git submodule update --init --depth 1 buildroot` and install
+what you can; in the pull request, say which checks ran.
 
 ### The build and the smoke test
 
@@ -207,7 +206,7 @@ Reading a CI failure:
   after checkout`. The body gives the symptom with its evidence (the CI run
   number, the log line, the issue), the cause, what the change does, and
   which tests cover it. End with the trailers: `Co-Authored-By:` as your
-  harness gives it, then `Claude-Session:` (CLAUDE.md).
+  harness gives it, then `Claude-Session:` (Attribution, below).
 - **Pull request descriptions** have the same shape: why; what changes, by
   file or unit; the tests; what ran locally and what didn't. Say plainly what
   you couldn't run ("no KVM here; this PR's `build` check runs the smoke
@@ -229,6 +228,34 @@ Reading a CI failure:
   name `v<version>`; SDK releases by the `sdk` workflow, `sdk-YYYY.MM.DD.NNN`.
   Both are in [README: Building](README.md#building). An agent doesn't cut
   them.
+
+### Attribution: name the session
+
+Claude sessions act on GitHub as the account that connected them, so the
+author shown on a commit, pull request, comment or issue doesn't say which
+session wrote it. Name the session instead, by the URL of its
+`Claude-Session:` commit trailer: `https://claude.ai/code/session_…`.
+
+- **Commits:** end the message with the `Claude-Session:` trailer. That
+  includes merge commits made through the GitHub API: pass a commit message,
+  the pull request's title, then a blank line and the trailer, rather than
+  GitHub's default.
+- **Pull request descriptions, comments, reviews, review replies and
+  issues:** put `Claude-Session: <url>` on a line of its own at the end of the
+  body, just before the "Generated by Claude Code" footer if there is one.
+- **One session per item:** each commit, comment or issue names the session
+  that wrote it. A pull request can collect work from several sessions.
+
+The trailer makes the history searchable:
+
+```sh
+# everything one session committed
+git log --grep=session_<id>
+# commits per session
+git log --no-merges --format='%(trailers:key=Claude-Session,valueonly)' | sort | uniq -c
+```
+
+The line is a claim, not proof: anyone who can push or comment can write it.
 
 ## Recipes
 
@@ -270,8 +297,9 @@ unmet: check the symbol's dependencies for this kernel version first.
 `board/x86_64/rootfs-overlay/` is copied onto the root as it is. Cherry's
 units are `cherry-*.service` and `cherry-no-tpm.target`; their scripts live
 under `usr/lib/cherry/`. Order against systemd's targets explicitly (the
-firewall before `network-pre.target`, `/var` before `var.mount`), condition on
-the TPM where the README says (`cherry-var.service`:
+firewall before `network-pre.target`; `cherry-storage.service`, of
+`package/cherry/`, before `var.mount`), condition on the TPM where the README
+says (`cherry-storage.service`:
 `ConditionPathExists=/run/cherry/identity/ek-hash`), and give each unit the
 hardening its neighbors have.
 `make check-units` verifies the result; a change in what a unit does is also a
@@ -289,7 +317,7 @@ change to its script's test under `tests/` and to the README.
   `check_rc=False`; assert with `check(condition, message)`, whose message
   names what was found; report with `log()`. Timeouts scale with `MULT`.
 - A scenario that needs a mirror or the internet probes for it first and
-  returns `SKIPPED`, with the reason logged, as `s4_debootstrap` does.
+  returns `SKIPPED`, with the reason logged, as `s5_debootstrap` does.
 - Run as the `cherry` user (`AS_CHERRY`), inside `cherry.service`'s sandbox
   where the agent would (`IN_CHERRY_SERVICE`), whenever the README says that
   user can do it: the scenario is what proves the privileges are enough and
@@ -333,7 +361,9 @@ two defconfigs' toolchain options must stay the same.
   a bare host); flake8 at 120 columns; four spaces; a module docstring that
   is the tool's manual, which `--help` prints.
 - **JavaScript:** runs on Node without dependencies, and on Bun on the image;
-  `"use strict"`; two spaces.
+  `"use strict"`; two spaces. The extension's panel runs in OpenChamber's
+  sandboxed iframe as classic scripts, with no bundler: it speaks the SDK's
+  postMessage protocol itself (`openchamber-extension/panel/main.js`).
 - **Makefiles and Kconfig:** Buildroot's conventions, as `check-package`
   enforces them.
 - **Comments say why, and cite:** the upstream file and version a workaround
@@ -350,17 +380,17 @@ two defconfigs' toolchain options must stay the same.
 | Feature | Code | Checks | README |
 |---|---|---|---|
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
-| Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s3, s11 | Machine identity |
-| `/var` on an encrypted disk | `usr/lib/cherry/var`, `cherry-var.service`, `usr/lib/cherry/repart.d/` | `tests/var.sh`, s13 | Disks |
-| The disks' keys sealed to the boot state | `scripts/pcrsign.py`, `board/x86_64/post-image.sh`, `package/cherry-pit/src/cherry-pit.c`, `usr/lib/cherry/var`, `package/cherry/cherry-storage`, `scripts/secureboot.py pcr`, the `release` job of `build.yml` | `tests/pcrsign.py`, `tests/var.sh`, `tests/storage.py`, `tests/ceremony.sh`, s13, s15 | Disks, Secure Boot |
-| Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s10 | Memory |
-| Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s2 | Firewall |
-| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s12 | Secure Boot |
-| Containers from the host's tools | `package/debootstrap/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s4, s5, s6 | Running containers |
-| Images from recipes, the agent's tools | `package/cherry/cherry-image`, `cherry-image-setup`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json` | `tests/image.sh`, `tests/mcp.js`, s9 | Building images |
-| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s14 | Storage |
-| The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s8 | As the cherry user, Cherry service |
-| OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s7, s8 | OpenCode, OpenChamber |
+| Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s4, s12 | Machine identity |
+| SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s4, s12 | SSH host key |
+| `/var` on the pool `cherry`, in RAM until it has disks | `package/cherry/cherry-storage` (`boot start`), `cherry-storage.service`, `lvm.conf`; the overlay's `var.mount.d/` | `tests/storage.py`, s1, s2, s4 | Disks |
+| Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |
+| Firewall | `usr/lib/cherry/firewall.nft`, `cherry-firewall.service` | `tests/firewall.sh`, s1, s3 | Firewall |
+| Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml` | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
+| Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
+| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
+| Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
+| The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s9 | As the cherry user, Cherry service |
+| OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s8, s9 | OpenCode, OpenChamber |
 | The image's name and version | `Makefile`, `board/x86_64/post-build.sh` | `tests/version.sh`, `tests/postbuild.sh` | Building |
 | Toolchain and SDK | `configs/cherry_sdk_x86_64_defconfig`, `patches/toolchain-external-custom/`, `sdk.yml` | the `sdk` workflow's own check | Building |
 | QEMU | `scripts/run_qemu.py` | `tests/smoke.py` uses it | Booting |

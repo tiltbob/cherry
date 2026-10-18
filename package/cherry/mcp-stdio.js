@@ -52,8 +52,9 @@ function run(command, args, options = {}) {
 
 const sleep = (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
+// The last lines of a log, which ends with a newline that is no line.
 function tail(text, lines) {
-  return text.split("\n").slice(-lines).join("\n").trim();
+  return text.replace(/\n+$/, "").split("\n").slice(-lines).join("\n").trim();
 }
 
 function readLog(dir, instance, lines) {
@@ -90,7 +91,13 @@ function serve({ name, instructions, tools }) {
     const abort = new AbortController();
     calls.set(id, abort);
     try {
-      const text = await tool.call(params.arguments ?? {}, abort.signal);
+      // The schemas say additionalProperties: false; so does the server, for a
+      // client that does not check: an argument the tool does not take is an
+      // error, not an ignored wish.
+      const args = params.arguments ?? {};
+      const unknown = Object.keys(args).filter((key) => !(key in (tool.inputSchema.properties ?? {})));
+      if (unknown.length) throw new ToolError(`${tool.name} takes no ${unknown.join(", ")}`);
+      const text = await tool.call(args, abort.signal);
       reply(id, { content: [{ type: "text", text }], isError: false });
     } catch (e) {
       reply(id, { content: [{ type: "text", text: e instanceof ToolError ? e.message : String(e.stack || e) }], isError: true });

@@ -13,12 +13,12 @@ config BR2_PACKAGE_CHERRY
 	depends on !BR2_STATIC_LIBS # lvm2's standard install
 	select BR2_PACKAGE_COREUTILS # cherry-image: mv -T
 	select BR2_PACKAGE_TAR # cherry-image: the recipe
+	select BR2_PACKAGE_BTRFS_PROGS # cherry-storage: /var and the volumes; cherry-bootstrap: a tree on it is a subvolume
 	select BR2_PACKAGE_LVM2 # cherry-storage: the pools
 	select BR2_PACKAGE_LVM2_STANDARD_INSTALL # lvm, not only dmsetup
-	select BR2_PACKAGE_E2FSPROGS # cherry-storage: the volumes
-	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS # growing a volume
 	select BR2_PACKAGE_UTIL_LINUX
 	select BR2_PACKAGE_UTIL_LINUX_WIPEFS # claiming a disk
+	select BR2_PACKAGE_UBUNTU_KEYRING if BR2_PACKAGE_DEBOOTSTRAP # the ubuntu-noble profile
 	help
 	  Cherry's own service: the cherry user, with /var/lib/cherry as
 	  its home, and cherry.service, which runs OpenChamber's server
@@ -31,19 +31,31 @@ config BR2_PACKAGE_CHERRY
 	  stop, enter and remove them with machinectl, and start
 	  cherry-bootstrap@.service, which creates one as root with
 	  debootstrap, rpmstrap or pacstrap, and cherry-image@.service,
-	  which builds an image from the user's recipe (packages, files,
-	  a script run in it under systemd-nspawn). Images stay on the
+	  which builds an image from a recipe (packages, files, a
+	  script run in it under systemd-nspawn). Images stay on the
 	  machine that built them.
+
+	  On those, images and environments: an image is built from a
+	  profile in /usr/lib/cherry/profiles (recipes written by a
+	  person, one per distribution) or /var/lib/cherry/profiles,
+	  and never started; an environment is a clone of an image
+	  (machinectl clone: on the disk's btrfs, a snapshot of it),
+	  started, stopped and removed on its own.
+	  OpenChamber gets a built-in extension for them, Environments:
+	  a panel, the /env command and a service with the verbs.
 
 	  It manages storage too: cherry-storage@.service, which runs as
 	  root, claims disks for it, which erases them and makes each a
 	  LUKS2 volume the TPM unlocks under a signed Cherry image
 	  alone, and makes LVM pools of them,
 	  hard disks or SSDs, with SSDs as a pool's cache (dm-cache),
-	  and volumes in the pools, mounted for it under
-	  /var/lib/cherry/volumes. cherry-storage.service unlocks,
-	  activates and mounts them at boot.
+	  and volumes in the pools, btrfs, mounted for it under
+	  /var/lib/cherry/volumes. The pool cherry is the machine's
+	  own, and its volume var is /var: in RAM, 128 MiB, until the
+	  agent gives the pool disks. cherry-storage.service unlocks,
+	  activates and mounts it all at boot, /var first.
 
-	  OpenCode gets tools for all of it: MCP servers,
-	  cherry-machines-mcp and cherry-storage-mcp, and skills, in
-	  /etc/opencode.
+	  OpenCode gets tools for all of it, and nothing else: MCP
+	  servers, cherry-machines-mcp (the environment verbs) and
+	  cherry-storage-mcp, and skills, in /etc/opencode, whose
+	  permissions deny its other tools.

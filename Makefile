@@ -73,13 +73,15 @@ test:
 # all (`make -k check` goes on after a failure), `make check-<name>` one. CI
 # runs them before the build (.github/workflows/build.yml). They need
 # shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
-# openssl; node for the polkit rules and the MCP server (skipped without it);
-# nft, ip, busybox and user namespaces for the firewall and cherry-image, and
-# softhsm2 and opensc for the key ceremony (each skipped without them).
+# openssl; node for the polkit rules, the MCP servers and the extension
+# (skipped without it); nft, ip, busybox and user namespaces for the firewall
+# and cherry-image, softhsm2 and opensc for the key ceremony, and a C
+# compiler, tpm2-tss's development files, swtpm and OpenSSH's tools for the
+# host key agent (each skipped without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
-	check-postbuild check-firewall check-secureboot check-ceremony check-var \
-	check-storage check-pcrsign check-version
+	check-extension check-postbuild check-firewall check-secureboot \
+	check-ceremony check-storage check-exocarp check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -124,12 +126,20 @@ check-bootstrap:
 check-image:
 	tests/image.sh
 
-# OpenCode's MCP servers: machines writes the recipe and drives cherry-image@
-# and machinectl as it should, storage starts the cherry-storage@ instances it
-# should and shows what they found (skipped without node).
+# OpenCode's MCP servers: machines copies the profile into the recipe and
+# drives cherry-image@ and machinectl as it should, storage starts the
+# cherry-storage@ instances it should and shows what they found (skipped
+# without node).
 check-mcp:
 	@if command -v node >/dev/null 2>&1; then node tests/mcp.js && node tests/storage-mcp.js; \
 	else echo "mcp: SKIPPED, node is not installed (package/cherry/cherry-*-mcp.js unchecked)"; fi
+
+# OpenChamber's Environments extension: its manifest is what the host
+# installs, and its service answers the routes the panel calls (skipped
+# without node).
+check-extension:
+	@if command -v node >/dev/null 2>&1; then node tests/extension.js; \
+	else echo "extension: SKIPPED, node is not installed (package/cherry/openchamber-extension unchecked)"; fi
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:
@@ -151,18 +161,16 @@ check-secureboot:
 check-ceremony:
 	tests/ceremony.sh
 
-# cherry-var.service claims only a blank disk, and unlocks the right partition.
-check-var:
-	tests/var.sh
-
-# cherry-storage claims only the disks it may, and drives LVM as it should.
+# cherry-storage claims only the disks it may, drives LVM as it should, and
+# gives /var the pool cherry: in RAM at boot, on its disks once it has them.
 check-storage:
 	python3 tests/storage.py
 
-# scripts/pcrsign.py computes, signs and checks the UKI's PCR 11 policy as
-# systemd does.
-check-pcrsign:
-	python3 tests/pcrsign.py
+# exocarp, the SSH host key agent, against a swtpm: the key is the TPM's, the
+# same at every start, and sshd signs with it (skipped without cc, libtss2-dev,
+# swtpm, ssh-add and ssh-keygen).
+check-exocarp:
+	python3 tests/exocarp.py
 
 # The image is named after the nearest release tag, and a given name wins.
 check-version:
