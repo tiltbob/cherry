@@ -86,8 +86,8 @@ CONFIG_SECURITY_LANDLOCK=y
 # modules_install, after Buildroot's strip (INSTALL_MOD_STRIP=1), with a key
 # the kernel build makes in its tree (certs/signing_key.pem, with the host
 # OpenSSL of BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL) and whose certificate the
-# kernel carries; smoke scenario 1 loads the image's module and has its copy
-# without the signature refused.
+# kernel carries; smoke scenario 1 checks every module the image carries is,
+# loads one, and has a copy of it without the signature refused.
 CONFIG_SECURITY_LOCKDOWN_LSM=y
 CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
 CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y

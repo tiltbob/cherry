@@ -803,8 +803,8 @@ kernel build makes and keeps in the build tree and whose certificate the
 kernel holds, and `insmod` of anything else fails with "Key was rejected by
 service". Locked down too: `/dev/mem`, kexec of unsigned images,
 hibernation, raw PCI, port and MSR access, debugfs, and unsafe module
-parameters. The smoke test loads the image's module, and has a copy of it
-without its signature refused.
+parameters. The smoke test checks that every module the image carries is
+signed, loads one, and has a copy of it without its signature refused.
 
 `python3 scripts/run_qemu.py --secure-boot` boots OVMF's Secure Boot build,
 whose variable store `output/cherry_x86_64/qemu/OVMF_VARS.secboot.fd` starts
