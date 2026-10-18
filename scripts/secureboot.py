@@ -13,14 +13,22 @@ A fourth key signs releases in CI, which cannot reach the token: `issue` makes
 it outside the token, has the CA certify it, and hands the private key over
 once, for a GitHub secret. A new one replaces it without touching a machine.
 
+A fifth, the PCR key, signs the policy that binds the disks' keys to a release
+(scripts/pcrsign.py): its public half goes into every release's UKI, its private
+half into a GitHub secret too. `pcr` makes it, outside the token: the CA has no
+part in it, as the signed UKI vouches for the key. A new one leaves every disk
+sealed under the old one locked: it is never replaced lightly.
+
 Commands:
   init    generate the three keys on the token, and write their certificates
           (PK.crt, KEK.crt, db.crt) and their signed variable updates (PK.auth,
           self-signed; KEK.auth, signed by the PK; db.auth, signed by the KEK) to
           board/x86_64/secureboot/, which the image enrolls in setup mode
   issue   a new release signing key and its certificate, release.crt, from the CA
-  check   the files in board/x86_64/secureboot/ are what init and issue write,
-          their signatures verify, and the chain holds (make check)
+  pcr     the PCR key: its public half, pcr.pem, to board/x86_64/secureboot/,
+          and the private key for the secret
+  check   the files in board/x86_64/secureboot/ are what init, issue and pcr
+          write, their signatures verify, and the chain holds (make check)
 
 The token is reached through OpenSC's pkcs11-tool and PKCS#11 module (or
 --module): it generates the keys and makes every signature with them, over
@@ -418,6 +426,32 @@ def cmd_init(args):
          "Commit them, then make the release signing key: scripts/secureboot.py issue")
 
 
+def cmd_pcr(args):
+    public = os.path.join(args.dir, "pcr.pem")
+    if os.path.exists(public):
+        fail(f"{public} exists: a new PCR key leaves every disk sealed under the one there locked. To replace it "
+             "all the same, remove the file first")
+    if args.key_out != "-" and os.path.exists(args.key_out):
+        fail(f"{args.key_out} exists")
+    os.makedirs(args.dir, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cherry-secureboot-") as tmp:
+        key = os.path.join(tmp, "pcr.key")
+        run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", key])
+        pem = run(["openssl", "pkey", "-in", key, "-pubout"])
+        with open(key, "rb") as f:
+            key_pem = f.read()
+    write(public, pem, new=True)
+    if args.key_out == "-":
+        sys.stdout.buffer.write(key_pem)
+    else:
+        write(args.key_out, key_pem, 0o600, new=True)
+    check(args.dir)
+    where = "stdout" if args.key_out == "-" else args.key_out
+    note(f"wrote pcr.pem to {args.dir} and its private key to {where}.\n"
+         "The key is the secret PCR_KEY of the release environment (gh secret set PCR_KEY --env release); "
+         "commit pcr.pem.")
+
+
 def cmd_issue(args):
     ca = os.path.join(args.dir, "db.crt")
     if not os.path.exists(ca):
@@ -491,12 +525,24 @@ def rsa_bits(crt):
     return 0
 
 
+def check_pcr(keys_dir):
+    """pcr.pem, if there, is an RSA-2048 public key, as pcr makes it and systemd's signatures take it."""
+    public = os.path.join(keys_dir, "pcr.pem")
+    if not os.path.exists(public):
+        return False
+    p = subprocess.run(["openssl", "pkey", "-pubin", "-in", public, "-noout", "-text"], capture_output=True, text=True)
+    if p.returncode != 0 or "Public-Key: (2048 bit)" not in p.stdout or "Modulus:" not in p.stdout:
+        fail("pcr.pem: not an RSA-2048 public key")
+    return True
+
+
 def check(keys_dir, require_release=False):
-    """Every file of init (and issue) is there and right; return the number of files, 0 when there are none."""
+    """Every file of init (and issue, and pcr) is there and right; return the number of files, 0 when there are
+    none."""
     names = [f"{var}.{ext}" for var in KEYS for ext in ("crt", "auth")] + ["release.crt"]
     present = [n for n in names if os.path.exists(os.path.join(keys_dir, n))]
     if not present:
-        return 0
+        return int(check_pcr(keys_dir))
     missing = [n for n in names[:-1] if n not in present]
     if require_release and "release.crt" not in present:
         missing.append("release.crt")
@@ -528,16 +574,18 @@ def check(keys_dir, require_release=False):
                 fail("release.crt: not issued by db.crt")
             if rsa_bits(path["release.crt"]) != 2048:
                 fail("release.crt: not an RSA-2048 key")
-    return len(present)
+    return len(present) + int(check_pcr(keys_dir))
 
 
 def cmd_check(args):
-    if check(args.dir) == 0:
-        print(f"secureboot: no keys in {args.dir} yet (scripts/secureboot.py init)")
+    n = check(args.dir)
+    pcr = "; pcr.pem is the PCR key" if os.path.exists(os.path.join(args.dir, "pcr.pem")) else ""
+    if n == 0 or (n == 1 and pcr):
+        print(f"secureboot: no {'Secure Boot ' if pcr else ''}keys in {args.dir} yet (scripts/secureboot.py init){pcr}")
         return
     issued = " that issued release.crt" if os.path.exists(os.path.join(args.dir, "release.crt")) else ""
     print(f"secureboot: {args.dir}: the .auth files set PK, KEK and db to their certificates, signed by the PK, "
-          f"the PK and the KEK; db.crt is a CA{issued}")
+          f"the PK and the KEK; db.crt is a CA{issued}{pcr}")
 
 
 def main():
@@ -552,9 +600,12 @@ def main():
         if name == "issue":
             p.add_argument("--key-out", required=True, metavar="FILE",
                            help="where the release signing key goes, a new file or - for stdout")
+    p = sub.add_parser("pcr")
+    p.add_argument("--key-out", required=True, metavar="FILE",
+                   help="where the PCR key's private half goes, a new file or - for stdout")
     sub.add_parser("check")
     args = parser.parse_args()
-    {"init": cmd_init, "issue": cmd_issue, "check": cmd_check}[args.command](args)
+    {"init": cmd_init, "issue": cmd_issue, "pcr": cmd_pcr, "check": cmd_check}[args.command](args)
 
 
 if __name__ == "__main__":

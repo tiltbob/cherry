@@ -34,8 +34,9 @@
 #
 # A claimed disk holds one GPT partition labelled cherry-pv (systemd-repart,
 # with /usr/lib/cherry/storage/repart.d): a LUKS2 volume whose key the TPM
-# seals, unlocked as /dev/mapper/cherry-pv-<its partition>, holding an LVM
-# physical volume. LVM sees no other device but the zram one
+# seals to the boot state (below), unlocked as /dev/mapper/cherry-pv-<its
+# partition>, holding an LVM physical volume. LVM sees no other device but
+# the zram one
 # (/etc/lvm/lvm.conf). A pool is a volume group of claimed disks: data disks,
 # tagged data, and cache disks, tagged cache, the pool tagged writeback if its
 # cache is; the pool cherry's zram device is tagged ram while it has it. A
@@ -54,13 +55,25 @@
 # (mounted, swap, held by device mapper or md), nor a removable, read-only,
 # USB or smaller than 1 GiB one.
 #
+# The keys are sealed to the boot state: to PCR 7, the firmware's Secure Boot
+# state, and to PCR 11, which systemd-stub measured the image into, under the
+# image's PCR key, whose public half and signatures over the values PCR 11 may
+# hold cherry-pit left in /run/systemd (scripts/pcrsign.py). So the TPM
+# unseals them only booted into a Cherry image that key signed, with Secure
+# Boot as it was: elsewhere, and under anything else booted here, the disks
+# are unreadable. A key sealed another way, before this policy, is sealed
+# again under it as its disk is unlocked at boot, and its old slot goes.
+# Clearing the TPM loses the keys, and the data with them.
+#
 # The output goes to $LOGS_DIRECTORY/<instance>.log, which the cherry user can
 # read; the boot verbs' to the journal. One operation at a time: another one
 # fails at once. $CHERRY_SYSFS, $CHERRY_UDEV, $CHERRY_MOUNTINFO, $CHERRY_SWAPS,
-# $CHERRY_IDENTITY, $CHERRY_VOLUMES, $CHERRY_STORAGE_USER and
-# $CHERRY_STORAGE_LOCK replace /sys, /run/udev/data, /proc/self/mountinfo,
-# /proc/swaps, /run/cherry/identity, /var/lib/cherry/volumes, cherry and
-# /run/cherry-storage.lock (tests/storage.py).
+# $CHERRY_IDENTITY, $CHERRY_VOLUMES, $CHERRY_STORAGE_USER,
+# $CHERRY_STORAGE_LOCK, $CHERRY_PCR_SIGNATURE and $CHERRY_PCR_PUBLIC_KEY
+# replace /sys, /run/udev/data, /proc/self/mountinfo, /proc/swaps,
+# /run/cherry/identity, /var/lib/cherry/volumes, cherry,
+# /run/cherry-storage.lock, /run/systemd/tpm2-pcr-signature.json and
+# /run/systemd/tpm2-pcr-public-key.pem (tests/storage.py).
 set -eu
 
 block=${CHERRY_SYSFS:-/sys}/class/block
@@ -72,6 +85,10 @@ volumes=${CHERRY_VOLUMES:-/var/lib/cherry/volumes}
 user=${CHERRY_STORAGE_USER:-cherry}
 lock=${CHERRY_STORAGE_LOCK:-/run/cherry-storage.lock}
 definitions=/usr/lib/cherry/storage/repart.d
+# The image's PCR policy, as cherry-pit left it in /run/systemd (see
+# scripts/pcrsign.py).
+signature=${CHERRY_PCR_SIGNATURE:-/run/systemd/tpm2-pcr-signature.json}
+public_key=${CHERRY_PCR_PUBLIC_KEY:-/run/systemd/tpm2-pcr-public-key.pem}
 # The machine's own pool, and its volume that is /var.
 system_pool=cherry
 var_volume=var
@@ -96,6 +113,41 @@ export LVM_SUPPRESS_FD_WARNINGS=1
 fail() {
 	echo "$1" >&2
 	exit 1
+}
+
+# --- The TPM's policy ---------------------------------------------------------
+
+check_policy() {
+	if [ ! -s "$public_key" ] || [ ! -s "$signature" ]; then
+		fail "the image carries no PCR policy ($public_key, $signature) to seal a key to"
+	fi
+}
+
+# count <text> <string>: how often the string occurs in the text.
+count() {
+	printf '%s' "$1" | grep -o -F -- "$2" | wc -l
+}
+
+# sealed <device>: every TPM slot of the LUKS2 volume is sealed to the policy:
+# PCR 7, and PCR 11 under the image's key. cryptsetup prints the header's JSON
+# with whitespace and escaped slashes of its own, taken out (the backslashes
+# as \134) to match on.
+sealed() {
+	tokens=$(cryptsetup luksDump --dump-json-metadata "$1" | tr -d ' \n\t\134')
+	key=$(base64 -w 0 "$public_key")
+	n=$(count "$tokens" '"type":"systemd-tpm2"')
+	[ "$n" -gt 0 ] && [ "$(count "$tokens" "\"tpm2_pubkey\":\"$key\"")" -eq "$n" ] &&
+		[ "$(count "$tokens" '"tpm2-pcrs":[7]')" -eq "$n" ]
+}
+
+# reseal <device>: the key sealed to the policy in a new TPM slot, unlocked
+# with the slot it has, which then goes.
+reseal() {
+	echo "sealing the key of $1 to the boot state anew"
+	systemd-cryptenroll --unlock-tpm2-device=auto --tpm2-device=auto --tpm2-pcrs=7 \
+		--tpm2-public-key="$public_key" --tpm2-public-key-pcrs=11 --tpm2-signature="$signature" \
+		--wipe-slot=tpm2 "$1" >/dev/null ||
+		echo "cannot seal the key of $1 to the boot state: its slot stays as it is" >&2
 }
 
 # --- Disks, from sysfs and udev's database ----------------------------------
@@ -594,6 +646,7 @@ claim() {
 	if [ ! -e "$identity/ek-hash" ]; then
 		fail "no usable TPM: it holds the keys of claimed disks"
 	fi
+	check_policy
 	classify "$1"
 	case $state in
 	free | locked) ;;
@@ -601,8 +654,7 @@ claim() {
 	esac
 	check_fingerprint "$1" "$2"
 	wipe "$1"
-	systemd-repart --dry-run=no --empty=require --definitions="$definitions" \
-		--tpm2-device=auto --tpm2-pcrs= --tpm2-public-key-pcrs= "/dev/$1" ||
+	systemd-repart --dry-run=no --empty=require --definitions="$definitions" "/dev/$1" ||
 		fail "systemd-repart could not set up /dev/$1"
 	udevadm settle --timeout=60 || true
 	# shellcheck disable=SC2046 # kernel names, one word each
@@ -610,21 +662,23 @@ claim() {
 	if [ $# -ne 2 ] || [ "$(partname "$2")" != cherry-pv ]; then
 		fail "no partition labelled cherry-pv on /dev/$1 after systemd-repart"
 	fi
-	# A LUKS2 volume whose key the TPM seals, as systemd-repart makes /var's,
-	# which systemd 258 does only along with a filesystem: a random key opens a
-	# first key slot, the TPM's is enrolled with it, and the first goes, so that
-	# the TPM is the key's only holder. No PCR policy, as for /var.
+	# A LUKS2 volume whose key the TPM seals, as systemd-repart would with a
+	# filesystem in it, which systemd 258 does only along with one: a random
+	# key opens a first key slot, the TPM's is enrolled with it, sealed to the
+	# boot state (above), and the first goes, so that the TPM is the key's only
+	# holder.
 	keys=$(mktemp -d)
 	head -c 64 /dev/urandom >"$keys/key"
 	if ! cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
 		--key-file "$keys/key" "/dev/$2" ||
-		! systemd-cryptenroll --unlock-key-file="$keys/key" --tpm2-device=auto --tpm2-pcrs= \
-			--tpm2-public-key-pcrs= --wipe-slot=0 "/dev/$2"; then
+		! systemd-cryptenroll --unlock-key-file="$keys/key" --tpm2-device=auto --tpm2-pcrs=7 \
+			--tpm2-public-key="$public_key" --tpm2-public-key-pcrs=11 --tpm2-signature="$signature" \
+			--wipe-slot=0 "/dev/$2"; then
 		rm -rf "$keys"
 		fail "cannot make /dev/$2 a LUKS2 volume that the TPM unlocks"
 	fi
 	rm -rf "$keys"
-	systemd-cryptsetup attach "cherry-pv-$2" "/dev/$2" - tpm2-device=auto,headless ||
+	systemd-cryptsetup attach "cherry-pv-$2" "/dev/$2" - "tpm2-device=auto,tpm2-signature=$signature,headless" ||
 		fail "the TPM cannot unlock /dev/$2"
 	lvm pvcreate -y "/dev/mapper/cherry-pv-$2"
 	echo "claimed /dev/$1: /dev/$2, unlocked with the TPM as /dev/mapper/cherry-pv-$2"
@@ -918,13 +972,23 @@ volume_remove() {
 
 # --- Boot --------------------------------------------------------------------
 
-# Every claimed disk unlocked; what the TPM cannot unlock is reported.
+# Every claimed disk unlocked, and its key sealed anew if it was sealed
+# another way; what the TPM cannot unlock is reported. Without the image's
+# policy, no disk is: the pool cherry is then made in RAM, as without disks.
 unlock_disks() {
+	if [ ! -s "$public_key" ] || [ ! -s "$signature" ]; then
+		echo "the image carries no PCR policy ($public_key, $signature): no disk can be unlocked"
+		return 0
+	fi
 	for disk in $(disks); do
 		for p in $(partitions "$disk"); do
 			if [ "$(partname "$p")" = cherry-pv ] && ! unlocked "$p"; then
-				systemd-cryptsetup attach "cherry-pv-$p" "/dev/$p" - tpm2-device=auto,headless ||
+				if systemd-cryptsetup attach "cherry-pv-$p" "/dev/$p" - \
+					"tpm2-device=auto,tpm2-signature=$signature,headless"; then
+					sealed "/dev/$p" || reseal "/dev/$p"
+				else
 					echo "the TPM cannot unlock /dev/$p: another machine's disk?"
+				fi
 			fi
 		done
 	done

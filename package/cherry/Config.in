@@ -46,7 +46,8 @@ config BR2_PACKAGE_CHERRY
 
 	  It manages storage too: cherry-storage@.service, which runs as
 	  root, claims disks for it, which erases them and makes each a
-	  LUKS2 volume the TPM unlocks, and makes LVM pools of them,
+	  LUKS2 volume the TPM unlocks under a signed Cherry image
+	  alone, and makes LVM pools of them,
 	  hard disks or SSDs, with SSDs as a pool's cache (dm-cache),
 	  and volumes in the pools, btrfs, mounted for it under
 	  /var/lib/cherry/volumes. The pool cherry is the machine's

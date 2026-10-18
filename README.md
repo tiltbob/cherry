@@ -74,6 +74,14 @@ release's commit, `v0.0.1-3-g<commit>` for one three commits later, with
 clone without the tags. `make BR2_EXTERNAL_CHERRY_VERSION=<name>` names it
 otherwise.
 
+The build signs the image's PCR 11 policy, which binds a machine's disks to
+the image (see [Disks](#disks)), with a key of the build tree's own,
+`output/cherry_x86_64/pcr.key`, made at the first build and kept: a rebuilt
+image still unlocks the disks a VM sealed under the last one. `make clean`
+takes the key with it, and those disks then unlock under no image, until
+`wipefs` makes them blank. Releases are signed with the repository's PCR key
+instead (see [Secure Boot](#secure-boot)).
+
 Downloads go to `dl/` and ccache to `.ccache/`. Override the locations with
 `BR2_DL_DIR` and `BR2_CCACHE_DIR`. Buildroot never deletes a download:
 `python3 scripts/prune_dl.py` lists what in `dl/` no configuration needs any
@@ -116,14 +124,15 @@ the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
 busybox root, the OpenCode MCP servers' tools and the Environments
 extension's manifest and service against stand-ins for systemctl,
-machinectl, busctl and ip, `cherry-storage`'s claims, LVM calls and `/var`
-from the pool, in RAM and on its disks, against stand-ins for LVM, the
-disks' tools and sysfs, `post-build.sh`'s check of
+machinectl, busctl and ip, `cherry-storage`'s claims, LVM calls, sealing of
+the keys and `/var` from the pool, in RAM and on its disks, against
+stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
 key ceremony on a SoftHSM token, the `exocarp` host key agent against a
-swtpm, and the image's version from the
+swtpm, the UKI's PCR policy as `scripts/pcrsign.py` computes, signs and
+checks it, against systemd's vectors, and the image's version from the
 release tags. `make -k check` runs on after a failure; `make check-<name>`
 runs one. They need shellcheck, flake8, python3-magic, python3-yaml,
 systemd's `systemd-analyze`, openssl and util-linux's flock; node for the
@@ -201,25 +210,28 @@ ssh -p 2222 root@localhost
 
 ## How it starts
 
-1. **Firmware:** downloads and starts the UKI. systemd-stub then boots the
-   kernel with the embedded command line and initramfs.
+1. **Firmware:** downloads and starts the UKI. systemd-stub measures the
+   UKI's sections into PCR 11 of the TPM, then boots the kernel with the
+   embedded command line and initramfs, adding the UKI's PCR signature and
+   public key to the latter.
 2. **Kernel:** unpacks the initramfs into a ramfs and runs its `/init`,
    [cherry-pit](package/cherry-pit/src/cherry-pit.c). The initramfs holds
    only cherry-pit and the root filesystem image. (`rootfstype=ramfs`: EROFS
    can mount a file from a ramfs, but not from the default tmpfs.)
-3. **cherry-pit:** mounts the image read-only, straight from the file, makes it
-   the root, and runs its [`/init`](board/x86_64/rootfs-overlay/init), a shell
-   script.
+3. **cherry-pit:** mounts the image read-only, straight from the file, gives
+   it a tmpfs `/run` with the PCR signature and public key in
+   `/run/systemd/`, where systemd's tools look for them, makes it the root,
+   and runs its [`/init`](board/x86_64/rootfs-overlay/init), a shell script.
 4. **`/init`:** does what an initrd would before systemd starts:
-   - mounts `/dev`, `/proc`, `/sys` and `/run`
+   - mounts `/dev`, `/proc` and `/sys`
    - derives the machine's identity from the TPM (see
      [Machine identity](#machine-identity))
    - starts systemd with that machine ID, or, without a usable TPM, with
      `cherry-no-tpm.target` instead of the default target
 5. **systemd:**
    - mounts `/var`: the volume `var` of the pool `cherry`, on the disks the
-     TPM unlocks, or made in RAM while the pool has none (see
-     [Disks](#disks))
+     TPM unlocks under this image, or made in RAM while the pool has none
+     (see [Disks](#disks))
    - fills `/var` with what it lacks of the image's factory defaults
      (Buildroot's `BR2_INIT_SYSTEMD_VAR_FACTORY`)
    - sets up compressed swap in RAM (see [Memory](#memory))
@@ -360,8 +372,10 @@ pool (see [Storage](#storage)): btrfs, so that an environment is a snapshot
 of its image (`machinectl clone`), which takes space only for what it
 changes (see [Environments](#environments)). With it persist the containers,
 the images, the `cherry` user's state and the journal. The pool's disks are
-LUKS2 volumes whose keys the machine's TPM seals: the machine unlocks them at
-boot without a passphrase; elsewhere, they are unreadable.
+LUKS2 volumes whose keys the machine's TPM seals to the boot state: the
+machine unlocks them at boot without a passphrase, booted into a Cherry
+image the PCR key signed; elsewhere, and under anything else, they are
+unreadable.
 
 Nothing claims a disk at boot. A machine boots with the pool in RAM: a zram
 device of 132 MiB, compressed with zstd, as the pool's one physical volume,
@@ -384,9 +398,10 @@ mounts `/var`, and only on a machine with a usable TPM:
 
 - **Unlock:** every claimed disk, a partition labelled `cherry-pv`, is
   unlocked with the TPM (`systemd-cryptsetup`) as
-  `/dev/mapper/cherry-pv-<partition>`. One the TPM cannot unlock (another
-  machine's disk, or this one's before its TPM was cleared) is reported and
-  left alone.
+  `/dev/mapper/cherry-pv-<partition>`, and its key sealed anew if it was
+  sealed another way (below). One the TPM cannot unlock (another machine's
+  disk, or this one's before its TPM was cleared) is reported and left
+  alone.
 - **The pool on its disks:** activated (`vgchange`), and `var` mounted on
   `/var` as `/dev/mapper/cherry-var`. A disk of the pool that is missing and
   that no volume uses (the zram device, after a crash between the move of
@@ -408,8 +423,38 @@ image's factory defaults. At shutdown, systemd unmounts the volumes and then
 The TPM is the keys' only holder: there is no passphrase or recovery key.
 Clearing the TPM (in the firmware setup, or `tpm2_clear`) loses the keys, and
 the data with them, though not the machine's identity, which comes from the
-endorsement seed. The keys aren't bound to the boot state yet (see
-[Security notes](#security-notes)).
+endorsement seed.
+
+**Sealed to the boot state:** the TPM unseals a key only while two of its
+PCRs hold what they held when the key was sealed:
+
+- **PCR 7,** the firmware's Secure Boot state: whether it is on, and the keys
+  it holds (see [Secure Boot](#secure-boot)). Enrolling keys, clearing them
+  or turning Secure Boot off changes it, and a disk sealed before stays
+  locked after: a machine enrolls Cherry's keys before the agent claims a
+  disk, and `cherry-storage.service` waits for `cherry-secureboot.service`,
+  which reboots before any key is sealed to a setup-mode boot.
+- **PCR 11,** which systemd-stub measures the UKI's sections into, and
+  systemd then extends with the boot phases `sysinit` and `ready`, under a
+  signed policy: the image carries the PCR key's public half (its `.pcrpkey`
+  section) and that key's signatures over the values PCR 11 holds at those
+  phases (`.pcrsig`), which systemd-stub puts in the initramfs and
+  `cherry-pit` leaves in `/run/systemd/`. The TPM takes a signature by the
+  key a disk was sealed under over PCR 11's current value, or unseals
+  nothing: only a Cherry image that key signed, as it was built, unlocks the
+  disk. A release is signed with the repository's PCR key, so an update
+  still unlocks the disks; a build tree signs with a key of its own (see
+  [Building](#building)), and a release before the repository has a PCR key
+  likewise. The LUKS2 header's token names the key and the PCRs
+  (`cryptsetup luksDump --dump-json-metadata`).
+
+A disk whose key was sealed another way (before this policy, or under
+another key the image carries signatures for) is sealed to the policy anew as
+it is unlocked at boot, and its old slot goes.
+[`scripts/pcrsign.py`](scripts/pcrsign.py) computes the expected values,
+signs them, and checks an image's policy (`check`), as `systemd-measure`
+would. The smoke test proves that the same image with one byte changed, or
+signed anew with another key, unlocks nothing.
 
 To start over with an empty `/var`: `release` refuses the pool's disks, which
 hold it, so erase the partition and then the disk by hand (`wipefs --all
@@ -419,7 +464,7 @@ RAM, and the disk is blank again, for the agent to claim.
 `make qemu` gives the VM no disk. `--disk 8G` attaches
 `output/cherry_x86_64/qemu/disk.img`, created blank and sparse at the first
 run, which the VM then keeps along with its TPM, for the agent to give to the
-pool:
+pool, sealed under the build tree's key:
 
 ```sh
 python3 scripts/run_qemu.py --disk 8G
@@ -438,10 +483,12 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
 - **Claiming a disk** erases it: `wipefs` on its partitions, then on the
   disk. `systemd-repart` then makes all of it one GPT partition labelled
   `cherry-pv` ([`50-pv.conf`](package/cherry/storage-pv.conf)), a LUKS2 volume
-  whose key the TPM seals: `cryptsetup` makes it with a random
-  key, `systemd-cryptenroll` enrolls the TPM with that key, then wipes that
-  key's slot, so the TPM is the only holder of the key (systemd-repart's
-  `Encrypt=` would put a filesystem in it). It is unlocked as
+  whose key the TPM seals to the boot state (see [Disks](#disks)):
+  `cryptsetup` makes it with a random key, `systemd-cryptenroll` enrolls the
+  TPM with that key, sealed to PCR 7 and the signed PCR 11 policy, then
+  wipes that key's slot, so the TPM is the only holder of the key
+  (systemd-repart's `Encrypt=` would put a filesystem in it). It is unlocked
+  as
   `/dev/mapper/cherry-pv-<partition>` and made an LVM physical volume.
   - **As listed:** `list` gives each disk a fingerprint, of its size, serial,
     model and partition table, and a claim names it, so it never takes a disk
@@ -477,7 +524,8 @@ touches no disk itself; the OpenCode agent gets tools for it (below).
   disks first (`pvmove`), with the volumes' caches detached meanwhile.
 - **At boot,** before systemd mounts `/var`, `cherry-storage.service`
   (`cherry-storage boot start`) unlocks every `cherry-pv` partition with the
-  TPM, brings up the pool `cherry` and `/var` (see [Disks](#disks)), then
+  TPM, sealing anew the key of one sealed another way, brings up the pool
+  `cherry` and `/var` (see [Disks](#disks)), then
   activates each other pool, which nothing else does (their volume groups
   are made without autoactivation), and mounts each volume as it is, as
   systemd-fsck leaves btrfs too. At shutdown, once systemd has unmounted the
@@ -618,10 +666,18 @@ the CA issues its certificate, `release.crt`, and its private key is a secret
 of the `release` environment. A new release key needs no change on any
 machine. All four are RSA-2048, the size every firmware verifies.
 
-`board/x86_64/secureboot/` holds the public half: the four certificates, and
-the signed updates of the PK, KEK and db variables (`PK.auth`, self-signed;
+A fifth, the PCR key, signs the policy that binds the machines' disks to
+releases (see [Disks](#disks)): its public half, `pcr.pem`, goes into every
+release's image, and its private key is a secret of the `release` environment
+too. The Nitrokey has no part in it: the signed image vouches for the key. A
+new PCR key leaves every disk sealed under the old one locked, so it is not
+replaced lightly.
+
+`board/x86_64/secureboot/` holds the public half: the four certificates, the
+signed updates of the PK, KEK and db variables (`PK.auth`, self-signed;
 `KEK.auth`, signed by the PK; `db.auth`, signed by the KEK), which the image
-enrolls. `scripts/secureboot.py` writes them; `make check` verifies them.
+enrolls, and `pcr.pem`. `scripts/secureboot.py` writes them; `make check`
+verifies them.
 
 **The ceremony,** once, on a computer with the Nitrokey plugged in:
 
@@ -647,6 +703,9 @@ gh api repos/tiltbob/cherry/environments/release/deployment-branch-policies -f n
 # into the release environment's secret, through memory only, and only when
 # issue succeeded (in a pipe, gh would store nothing as the secret).
 key=$(scripts/secureboot.py issue --key-out -) && printf '%s\n' "$key" | gh secret set SECUREBOOT_KEY --env release
+# The PCR key, likewise: its public half in board/x86_64/secureboot/, the key
+# itself into the release environment's secret.
+key=$(scripts/secureboot.py pcr --key-out -) && printf '%s\n' "$key" | gh secret set PCR_KEY --env release
 git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
 ```
 
@@ -674,12 +733,21 @@ git add board/x86_64/secureboot && git commit -m "Secure Boot keys"
   from any other branch's runs.
 - **A new release key:** run `issue` again and commit the new `release.crt`.
   The old key still signs images that boot until it is revoked (below).
+- **The PCR key** is made outside the token, by `pcr`, once: a second `pcr`
+  refuses while `pcr.pem` is there. Back the key up as the token's.
 
-**Releases:** the release job of the build workflow signs `cherry-x86_64.efi`
-with the release key (`sbsign`), checks the signature against the CA
-(`sbverify`), and publishes the signed image. Before the repository has keys,
-it publishes the image unsigned. Once it has, a missing secret, or one that
-isn't `release.crt`'s key, fails the release.
+**Releases:** the release job of the build workflow signs the release image's
+PCR policy with the PCR key (`scripts/pcrsign.py sign`) and checks it
+(`check`), then signs `cherry-x86_64.efi` with the release key (`sbsign`),
+checks the signature against the CA (`sbverify`), and publishes the signed
+image. The release image is the one the smoke test ran, built again with
+`pcr.pem` in place of the build's own PCR key and its policy left for the
+release job to sign ([`post-image.sh`](board/x86_64/post-image.sh)): that
+key is the one difference between what was tested and what ships. Before the
+repository has keys, it publishes the image unsigned, and without a PCR key
+the tested image as it is, which unlocks only the disks it sealed itself.
+Once it has them, a missing secret, or one that isn't `release.crt`'s or
+`pcr.pem`'s key, fails the release.
 
 **Enrolling a machine:** clear the firmware's Secure Boot keys, which puts it
 in setup mode (the setup menu calls it "Reset to Setup Mode", "Clear Secure
@@ -727,8 +795,9 @@ SoftHSM token (as `tests/ceremony.sh` does), point it there, run `make
 br-cherry-secureboot-reinstall all`, and sign the image with `sbsign`.
 
 Not yet: Cherry applies no dbx updates, which would revoke a leaked release
-key (the KEK would sign them); the kernel's lockdown and module signing are
-off; and nothing is bound to the PCRs that record Secure Boot's state.
+key (the KEK would sign them), and an older release, signed with the same
+keys, still boots and unlocks the disks a newer one sealed; and the kernel's
+lockdown and module signing are off.
 
 ## Running containers
 
@@ -1114,12 +1183,15 @@ This is a development image:
   or a terminal of OpenChamber's, can erase such a disk, or a pool's volume,
   though not `/var`'s pool or volume.
 - The TPM unseals the keys of the claimed disks, `/var`'s pool among them,
-  whatever the machine boots: they aren't bound to the boot state (PCRs)
-  yet. Each is unreadable away from its machine, but anything that boots the
-  machine (an HTTP boot server, a USB stick) can unlock it. The SSH host key
-  is the TPM's likewise: it never leaves the TPM, but whatever boots the
-  machine, and root or the `tss` group on it, can sign with it (see
-  [SSH host key](#ssh-host-key)).
+  only booted into a Cherry image the PCR key signed, with Secure Boot as it
+  was when they were sealed (see [Disks](#disks)): nothing else that boots
+  the machine (an HTTP boot server, a USB stick) can unlock them. Any
+  release signed with that key does, older ones with their holes included,
+  as nothing revokes one; and `root` on the console then has the disks open.
+  A build tree's images unlock only the disks they sealed themselves. The
+  SSH host key is the TPM's, and sealed to nothing: it never leaves the TPM,
+  but whatever boots the machine, and root or the `tss` group on it, can
+  sign with it (see [SSH host key](#ssh-host-key)).
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
   signed. With Secure Boot on, the kernel still loads unsigned modules: its

@@ -40,8 +40,9 @@ change it, `manage-storage`.
   and `release` take it, and refuse a disk that changed since it was listed,
   or that a reboot renamed.
 - **A claimed disk** is erased, then made one LUKS2 volume that this
-  machine's TPM unlocks, holding an LVM physical volume: unreadable on any
-  other machine.
+  machine's TPM unlocks, and only booted into a signed Cherry image with
+  Secure Boot as it was, holding an LVM physical volume: unreadable on any
+  other machine, and under anything else booted on this one.
 - **A pool** is an LVM volume group of claimed disks. Its **data disks** hold
   the volumes, one after the other: the pool's size is theirs added up, with
   no redundancy, so a data disk that dies takes with it the volumes that had
