@@ -22,7 +22,7 @@
       "commands": [
         {
           "name": "env",
-          "description": "build <profile>, create <image|profile> <name>, start/stop/status/remove <name>"
+          "description": "build, create, start, stop, enable, disable, status or remove an environment"
         }
       ],
       "tools": [

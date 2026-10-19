@@ -1,0 +1,46 @@
+#!/bin/sh
+# cherry-autostart.service: at boot, once /var is mounted, start the
+# environments the cherry user enabled (README: Environments). Enabled=yes in
+# an environment's record, /var/lib/cherry/environments/<name>/environment.conf,
+# is what `machinectl enable` would make of it: systemd-nspawn@<name>.service
+# in machines.target.wants, which /etc, read-only, cannot hold, and which
+# /var, mounted after systemd loaded its units, could not show it. So the
+# records are read here, and their units started as machines.target would
+# start them: all at once, waited for, and one that fails is left among the
+# failed units while the rest start. Only a name a record could carry
+# (environments.js's MACHINE_NAME) is started, and starting
+# systemd-nspawn@<name>.service is what the cherry user may do itself
+# (50-cherry.rules), so this does nothing for it that it could not.
+# $CHERRY_ENVIRONMENTS_DIR replaces /var/lib/cherry/environments
+# (tests/autostart.sh).
+set -eu
+
+environments=${CHERRY_ENVIRONMENTS_DIR:-/var/lib/cherry/environments}
+
+set --
+for conf in "$environments"/*/environment.conf; do
+	[ -f "$conf" ] || continue
+	name=${conf%/environment.conf}
+	name=${name##*/}
+	grep -qxF 'Enabled=yes' "$conf" || continue
+	# A valid machine name, as environments.js and machinectl take them.
+	case $name in
+	[!A-Za-z0-9_]* | *[!A-Za-z0-9_.-]*)
+		echo "not a machine name, not started: '$name'" >&2
+		continue ;;
+	esac
+	if [ ${#name} -gt 64 ]; then
+		echo "not a machine name, not started: '$name'" >&2
+		continue
+	fi
+	set -- "$@" "systemd-nspawn@$name.service"
+done
+
+if [ $# -eq 0 ]; then
+	echo "no environment is enabled"
+	exit 0
+fi
+echo "starting: $*"
+if ! systemctl start --no-ask-password "$@"; then
+	echo "not every environment started: see systemctl --failed" >&2
+fi

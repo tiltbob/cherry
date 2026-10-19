@@ -152,6 +152,8 @@ async function main() {
     assert.strictEqual((await request("PUT", "/environments")).status, 405);
     assert.strictEqual((await request("PUT", "/environments/web")).status, 405);
     assert.strictEqual((await request("POST", "/images/web/log")).status, 404);
+    assert.strictEqual((await request("GET", "/environments/web/enable")).status, 404);
+    assert.strictEqual((await request("GET", "/environments/web/disable")).status, 404);
   });
 
   await test("list: images, environments, other machines, profiles and jobs", async () => {
@@ -162,7 +164,8 @@ async function main() {
     assert.strictEqual(r.status, 200);
     assert.deepStrictEqual(Object.keys(r.body), ["images", "environments", "other", "running", "profiles", "jobs"]);
     assert.deepStrictEqual(r.body.images.map((i) => [i.name, i.profile.id, i.environments]), [["base", "web", ["yarp"]]]);
-    assert.deepStrictEqual(r.body.environments.map((e) => [e.name, e.image, e.running]), [["yarp", "base", true]]);
+    assert.deepStrictEqual(r.body.environments.map((e) => [e.name, e.image, e.running, e.enabled]),
+      [["yarp", "base", true, false]]);
     assert.deepStrictEqual(r.body.other.map((o) => o.name), ["handmade"]);
     assert.deepStrictEqual(r.body.profiles.map((p) => p.id), ["plain", "web"]);
     assert.deepStrictEqual(r.body.jobs, []);
@@ -298,6 +301,49 @@ async function main() {
     assert.deepStrictEqual(await request("DELETE", "/images/web"), { status: 200, body: { message: "web removed" } });
     assert.strictEqual((await request("GET", "/environments/-x")).status, 400);
     assert.strictEqual((await request("POST", "/environments/-x/start", { body: {} })).status, 400);
+  });
+
+  await test("enable and disable: the record at once, or a job with now", async () => {
+    reset({ images: ["web", "yarp"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const image = await request("POST", "/environments/web/enable", { body: {} });
+    assert.strictEqual(image.status, 400, JSON.stringify(image));
+    assert.match(image.body.error, /web is an image/);
+    assert.strictEqual((await request("POST", "/environments/-x/enable", { body: {} })).status, 400);
+    assert.strictEqual((await request("POST", "/environments/yarp/enable", { body: "nope" })).status, 400);
+    assert.strictEqual((await request("POST", "/environments/yarp/enable", { body: { now: true, timeout: 0 } })).status, 400);
+    const conf = path.join(dirs.environments, "yarp", "environment.conf");
+    assert.strictEqual(fs.readFileSync(conf, "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\n", "refused, yet written");
+
+    const on = await request("POST", "/environments/yarp/enable", { body: {} });
+    assert.deepStrictEqual(on, { status: 200, body: { message: "yarp is enabled: it starts at boot" } });
+    assert.strictEqual(fs.readFileSync(conf, "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\nEnabled=yes\n");
+    assert(!world.called().some((l) => l.includes("start")), "enable without now started it");
+    let list = await request("GET", "/environments");
+    assert.deepStrictEqual(list.body.environments.map((e) => [e.name, e.running, e.enabled]), [["yarp", false, true]]);
+    assert.deepStrictEqual(list.body.jobs.filter((j) => j.name === "yarp"), [], "an enable alone is no job");
+    const status = await request("GET", "/environments/yarp");
+    assert.deepStrictEqual([status.body.kind, status.body.enabled, status.body.job], ["environment", true, null]);
+
+    const off = await request("POST", "/environments/yarp/disable", { body: {} });
+    assert.deepStrictEqual(off, { status: 200, body: { message: "yarp is disabled: it does not start at boot" } });
+    assert.strictEqual(fs.readFileSync(conf, "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\nEnabled=no\n");
+
+    const onNow = await request("POST", "/environments/yarp/enable", { body: { now: true } });
+    assert.strictEqual(onNow.status, 202, JSON.stringify(onNow));
+    assert.deepStrictEqual([onNow.body.verb, onNow.body.state], ["enable", "running"]);
+    const up = await settled("yarp", "enable");
+    assert.strictEqual(up.job.message, "yarp is enabled: it starts at boot. yarp is running");
+    assert.deepStrictEqual([up.running, up.enabled], [true, true]);
+    assert(world.called().includes("machinectl --no-ask-password start yarp"));
+    const offNow = await request("POST", "/environments/yarp/disable", { body: { now: true, timeout: 5 } });
+    assert.strictEqual(offNow.status, 202, JSON.stringify(offNow));
+    const down = await settled("yarp", "disable");
+    assert.strictEqual(down.job.message, "yarp is disabled: it does not start at boot. yarp is stopped");
+    assert.deepStrictEqual([down.running, down.enabled], [false, false]);
+    list = await request("GET", "/environments");
+    assert.deepStrictEqual(list.body.jobs.filter((j) => j.name === "yarp").map((j) => [j.verb, j.state]), [["disable", "done"]]);
   });
 
   child.kill("SIGTERM");

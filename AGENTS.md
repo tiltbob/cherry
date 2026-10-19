@@ -73,9 +73,10 @@ is, what runs it and what it needs. Read that before the code.
   `cherry-image@` and `cherry-storage@` units) and what those three template
   units do as root for it, with their instances checked. `cherry-storage@`
   erases the disks it claims: only a disk nothing uses, and only as it was
-  listed (its fingerprint). Never give it a host path to read or
-  write as root, nor a unit that does; `tests/polkit.js` pins the rule to the
-  README's list. Its services listen on loopback only, under system call
+  listed (its fingerprint). `cherry-autostart.service` starts for it at boot,
+  from its records, what it may start itself, and nothing else. Never give it
+  a host path to read or write as root, nor a unit that does;
+  `tests/polkit.js` pins the rule to the README's list. Its services listen on loopback only, under system call
   filters that systemd enforces (it is built with seccomp).
 - **The firewall owns one table,** `inet cherry`; networkd and nspawn keep
   `io.systemd.nat`. What comes in is the README's list, and nothing more:
@@ -148,6 +149,7 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `image` | `cherry-image` builds from a recipe, in a busybox root under `unshare -r` | static busybox, user namespaces |
 | `mcp` | the `machines` MCP server, against stand-ins for systemctl, machinectl, busctl and ip; the `storage` one, against a stand-in systemctl | node |
 | `extension` | OpenChamber's Environments extension: its manifest, as the host inspects a package, and its service, against the `machines` stand-ins | node |
+| `autostart` | `cherry-autostart` starts the environments whose record enables them, at boot, and nothing else, against a stand-in systemctl | |
 | `postbuild` | `post-build.sh` still catches a stripped `opencode` | |
 | `firewall` | the rules, in network namespaces standing in for the host, its LAN and its containers | nft, ip, busybox, user namespaces |
 | `secureboot` | the keys in `board/x86_64/secureboot/` verify, and `cherry-secureboot` enrolls them as it should, and sets dbx from `dbx.auth` | openssl |
@@ -161,7 +163,7 @@ A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
 `syntax` fail without theirs. CI installs all of them (`build.yml`, "Install
 check tools"). An agent sandbox usually has python3, node, make, git, systemd
 and openssl, and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the
-submodule: then `make -k check` runs twelve checks, skips three and fails
+submodule: then `make -k check` runs thirteen checks, skips three and fails
 three for want of tools. Get the
 submodule with `git submodule update --init --depth 1 buildroot` and install
 what you can; in the pull request, say which checks ran.
@@ -408,7 +410,7 @@ two defconfigs' toolchain options must stay the same.
 | Secure Boot | `package/cherry-secureboot/`, `board/x86_64/secureboot/`, `scripts/secureboot.py`, the `release` job of `build.yml`, `post-image.sh` (a local chain's signature) | `tests/secureboot.sh`, `tests/ceremony.sh`, `secureboot.py check`, s13 | Secure Boot |
 | Kernel lockdown, signed modules | `board/x86_64/linux.fragment`, `check-kconfig.sh` | s1 | Secure Boot |
 | Containers from the host's tools | `package/debootstrap/`, `package/ubuntu-keyring/`, `package/rpmstrap/`, `package/pacman/`, `package/arch-install-scripts/`, `package/cherry/cherry-bootstrap` | `tests/bootstrap.sh`, s5, s6, s7 | Running containers |
-| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, s10 | Building images, Environments |
+| Images from recipes; environments from profiles, the agent's tools and OpenChamber's extension; the enabled ones started at boot | `package/cherry/cherry-image`, `cherry-image-setup`, `profiles/`, `environments.js`, `cherry-machines-mcp.js`, `machine-images.md`, `opencode.json`, `openchamber-extension/`, `openchamber-registry.json`, `cherry-autostart`, `cherry-autostart.service` | `tests/image.sh`, `tests/mcp.js`, `tests/extension.js`, `tests/autostart.sh`, s10 | Building images, Environments |
 | Storage pools, the agent's tools | `package/cherry/cherry-storage`, `cherry-storage{,@}.service`, `lvm.conf`, `storage-pv.conf`, `cherry-storage-mcp.js`, `mcp-stdio.js`, `storage.md`, `configure-storage.md`, `manage-storage.md`; `linux.fragment`, `10-cherry.preset` | `tests/storage.py`, `tests/storage-mcp.js`, `tests/polkit.js`, s2, s14 | Storage |
 | The `cherry` user and its privileges | `package/cherry/50-cherry.rules`, `cherry.service`, `cherry-connect-url` | `tests/polkit.js`, s9 | As the cherry user, Cherry service |
 | OpenCode, OpenChamber, Bun | `package/opencode/`, `package/openchamber/`, `package/bun/` | `tests/postbuild.sh`, s8, s9 | OpenCode, OpenChamber |

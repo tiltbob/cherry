@@ -1,0 +1,25 @@
+[Unit]
+Description=Cherry: Start the Enabled Environments
+Documentation=https://github.com/tiltbob/cherry#environments
+# The environments the cherry user enabled, to start at boot (README:
+# Environments): each is started as `machinectl enable` would have systemd
+# start it, with systemd-nspawn@<name>.service in machines.target.wants,
+# which /etc, read-only, cannot hold, and which /var, mounted after systemd
+# loaded its units, could not show it. So this unit, wanted by
+# machines.target as those units would be, and before it, starts them from
+# the records on /var (/usr/libexec/cherry-autostart), and machines.target
+# waits for them as it would. One that fails is left among the failed units,
+# and the rest start.
+RequiresMountsFor=/var/lib/cherry/environments
+After=network.target
+Before=machines.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/cherry-autostart
+# The containers, started all at once and waited for: systemd-nspawn@.service
+# gives each two minutes.
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=machines.target

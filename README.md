@@ -139,7 +139,9 @@ the smoke test's scenario list, the polkit rules, `cherry-bootstrap`'s
 argument checks and tool calls, `cherry-image`'s builds from a recipe, in a
 busybox root, the OpenCode MCP servers' tools and the Environments
 extension's manifest and service against stand-ins for systemctl,
-machinectl, busctl and ip, `cherry-storage`'s claims, LVM calls, sealing of
+machinectl, busctl and ip, `cherry-autostart`'s starts of the enabled
+environments against a stand-in systemctl, `cherry-storage`'s claims, LVM
+calls, sealing of
 the keys and `/var` from the pool, in RAM and on its disks, against
 stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
@@ -252,6 +254,8 @@ through SMBIOS, as a platform would.
      [Firewall](#firewall))
    - when the firmware is in Secure Boot setup mode, enrolls Cherry's keys
      and reboots, before anything else starts (see [Secure Boot](#secure-boot))
+   - starts the environments the agent enabled, once `/var` is mounted (see
+     [Environments](#environments))
 
 Because `/etc` is read-only, `/root` is a symlink into `/var`.
 
@@ -815,7 +819,12 @@ refuses every release it signed; dbx holds no hashes of single releases.
 ## Running containers
 
 Put container trees in `/var/lib/machines`, then start them with
-`machinectl start <name>` or run `systemd-nspawn` directly.
+`machinectl start <name>` or run `systemd-nspawn` directly. `machinectl
+enable`, which would have one start at boot, has nothing to write to: it
+puts the unit in `/etc/systemd/system/machines.target.wants/`, and `/etc` is
+read-only. An environment is enabled to start at boot instead, with a record
+on `/var` that `cherry-autostart.service` reads (see
+[Environments](#environments)).
 
 With `--network-veth` (or `VirtualEthernet=yes`), systemd-networkd serves DHCP
 to the container and masquerades its traffic. The firewall lets the container
@@ -1016,11 +1025,31 @@ manage:
   removed on its own, with changes of its own; several can come from one
   image.
   `/var/lib/cherry/environments/<name>/environment.conf` records its image,
-  and is what marks the machine as an environment. An image with environments
-  is neither removed nor rebuilt until they are gone.
+  and whether it is enabled, and is what marks the machine as an environment.
+  An image with environments is neither removed nor rebuilt until they are
+  gone.
+- An environment is **enabled** to start at boot, or disabled, as a systemd
+  unit is, and the words are systemctl's: `start` and `stop` act now,
+  `enable` and `disable` say what the next boot does, and either takes `now`
+  to do both, as `systemctl enable --now` does; removing an environment
+  disables it. `machinectl enable` would do it, were `/etc` writable (see
+  [Running containers](#running-containers)); and a `.wants` directory on
+  `/var` would not do either, as systemd loads its units before `/var` is
+  mounted. So `enable` writes `Enabled=yes` in the environment's record, the
+  `cherry` user's own file, and at boot `cherry-autostart.service`
+  ([`/usr/libexec/cherry-autostart`](package/cherry/cherry-autostart)), once
+  `/var` is mounted and before `machines.target`, which wants it as it would
+  the containers' units, starts `systemd-nspawn@<name>.service` for every
+  enabled record, all at once and waited for: `machines.target` is reached
+  once they are up, and one that fails to start is left among the failed
+  units while the rest start (`journalctl -u cherry-autostart` says which).
+  Its names are checked, and starting those units is what the `cherry` user
+  may do itself, so it does nothing for that user that it could not. Until
+  the machine's pool has disks, `/var` is in RAM, and nothing is enabled at
+  the next boot, as nothing is there (see [Disks](#disks)).
 
 A machine with neither, made by hand with the bootstrap tools, is "other":
-it can be cloned, started and stopped, not built. That is the whole
+it can be cloned, started and stopped, not built or enabled. That is the whole
 interface: a profile and a name make an image, an image and a name make an
 environment. No package list, file or script comes from the person or the
 agent asking; a new need is a new profile.
@@ -1031,27 +1060,30 @@ front ends that run as the `cherry` user with its privileges alone:
 - **OpenChamber's Environments extension** (see [OpenChamber](#openchamber)):
   a panel in the rail with the environments (create from an image, or from a
   profile whose image is built first when there is none; start, stop,
-  remove, status) and the images (build from a profile, the build log,
-  remove); the `/env` command in the chat (`/env create ubuntu-noble yarp`,
-  `/env status yarp`, `/env build debian-trixie`); and a box that reads a
-  sentence ("create a new ubuntu environment named yarp") into one of those,
-  shown back before it runs. No model is involved: a small parser does it,
-  and asks when a word is missing. The panel talks to a service OpenChamber
+  enable, disable, remove, status) and the images (build from a profile, the
+  build log, remove); the `/env` command in the chat (`/env create
+  ubuntu-noble yarp`, `/env status yarp`, `/env enable yarp now`, `/env build
+  debian-trixie`); and a box that reads a sentence ("create a new ubuntu
+  environment named yarp", "start yarp at boot") into one of those, shown
+  back before it runs. No model is involved: a small parser does it, and
+  asks when a word is missing. The panel talks to a service OpenChamber
   starts on loopback inside `cherry.service`, which holds the verbs and
-  follows builds, clones, starts and stops as jobs.
+  follows builds, clones, starts, stops and, with `now`, enables and
+  disables as jobs.
 - **OpenCode's MCP server**, `machines` (`/usr/lib/cherry/machines-mcp.js`,
   run on Bun), named by `/etc/opencode/opencode.json`, OpenCode's system
   configuration, with a skill, `machine-images`, for the workflow. Its tools:
 
 | Tool | Does |
 |---|---|
-| `list` | the images (with the profile each came from and its environments), the environments (with their image, and whether they run), the other machines, and the profiles |
+| `list` | the images (with the profile each came from and its environments), the environments (with their image, whether they run and whether they are enabled), the other machines, and the profiles |
 | `build` | an image from a profile: copies it to the recipe and runs `cherry-image@build:<name>`; with `replace`, `machinectl remove` first, if no environments remain |
 | `remove_image` | `machinectl remove` of an image with no environments left; its recipe stays |
 | `log` | the end of an image's build log |
 | `create` | an environment: `machinectl clone` of an image by name, or of the image of a profile, named after it and built first when there is none |
 | `start`, `stop` | `machinectl start`, not of an image, waiting until the container lets a shell in; `poweroff`, then `terminate` if it is still up |
-| `status` | the kind, image or profile, and through `machinectl shell` a fixed script: systemd's state, the address of `host0`, the failed units |
+| `enable`, `disable` | `Enabled=yes`, or `no`, in the environment's record, for `cherry-autostart.service` at the next boot; with `now`, `start` or `stop` as well |
+| `status` | the kind, image or profile, whether an environment is enabled, and through `machinectl shell` a fixed script: systemd's state, the address of `host0`, the failed units |
 | `remove` | `machinectl remove` of an environment, with its settings and its record |
 
 The same configuration denies the agent every other tool (`permission`:

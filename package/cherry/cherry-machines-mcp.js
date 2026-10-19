@@ -8,17 +8,19 @@
 //
 // Tools: list; build, remove_image and log, for images, each built from a
 // profile (a recipe written by a person) and never started; create, start,
-// stop, status and remove, for environments, each a clone of an image. No
-// tool takes a package list, a file, a script or a command, and none writes
-// an image out: images stay on this machine.
+// stop, enable, disable, status and remove, for environments, each a clone
+// of an image, which start, stop, enable and disable treat as systemctl does
+// a unit. No tool takes a package list, a file, a script or a command, and
+// none writes an image out: images stay on this machine.
 "use strict";
 const { serve } = require("./mcp-stdio.js");
 const env = require("./environments.js");
 
 const INSTRUCTIONS = `These tools manage the container images and environments of this Cherry machine. An image is \
 built from one of the machine's profiles (a distribution with its setup, chosen by a person) and never started; an \
-environment is a clone of an image, with its own changes, which you start, read the status of, stop and remove. \
-Several environments can come from one image. Load the machine-images skill before building or creating one.`;
+environment is a clone of an image, with its own changes, which you start, read the status of, stop and remove, \
+and enable to start at boot or disable, as systemctl does a unit. Several environments can come from one image. \
+Load the machine-images skill before building or creating one.`;
 
 const NAME = { type: "string", description: "The environment's name, as machinectl shows it" };
 const IMAGE = { type: "string", description: "The image's name, as machinectl shows it" };
@@ -123,10 +125,35 @@ const TOOLS = [
     call: (args, signal) => env.stop(args.name, { timeout: args.timeout ?? 60, signal }),
   },
   {
+    name: "enable",
+    description: "Have an environment start at boot, as systemctl enable does for a unit: the machine starts it " +
+      "once /var is mounted (cherry-autostart.service). With now, start it too, as enable --now. An image is " +
+      "not enabled.",
+    inputSchema: {
+      type: "object",
+      properties: { name: NAME, now: { type: "boolean", description: "Start it now as well, as systemctl enable --now" } },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    call: (args, signal) => env.enable(args.name, { now: args.now === true, signal }),
+  },
+  {
+    name: "disable",
+    description: "Have an environment no longer start at boot, as systemctl disable does for a unit. With now, " +
+      "stop it too (poweroff, then terminate), as disable --now.",
+    inputSchema: {
+      type: "object",
+      properties: { name: NAME, now: { type: "boolean", description: "Stop it now as well, as systemctl disable --now" } },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    call: (args, signal) => env.disable(args.name, { now: args.now === true, signal }),
+  },
+  {
     name: "status",
     description: "What a machine reports: its kind (image, environment or other), whether it exists and runs, " +
-      "its image or profile, and then systemd's state in it (running, degraded, ...), the address of its veth " +
-      "link host0, and its failed units.",
+      "its image or profile, for an environment whether it is enabled to start at boot, and then systemd's state " +
+      "in it (running, degraded, ...), the address of its veth link host0, and its failed units.",
     inputSchema: { type: "object", properties: { name: NAME }, required: ["name"], additionalProperties: false },
     annotations: { readOnlyHint: true },
     async call(args, signal) {

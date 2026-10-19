@@ -56,11 +56,14 @@
      the cherry user in cherry.service's sandbox, a Debian image is built from
      a profile of the machine's own (cherry-image@.service) and refused a
      start, an environment is cloned from it with its settings, started with
-     its network up, read with status, stopped, and removed before the image
-     is; OpenChamber lists the Environments extension as a granted built-in,
-     whose service answers in the same sandbox; cherry-image@ writes nothing
-     out, as images never leave the machine (skipped when the guest cannot
-     reach deb.debian.org)
+     its network up, read with status, stopped, enabled to start at boot,
+     which the next boot does (cherry-autostart.service, before
+     machines.target, from the record on the machine's disk), disabled, which
+     stops it and leaves the unit nothing to start, and removed before the
+     image is; OpenChamber lists the Environments extension as a granted
+     built-in, whose service answers in the same sandbox; cherry-image@
+     writes nothing out, as images never leave the machine (skipped when the
+     guest cannot reach deb.debian.org)
   11. zram is the swap device, and under memory pressure tmpfs pages go to it,
      compressed, and come back intact
   12. without a TPM, boot stops at cherry-no-tpm.target with the error on the
@@ -1267,6 +1270,57 @@ class Smoke:
                   f"the Environments service (pid {pid}) does not run as cherry, on Bun, under the system call filter")
 
         check(self.mcp("stop", {"name": env}, timeout=180) == f"{env} is stopped", f"{env} did not stop")
+
+        # Enabled, it starts at boot: Enabled=yes in its record, which cherry-autostart.service reads once /var is
+        # mounted and starts systemd-nspawn@ for, before machines.target, as machinectl enable would have systemd do
+        # were /etc not read-only. The image is not enabled, and nothing is started until the boot.
+        text = self.mcp("enable", {"name": image}, error=True)
+        check("is an image" in text, f"enabling the image was not refused as such:\n{text}")
+        check(self.mcp("enable", {"name": env}) == f"{env} is enabled: it starts at boot", f"{env} was not enabled")
+        check(vm.run(f"stat -c %U {record}") == "cherry" and vm.run(f"grep -c '^Enabled=' {record}") == "1" and
+              vm.run(f"grep -x Enabled=yes {record}") == "Enabled=yes",
+              f"the record is not enabled: {vm.run(f'cat {record}')}")
+        check(vm.run(f"systemctl is-active systemd-nspawn@{env}.service", check_rc=False)[1] == "inactive",
+              "enable started the environment")
+        listed = json.loads(self.mcp("list", {}))
+        check([(e["name"], e["enabled"], e["running"]) for e in listed["environments"]] == [(env, True, False)],
+              f"list does not show the environment enabled:\n{listed}")
+        check(vm.run("systemctl is-enabled cherry-autostart.service") == "enabled" and
+              vm.run("systemctl show -p WantedBy --value cherry-autostart.service") == "machines.target",
+              "cherry-autostart.service is not wanted by machines.target")
+        vm.send("systemctl poweroff\n")
+        vm.wait_exit(300)
+        self.boot(disks=[self.var_disk])
+        self.check_var_on_pool("vda1")
+        check(vm.run(f"systemctl is-active systemd-nspawn@{env}.service") == "active", f"{env} did not start at boot")
+        check(vm.run("systemctl show -p Result --value cherry-autostart.service") == "success",
+              "cherry-autostart.service did not succeed")
+        shown = vm.run("journalctl -b -u cherry-autostart --no-pager -o cat")
+        check(f"starting: systemd-nspawn@{env}.service" in shown,
+              f"cherry-autostart.service did not start {env}:\n{shown}")
+        up, reached = (int(vm.run(f"systemctl show -p ActiveEnterTimestampMonotonic --value {unit}")) for unit in
+                       (f"systemd-nspawn@{env}.service", "machines.target"))
+        check(0 < up <= reached, f"machines.target was reached ({reached}) before {env} was up ({up})")
+        status = json.loads(self.mcp("status", {"name": env}, timeout=180))
+        check(status["running"] and status["enabled"] and status["image"] == image,
+              f"status does not show the environment running and enabled after the boot:\n{status}")
+        text = vm.run(f"sleep 10 | machinectl -q shell {env} /bin/sh -c '{command}' | tr -d '\\r'", timeout=60)
+        check(f"hello from {env}" in text, f"the environment started at boot does not answer:\n{text}")
+
+        # Disabled, with now: stopped, and the unit run again, as the next boot would, starts nothing.
+        text = self.mcp("disable", {"name": env, "now": True}, timeout=180)
+        check(text == f"{env} is disabled: it does not start at boot. {env} is stopped", f"disable answered:\n{text}")
+        check(vm.run(f"grep -x Enabled=no {record}") == "Enabled=no",
+              f"the record is not disabled: {vm.run(f'cat {record}')}")
+        check(vm.run(f"systemctl is-active systemd-nspawn@{env}.service", check_rc=False)[1] == "inactive",
+              f"{env} is still running after disable with now")
+        vm.run("systemctl restart cherry-autostart.service")
+        shown = vm.run("journalctl -b -u cherry-autostart --no-pager -o cat")
+        check(shown.count("starting: ") == 1 and "no environment is enabled" in shown,
+              f"cherry-autostart.service, run again, did not find nothing to start:\n{shown}")
+        check(vm.run(f"systemctl is-active systemd-nspawn@{env}.service", check_rc=False)[1] == "inactive",
+              f"{env} was started by the unit after disable")
+        check(json.loads(self.mcp("status", {"name": env}))["enabled"] is False, "status still shows it enabled")
 
         # Images never leave the machine: cherry-image@ takes no export verb, and writes nothing out.
         rc, out = vm.run(f"{AS_CHERRY} systemctl start cherry-image@tar:{image}.service", check_rc=False)

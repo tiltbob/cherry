@@ -129,6 +129,8 @@
     create: (name, from) => api("POST", "/environments", { name, ...from }),
     start: (name) => api("POST", `/environments/${encode(name)}/start`, {}),
     stop: (name) => api("POST", `/environments/${encode(name)}/stop`, {}),
+    enable: (name, now) => api("POST", `/environments/${encode(name)}/enable`, { now: Boolean(now) }),
+    disable: (name, now) => api("POST", `/environments/${encode(name)}/disable`, { now: Boolean(now) }),
     status: (name) => api("GET", `/environments/${encode(name)}`),
     remove: (name) => api("DELETE", `/environments/${encode(name)}`),
   };
@@ -140,19 +142,22 @@
     ["create", ["create", "make", "new", "spin", "launch", "add", "provision", "setup", "clone", "instantiate"]],
     ["start", ["start", "boot", "run", "bring", "wake", "resume"]],
     ["stop", ["stop", "shutdown", "shut", "halt", "poweroff", "kill", "pause"]],
+    ["enable", ["enable", "autostart"]],
+    ["disable", ["disable"]],
     ["remove", ["remove", "delete", "destroy", "rm", "drop", "purge"]],
     ["log", ["log", "logs", "why"]],
     ["status", ["status", "state", "check", "inspect", "info", "health", "ip", "address"]],
     ["list", ["list", "ls", "environments", "envs", "images", "profiles", "what", "show"]],
   ];
   const USAGE = "list | build <profile> [name] | create <image or profile> <name> | start, stop, status or remove <name> " +
-    "| log or remove image <name>";
+    "| enable or disable <name> [now] | log or remove image <name>";
   const FILLER = new Set(["a", "an", "the", "environment", "env", "container", "box", "machine", "vm", "image",
     "named", "called", "name", "with", "from", "please", "me", "up", "of", "it", "and", "to", "for", "using",
     "based", "on", "in", "my", "this", "that", "is", "do", "we", "have", "again", "replace", "replacing",
-    "one", "fresh", "down", "out", "into", "as", "be", "there", "server", "instance", "its", "off", "another"]);
+    "one", "fresh", "down", "out", "into", "as", "be", "there", "server", "instance", "its", "off", "another",
+    "at", "boot", "now", "reboot", "every", "each", "time", "automatically", "too", "also", "only"]);
 
-  // parse(text, list): {verb, name?, image?, profile?, replace?} or {help}.
+  // parse(text, list): {verb, name?, image?, profile?, replace?, now?} or {help}.
   function parse(text, list) {
     const profiles = list ? list.profiles : [];
     const images = list ? list.images.map((i) => i.name) : [];
@@ -167,9 +172,14 @@
     }
     const replace = words.includes("rebuild") || words.includes("replace") || words.includes("again");
     const aboutImage = words.includes("image") || words.includes("images");
+    // "at boot", "on boot": start is enable, stop is disable; "now" is enable --now.
+    const atBoot = words.some((word, i) => word === "boot" && i > 0 && ["at", "on"].includes(words[i - 1]));
+    const now = words.includes("now");
     if (!verb) return { help: `I did not find what to do in that. ${USAGE}.` };
     if (verb === "list") return { verb };
     if (verb === "remove" && aboutImage) verb = "remove_image";
+    if (atBoot && verb === "start") verb = "enable";
+    if (atBoot && verb === "stop") verb = "disable";
 
     let profile = null;
     let image = null;
@@ -203,6 +213,7 @@
       return image ? { verb, name, image } : { verb, name, profile: profile.id };
     }
     if (!name) return { help: `Which ${verb === "remove_image" || verb === "log" ? "image" : "environment"}? ${USAGE}.` };
+    if (verb === "enable" || verb === "disable") return { verb, name, now };
     return { verb, name };
   }
 
@@ -218,6 +229,8 @@
         : `Create the environment ${plan.name} from ${title(plan.profile)}${exists(plan.profile) ? "" : ", building the image first (minutes)"}.`;
       case "start": return `Start ${plan.name}.`;
       case "stop": return `Stop ${plan.name}.`;
+      case "enable": return `Have ${plan.name} start at boot${plan.now ? ", and start it now" : ""}.`;
+      case "disable": return `Have ${plan.name} no longer start at boot${plan.now ? ", and stop it now" : ""}.`;
       case "status": return `Show the status of ${plan.name}.`;
       case "log": return `Show the build log of the image ${plan.name}.`;
       case "remove": return `Remove the environment ${plan.name}. Its files are deleted; its image stays.`;
@@ -228,7 +241,8 @@
 
   function summarizeList(list) {
     const images = list.images.map((i) => `${i.name}${i.environments.length ? ` (${i.environments.length})` : ""}`);
-    const envs = list.environments.map((e) => `${e.name}${e.running ? " (running)" : ""}`);
+    const flags = (e) => [e.running && "running", e.enabled && "enabled"].filter(Boolean);
+    const envs = list.environments.map((e) => `${e.name}${flags(e).length ? ` (${flags(e).join(", ")})` : ""}`);
     const jobs = (list.jobs || []).filter((j) => j.state === "running").map((j) => `${j.name} (${j.verb}...)`);
     return `Images: ${images.join(", ") || "none"}. Environments: ${[...envs, ...jobs].join(", ") || "none"}. ` +
       `Profiles: ${list.profiles.map((p) => p.id).join(", ") || "none"}.`;
@@ -238,9 +252,10 @@
     const job = s.job && s.job.state === "failed" ? `; ${s.job.verb} failed: ${s.job.error}` : "";
     if (!s.exists) return `${s.name}: no such machine${job}.`;
     const of = s.kind === "environment" ? ` of ${s.image}` : s.kind === "image" && s.profile ? ` from ${s.profile.title}` : "";
-    if (!s.running) return `${s.name}: ${s.kind}${of}, stopped${job}.`;
+    const atBoot = s.enabled ? ", starts at boot" : "";
+    if (!s.running) return `${s.name}: ${s.kind}${of}, stopped${atBoot}${job}.`;
     const failed = s.failed && s.failed.length ? `, failed: ${s.failed.join(" ")}` : "";
-    return `${s.name}: ${s.kind}${of}, running, systemd ${s.system || "?"}, host0 ${s.address || "no address yet"}${failed}.`;
+    return `${s.name}: ${s.kind}${of}, running${atBoot}, systemd ${s.system || "?"}, host0 ${s.address || "no address yet"}${failed}.`;
   }
 
   // Run a plan; the text to tell the user.
@@ -257,6 +272,14 @@
       }
       case "start": await service.start(plan.name); return `Starting ${plan.name}.`;
       case "stop": await service.stop(plan.name); return `Stopping ${plan.name}.`;
+      case "enable": {
+        const r = await service.enable(plan.name, plan.now);
+        return r.message || `${plan.name} starts at boot. Starting it.`;
+      }
+      case "disable": {
+        const r = await service.disable(plan.name, plan.now);
+        return r.message || `${plan.name} no longer starts at boot. Stopping it.`;
+      }
       case "status": return summarizeStatus(await service.status(plan.name));
       case "log": {
         const l = await service.log(plan.name, 20);
@@ -437,6 +460,8 @@
   }
 
   const busy = (verb, name) => state.busy.has(`${verb}:${name}`);
+  // The jobs an environment's row shows.
+  const ENVIRONMENT_JOBS = ["create", "start", "stop", "enable", "disable"];
 
   function imageRows() {
     const list = state.list;
@@ -471,13 +496,18 @@
       const job = jobs.get(name) || null;
       const [cls, label] = stateOf(entry, job);
       const working = job && job.state === "running";
+      const enabled = entry && entry.enabled === true;
       return h("tr", { class: state.selected === name ? "selected" : null },
         h("td", { class: "name", onclick: () => select(name), title: "Details" }, name),
         h("td", {}, (entry && entry.image) || (job && (job.image || job.profile)) || ""),
         h("td", {}, h("span", { class: `state ${cls}` }, label)),
+        h("td", {}, entry && entry.enabled !== undefined ? (enabled ? "enabled" : "") : ""),
         h("td", { class: "actions" },
           entry && !entry.running && h("button", { class: "small", disabled: working || busy("start", name), onclick: () => act({ verb: "start", name }) }, "Start"),
           entry && entry.running && h("button", { class: "small", disabled: working || busy("stop", name), onclick: () => act({ verb: "stop", name }) }, "Stop"),
+          entry && entry.enabled !== undefined && h("button", { class: "small", disabled: working || busy(enabled ? "disable" : "enable", name),
+            title: enabled ? "No longer start it at boot" : "Start it at boot",
+            onclick: () => act({ verb: enabled ? "disable" : "enable", name, now: false }) }, enabled ? "Disable" : "Enable"),
           entry && h("button", { class: "small danger", disabled: working || entry.running || busy("remove", name),
             title: entry.running ? "Stop it first" : null,
             onclick: () => act({ verb: "remove", name }, `Remove ${name}? Its files are deleted.`) }, "Remove")));
@@ -498,6 +528,7 @@
       `${job.state}${job.profile ? `, from ${job.profile}` : ""}${job.error ? `: ${job.error}` : ""}${job.message && job.verb !== "build" ? `: ${job.message}` : ""}`]);
     if (d.exists !== undefined) items.push(["Exists", d.exists ? "yes" : "no"]);
     if (d.kind !== "image") items.push(["Running", d.running ? "yes" : "no"]);
+    if (d.enabled !== undefined) items.push(["At boot", d.enabled ? "enabled: it starts at boot" : "disabled"]);
     if (d.running) {
       items.push(["systemd", d.system || "unknown"]);
       items.push(["host0", d.address || "no address yet"]);
@@ -556,12 +587,12 @@
         h("input", { name: "name", type: "text", placeholder: "name", "aria-label": "Name", required: true,
           pattern: "[A-Za-z0-9][A-Za-z0-9-]{0,47}", autocomplete: "off" }),
         h("button", { type: "submit", class: "primary", disabled: !sources.length || state.busy.has("ask") }, "Create")),
-      h("p", { class: "hint" }, "An environment is a clone of an image, with changes of its own. From a profile, the image is named after it and built first when there is none."),
+      h("p", { class: "hint" }, "An environment is a clone of an image, with changes of its own. From a profile, the image is named after it and built first when there is none. Enabled, it starts at boot."),
       !list ? h("div", { class: "empty" }, "Waiting for the service...") :
-        !environmentRows(list.environments, ["create", "start", "stop"]).length ? h("div", { class: "empty" }, "No environments yet.") :
+        !environmentRows(list.environments, ENVIRONMENT_JOBS).length ? h("div", { class: "empty" }, "No environments yet.") :
           h("table", {},
-            h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Image"), h("th", {}, "State"), h("th", {}))),
-            h("tbody", {}, environmentRows(list.environments, ["create", "start", "stop"]))),
+            h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}, "Image"), h("th", {}, "State"), h("th", {}, "At boot"), h("th", {}))),
+            h("tbody", {}, environmentRows(list.environments, ENVIRONMENT_JOBS))),
 
       h("h2", {}, "Images"),
       h("form", { class: "create", onsubmit: submitBuild },
@@ -584,7 +615,7 @@
         h("h2", {}, "Other machines"),
         h("p", { class: "hint" }, "Made by hand, outside the profiles: started and stopped here, not built."),
         h("table", {},
-          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}), h("th", {}, "State"), h("th", {}))),
+          h("thead", {}, h("tr", {}, h("th", {}, "Name"), h("th", {}), h("th", {}, "State"), h("th", {}), h("th", {}))),
           h("tbody", {}, environmentRows(list.other, ["start", "stop"]))),
       ] : null,
       detail(),
