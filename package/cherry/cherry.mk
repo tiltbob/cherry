@@ -12,8 +12,9 @@
 # container privileges: polkit rules for machinectl, cherry-bootstrap@.service,
 # which creates containers for it as root, and cherry-image@.service, which
 # builds images for it as root; the environments built on them: the verbs
-# (environments.js) and the profiles they build from (profiles/, to
-# /usr/lib/cherry/profiles); its storage: cherry-storage@.service, which
+# (environments.js), the profiles they build from (profiles/, to
+# /usr/lib/cherry/profiles) and cherry-autostart.service, which starts the
+# enabled ones at boot; its storage: cherry-storage@.service, which
 # claims disks and makes LVM pools and volumes of them for it as root, with
 # Cherry's /etc/lvm/lvm.conf (over lvm2's), and cherry-storage.service, which
 # mounts /var from the pool cherry before var.mount, or makes that pool in
@@ -83,6 +84,10 @@ define CHERRY_INSTALL_INIT_SYSTEMD
 		$(TARGET_DIR)/usr/libexec/cherry-image
 	$(INSTALL) -D -m 0755 $(CHERRY_PKGDIR)/cherry-image-setup \
 		$(TARGET_DIR)/usr/libexec/cherry-image-setup
+	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-autostart.service \
+		$(TARGET_DIR)/usr/lib/systemd/system/cherry-autostart.service
+	$(INSTALL) -D -m 0755 $(CHERRY_PKGDIR)/cherry-autostart \
+		$(TARGET_DIR)/usr/libexec/cherry-autostart
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-storage@.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/cherry-storage@.service
 	$(INSTALL) -D -m 0644 $(CHERRY_PKGDIR)/cherry-storage.service \

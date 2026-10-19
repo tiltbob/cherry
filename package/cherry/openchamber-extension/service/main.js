@@ -16,12 +16,15 @@
 //   GET    /environments/<name>        status of any machine, with the last job on it
 //   POST   /environments/<name>/start  {timeout?}: 202
 //   POST   /environments/<name>/stop   {timeout?}: 202
+//   POST   /environments/<name>/enable {now?, timeout?}: at boot; with now, started too, 202
+//   POST   /environments/<name>/disable  {now?, timeout?}: no longer at boot; with now, stopped too, 202
 //   DELETE /environments/<name>
 // A build runs for minutes, a clone for seconds to a minute, and a start or
 // stop for up to two: longer than the proxy waits, so those answer at once
 // with a job, which GET /environments and GET /environments/<name> report
 // until it is done (state running, done or failed, with its message or
-// error). One job at a time per name.
+// error). One job at a time per name. An enable or disable alone is a line
+// in the record, answered with its message at once.
 "use strict";
 const crypto = require("crypto");
 const http = require("http");
@@ -170,6 +173,14 @@ async function handle(req, url) {
     const body = parseBody(await readBody(req));
     const timeout = seconds(body.timeout, action === "start" ? 120 : 60, 600);
     return [202, startJob(name, action, {}, () => env[action](name, { timeout }))];
+  }
+  if (parts.length === 3 && (parts[2] === "enable" || parts[2] === "disable") && req.method === "POST") {
+    const action = parts[2];
+    env.machineName(name);
+    const body = parseBody(await readBody(req));
+    const timeout = seconds(body.timeout, action === "enable" ? 120 : 60, 600);
+    if (body.now !== true) return [200, { message: await env[action](name) }];
+    return [202, startJob(name, action, {}, () => env[action](name, { now: true, timeout }))];
   }
   throw new HttpError(404, "not found");
 }

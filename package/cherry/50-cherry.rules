@@ -14,7 +14,10 @@
 // not machined: it starts systemd-nspawn@<name>.service, so those units it
 // may start, stop and restart; cherry-bootstrap@, cherry-image@ and
 // cherry-storage@ units it may start; no other unit (not cherry-storage.service,
-// which mounts the volumes at boot). Everyone else keeps polkit's defaults.
+// which mounts the volumes at boot), and no unit file: an environment it
+// enables to start at boot is a line in its own record, which
+// cherry-autostart.service reads, not a `machinectl enable`, which /etc,
+// read-only, could not take. Everyone else keeps polkit's defaults.
 polkit.addRule(function(action, subject) {
     if (subject.user != "cherry")
         return polkit.Result.NOT_HANDLED;

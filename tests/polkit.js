@@ -99,8 +99,11 @@ notHandled.push(["cherry", MANAGE_UNITS, {}]);
 notHandled.push(["cherry", MANAGE_UNITS, { verb: "start" }]);
 notHandled.push(["cherry", MANAGE_UNITS, { unit: NSPAWN }]);
 for (const verb of ["stop", "restart"]) notHandled.push(["cherry", MANAGE_UNITS, { unit: "cherry-storage.service", verb }]);
-// Nothing beyond containers: no unit files, no power.
-notHandled.push(["cherry", "org.freedesktop.systemd1.manage-unit-files", { unit: NSPAWN, verb: "enable" }]);
+// Nothing beyond containers: no unit files (an environment is enabled to start at boot in the user's own record,
+// which cherry-autostart.service reads: not machinectl enable, which the read-only /etc could not take), no power.
+for (const verb of ["enable", "disable"]) {
+  notHandled.push(["cherry", "org.freedesktop.systemd1.manage-unit-files", { unit: NSPAWN, verb }]);
+}
 notHandled.push(["cherry", "org.freedesktop.login1.power-off", {}]);
 notHandled.push(["cherry", "org.freedesktop.login1.reboot", {}]);
 // Nobody else gets what cherry gets.

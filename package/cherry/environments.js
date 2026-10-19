@@ -19,11 +19,15 @@
 //   never started: it is what environments are made from.
 // - An environment is a clone of an image (machinectl clone: a copy, with the
 //   image's nspawn settings), started, stopped and removed on its own, with
-//   its own changes. /var/lib/cherry/environments/<name>/environment.conf
-//   records the image it came from; that record is what marks a machine as an
-//   environment. A machine with neither, made by hand with cherry-bootstrap,
+//   its own changes, and enabled to start at boot, or disabled, as a systemd
+//   unit is. /var/lib/cherry/environments/<name>/environment.conf records
+//   the image it came from, and Enabled=yes once it is enabled; that record
+//   is what marks a machine as an environment, and what
+//   cherry-autostart.service reads at boot, once /var is mounted, to start
+//   the enabled ones: `machinectl enable` would put the unit in /etc, which
+//   is read-only. A machine with neither, made by hand with cherry-bootstrap,
 //   is listed as "other": it can be cloned, started and stopped, but not
-//   built or rebuilt.
+//   built, rebuilt or enabled.
 //
 // Nothing here takes a package list, a file or a script: those are a
 // profile's, written by a person. $CHERRY_IMAGES_DIR, $CHERRY_IMAGE_LOGS,
@@ -213,17 +217,21 @@ function recipeProfile(name) {
   return meta && meta.Profile ? { id: meta.Profile, title: meta.Title || meta.Profile } : null;
 }
 
-// An environment's record: the image it was cloned from; null for a machine
-// that is no environment.
+// An environment's record: the image it was cloned from, and whether it is
+// enabled, to start at boot; null for a machine that is no environment.
 function record(name) {
   const conf = readConf(path.join(ENVIRONMENTS, name, "environment.conf"));
-  return conf && conf.Image ? { image: conf.Image, created: conf.Created || null } : null;
+  return conf && conf.Image
+    ? { image: conf.Image, created: conf.Created || null, enabled: conf.Enabled === "yes" }
+    : null;
 }
 
-function writeRecord(name, image) {
+// The record, written from its keys in order: Image=, Created=, Enabled=.
+function writeRecord(name, conf) {
   const dir = path.join(ENVIRONMENTS, name);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "environment.conf"), `Image=${image}\nCreated=${new Date().toISOString()}\n`);
+  fs.writeFileSync(path.join(dir, "environment.conf"),
+    Object.entries(conf).map(([key, value]) => `${key}=${value}\n`).join(""));
 }
 
 function dropRecord(name) {
@@ -285,8 +293,8 @@ function writeRecipe(name, p) {
 // ---- The verbs ----
 
 // The images, with the environments made from each; the environments, with
-// their image and whether they run; the other machines; the containers
-// running; the profiles.
+// their image, whether they run and whether they are enabled; the other
+// machines; the containers running; the profiles.
 async function list() {
   const machines = await knownMachines();
   const up = new Set((await runningMachines()).map((m) => m.name));
@@ -365,7 +373,7 @@ async function create(name, from = {}, { signal } = {}) {
   check(!(await known(name)), `${name} exists already`);
   const built = s.build ? await build(s.image, s.profile, { signal }) : null;
   await machinectl(["clone", s.image, name], signal);
-  writeRecord(name, s.image);
+  writeRecord(name, { Image: s.image, Created: new Date().toISOString() });
   return { name, image: s.image, built };
 }
 
@@ -401,6 +409,31 @@ async function stop(name, { timeout = 60, signal } = {}) {
   if (await wait(30)) return `${name} did not shut down in time and was terminated`;
   throw new ToolError(`${name} is still running`);
 }
+
+// Have an environment start at boot, or not: Enabled= in its record, which
+// cherry-autostart.service reads once /var is mounted, as `systemctl enable`
+// of its unit, systemd-nspawn@<name>.service, would have systemd do, were
+// /etc not read-only. With now, it is started, or stopped, as well, as
+// `systemctl enable --now` and `disable --now` do. An image is not enabled,
+// nor a machine that is no environment; a stale record (its machine gone)
+// is disabled, not enabled.
+async function setEnabled(name, enabled, { now = false, timeout, signal } = {}) {
+  machineName(name);
+  const verb = enabled ? "enable" : "disable";
+  const kind = kindOf(name);
+  check(kind !== "image", `${name} is an image: create an environment from it, and ${verb} that`);
+  check(kind === "environment", `${name} is not an environment: only an environment is enabled to start at boot`);
+  if (enabled) check(await known(name), `no machine ${JSON.stringify(name)}`);
+  const conf = readConf(path.join(ENVIRONMENTS, name, "environment.conf"));
+  writeRecord(name, { ...conf, Enabled: enabled ? "yes" : "no" });
+  const state = enabled ? `${name} is enabled: it starts at boot` : `${name} is disabled: it does not start at boot`;
+  if (!now) return state;
+  const done = enabled ? await start(name, { timeout, signal }) : await stop(name, { timeout, signal });
+  return `${state}. ${done}`;
+}
+
+const enable = (name, options) => setEnabled(name, true, options);
+const disable = (name, options) => setEnabled(name, false, options);
 
 // Remove an environment (or another machine that is no image), which must
 // not be running, with its settings and its record.
@@ -444,5 +477,5 @@ async function status(name, { signal } = {}) {
 module.exports = {
   ToolError, NAME, MACHINE_NAME, PROFILE_ID, RECIPES, LOGS, ENVIRONMENTS, PROFILE_DIRS,
   imageName, machineName, profileId, profiles, profile, publicProfile, kindOf, exists: known, source,
-  list, build, removeImage, log, create, start, stop, status, remove,
+  list, build, removeImage, log, create, start, stop, enable, disable, status, remove,
 };

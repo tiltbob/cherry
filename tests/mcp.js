@@ -2,8 +2,9 @@
 // package/cherry/cherry-machines-mcp.js speaks MCP over stdio, offers the
 // image and environment verbs and nothing free-form, copies the profile into
 // the recipe that cherry-image reads, clones images into environments and
-// records them, and drives cherry-image@.service and machinectl as the README
-// says: run with the stand-ins of tests/machines-standins.js. Needs node, sh
+// records them, enables them to start at boot in those records, and drives
+// cherry-image@.service and machinectl as the README says: run with the
+// stand-ins of tests/machines-standins.js. Needs node, sh
 // and coreutils' timeout; the server runs on node too, or on $MCP_RUNTIME
 // (e.g. bun, as on the image).
 "use strict";
@@ -72,7 +73,7 @@ async function main() {
   await test("tools/list: the verbs, nothing free-form", async () => {
     const { tools } = (await c.request("tools/list")).result;
     assert.deepStrictEqual(tools.map((t) => t.name),
-      ["list", "build", "remove_image", "log", "create", "start", "stop", "status", "remove"]);
+      ["list", "build", "remove_image", "log", "create", "start", "stop", "enable", "disable", "status", "remove"]);
     for (const t of tools) {
       assert.strictEqual(t.inputSchema.type, "object", t.name);
       assert.strictEqual(t.inputSchema.additionalProperties, false, t.name);
@@ -85,6 +86,11 @@ async function main() {
     const create = tools.find((t) => t.name === "create");
     assert.deepStrictEqual(Object.keys(create.inputSchema.properties).sort(), ["image", "name", "profile"]);
     assert.deepStrictEqual(create.inputSchema.required, ["name"]);
+    for (const name of ["enable", "disable"]) {
+      const t = tools.find((tool) => tool.name === name);
+      assert.deepStrictEqual(Object.keys(t.inputSchema.properties).sort(), ["name", "now"], name);
+      assert.deepStrictEqual(t.inputSchema.required, ["name"], name);
+    }
   });
 
   await test("errors, and the tools that are gone", async () => {
@@ -106,7 +112,8 @@ async function main() {
     assert.deepStrictEqual(r.images, [{ name: "base", type: "directory", readOnly: false, modified: "2023-11-14T22:13:20.000Z",
       bytes: 123456, running: false, profile: { id: "web", title: "web title" }, environments: ["yarp"] }]);
     assert.deepStrictEqual(r.environments, [{ name: "yarp", type: "directory", readOnly: false,
-      modified: "2023-11-14T22:13:20.000Z", bytes: 123456, running: true, image: "base", created: "2026-01-01T00:00:00.000Z" }]);
+      modified: "2023-11-14T22:13:20.000Z", bytes: 123456, running: true, image: "base", created: "2026-01-01T00:00:00.000Z",
+      enabled: false }]);
     assert.deepStrictEqual(r.other, [{ name: "handmade", type: "directory", readOnly: false,
       modified: "2023-11-14T22:13:20.000Z", bytes: 123456, running: false }]);
     assert.deepStrictEqual(r.running, [{ name: "yarp", kind: "environment" }]);
@@ -288,7 +295,8 @@ async function main() {
 
     const s = JSON.parse((await c.call("status", { name: "yarp" })).text);
     assert.deepStrictEqual(s, { name: "yarp", kind: "environment", exists: true, running: true, image: "web",
-      created: "2026-01-01T00:00:00.000Z", system: "running", address: "10.0.0.5/28", failed: ["bad.service"] });
+      created: "2026-01-01T00:00:00.000Z", enabled: false, system: "running", address: "10.0.0.5/28",
+      failed: ["bad.service"] });
     // The stand-in's echo unfolds the script's \n, so the call spans lines.
     const calls = called().join("\n");
     assert(calls.includes("--setenv=TERM=dumb") && calls.includes("-q shell yarp") && calls.includes("is-system-running"),
@@ -302,7 +310,8 @@ async function main() {
     assert.strictEqual(stopped.text, "yarp is stopped");
     assert.strictEqual((await c.call("stop", { name: "yarp" })).text, "yarp is not running");
     assert.deepStrictEqual(JSON.parse((await c.call("status", { name: "yarp" })).text),
-      { name: "yarp", kind: "environment", exists: true, running: false, image: "web", created: "2026-01-01T00:00:00.000Z" });
+      { name: "yarp", kind: "environment", exists: true, running: false, image: "web", created: "2026-01-01T00:00:00.000Z",
+        enabled: false });
     assert((await c.call("status", { name: "-x" })).isError);
   });
 
@@ -329,6 +338,61 @@ async function main() {
     setTimeout(() => c.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id } }), 300);
     const cancelled = await pending;
     assert(cancelled.isError && /cancelled/.test(cancelled.text), cancelled.text);
+  });
+
+  await test("enable and disable: the record, which list and status show; now starts or stops too", async () => {
+    reset({ images: ["web", "yarp", "handmade"] });
+    markImage("web");
+    markEnvironment("yarp", "web");
+    const image = await c.call("enable", { name: "web" });
+    assert(image.isError && /web is an image: create an environment from it, and enable that/.test(image.text), image.text);
+    const other = await c.call("enable", { name: "handmade" });
+    assert(other.isError && /handmade is not an environment: only an environment is enabled/.test(other.text), other.text);
+    const bad = await c.call("enable", { name: "-x" });
+    assert(bad.isError && /bad machine name/.test(bad.text), bad.text);
+    const extra = await c.call("enable", { name: "yarp", timeout: 5 });
+    assert(extra.isError && /enable takes no timeout/.test(extra.text), extra.text);
+    assert.strictEqual(fs.readFileSync(record("yarp"), "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\n");
+
+    const on = await c.call("enable", { name: "yarp" });
+    assert(!on.isError, on.text);
+    assert.strictEqual(on.text, "yarp is enabled: it starts at boot");
+    assert.strictEqual(fs.readFileSync(record("yarp"), "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\nEnabled=yes\n");
+    assert(!called().some((l) => l.includes("start")), "enable without now started it");
+    let list = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(list.environments.map((e) => [e.name, e.running, e.enabled]), [["yarp", false, true]]);
+    assert.strictEqual(JSON.parse((await c.call("status", { name: "yarp" })).text).enabled, true);
+    assert.strictEqual((await c.call("enable", { name: "yarp" })).text, "yarp is enabled: it starts at boot");
+
+    const off = await c.call("disable", { name: "yarp" });
+    assert.strictEqual(off.text, "yarp is disabled: it does not start at boot");
+    assert.strictEqual(fs.readFileSync(record("yarp"), "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\nEnabled=no\n");
+    assert(!called().some((l) => l.includes("poweroff")), "disable without now stopped it");
+    list = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(list.environments.map((e) => [e.name, e.enabled]), [["yarp", false]]);
+
+    // With now: started, or stopped, as well.
+    const onNow = await c.call("enable", { name: "yarp", now: true });
+    assert(!onNow.isError, onNow.text);
+    assert.strictEqual(onNow.text, "yarp is enabled: it starts at boot. yarp is running");
+    assert(called().includes("machinectl --no-ask-password start yarp"), called().join("\n"));
+    assert.match(fs.readFileSync(record("yarp"), "utf8"), /\nEnabled=yes\n$/);
+    list = JSON.parse((await c.call("list", {})).text);
+    assert.deepStrictEqual(list.environments.map((e) => [e.name, e.running, e.enabled]), [["yarp", true, true]]);
+    const offNow = await c.call("disable", { name: "yarp", now: true });
+    assert.strictEqual(offNow.text, "yarp is disabled: it does not start at boot. yarp is stopped");
+    assert(called().includes("machinectl --no-ask-password poweroff yarp"), called().join("\n"));
+    assert.match(fs.readFileSync(record("yarp"), "utf8"), /\nEnabled=no\n$/);
+    assert.strictEqual((await c.call("disable", { name: "yarp", now: true })).text,
+      "yarp is disabled: it does not start at boot. yarp is not running");
+
+    // A stale record, its machine gone: disabled, not enabled.
+    markEnvironment("ghost", "web");
+    const ghost = await c.call("enable", { name: "ghost" });
+    assert(ghost.isError && /no machine "ghost"/.test(ghost.text), ghost.text);
+    assert.strictEqual(fs.readFileSync(record("ghost"), "utf8"), "Image=web\nCreated=2026-01-01T00:00:00.000Z\n");
+    assert.strictEqual((await c.call("disable", { name: "ghost" })).text, "ghost is disabled: it does not start at boot");
+    assert.match(fs.readFileSync(record("ghost"), "utf8"), /^Image=web\nCreated=2026-01-01T00:00:00.000Z\nEnabled=no\n$/);
   });
 
   await test("remove takes environments and their records; remove_image takes images without environments", async () => {

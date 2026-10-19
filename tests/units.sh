@@ -46,7 +46,7 @@ for unit in "$units"/*.service "$units"/*.socket "$units"/*.target; do
 done
 
 # systemd's own targets that the units order against, require or want.
-for target in basic getty getty-pre multi-user network network-pre shutdown swap sysinit time-sync; do
+for target in basic getty getty-pre machines multi-user network network-pre shutdown swap sysinit time-sync; do
 	printf '[Unit]\nDescription=%s (stub)\n' "$target" >"$units/$target.target"
 done
 # Executables of other packages that ExecStart= lines name.

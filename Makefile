@@ -79,8 +79,8 @@ test:
 # without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
-	check-extension check-postbuild check-firewall check-secureboot \
-	check-ceremony check-storage check-pcrsign check-version
+	check-extension check-autostart check-postbuild check-firewall \
+	check-secureboot check-ceremony check-storage check-pcrsign check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -139,6 +139,11 @@ check-mcp:
 check-extension:
 	@if command -v node >/dev/null 2>&1; then node tests/extension.js; \
 	else echo "extension: SKIPPED, node is not installed (package/cherry/openchamber-extension unchecked)"; fi
+
+# cherry-autostart starts the environments whose record enables them, at
+# boot, and nothing else.
+check-autostart:
+	tests/autostart.sh
 
 # post-build.sh still catches a stripped opencode.
 check-postbuild:

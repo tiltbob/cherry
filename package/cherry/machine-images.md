@@ -1,6 +1,6 @@
 ---
 name: Machine images
-description: Build images from profiles, and create, start, check, stop and remove the environments cloned from them, with the machines tools
+description: Build images from profiles, and create, start, check, stop, enable at boot and remove the environments cloned from them, with the machines tools
 ---
 
 # Images and environments
@@ -11,7 +11,8 @@ This machine runs Cherry, a container host. Two kinds of thing live in
 - An **image** is built from a profile and never started. It is what
   environments are made from.
 - An **environment** is a clone of an image, with changes of its own, which
-  you start, check, stop and remove. Several can come from one image.
+  you start, check, stop and remove, and enable to start at boot, or
+  disable, as systemctl does a unit. Several can come from one image.
 
 You cannot write there, run systemd-nspawn, or run commands in a container
 yourself; the `machines` tools do what can be done:
@@ -24,6 +25,7 @@ yourself; the `machines` tools do what can be done:
 | `log` | the end of an image's build log |
 | `create` | clones an image into a new environment; given a profile instead, builds its image first if there is none |
 | `start` / `stop` | boots / shuts down an environment |
+| `enable` / `disable` | has an environment start at boot, or no longer; with `now`, starts or stops it too |
 | `status` | what a machine reports: its kind, its image or profile, systemd's state, its address, failed units |
 | `remove` | removes an environment (its image stays) |
 
@@ -50,10 +52,14 @@ digit, and images and environments share them.
    build returns the end of its log, and `log` shows more of it.
 3. `start` it, then `status`: systemd `running` and an address on `host0`
    mean it is up. `degraded` names failed units.
-4. `stop` it when it is done; `remove` it when it is no longer wanted. An
-   environment must be stopped before it is removed. An image is removed
-   with `remove_image`, or rebuilt with `build` and `replace`, only once it
-   has no environments left.
+4. `enable` it when it should be running whenever the machine is, as a
+   service would be: the machine starts it at boot. `disable` takes that
+   back; neither starts or stops it unless given `now`, as `systemctl
+   enable --now` does. `status` and `list` say whether it is enabled.
+5. `stop` it when it is done; `remove` it when it is no longer wanted. An
+   environment must be stopped before it is removed, and removing it
+   disables it. An image is removed with `remove_image`, or rebuilt with
+   `build` and `replace`, only once it has no environments left.
 
 Do not guess: when the request does not say which profile or image, or
 names something that `list` does not show, ask.
@@ -71,8 +77,9 @@ Enterprise Linux ones), so `status` shows an address once it is up.
 - `/var`, which holds the images and environments, is the volume `var` of
   the machine's storage pool, btrfs: an environment is a snapshot of its
   image and takes space only for what it changes. Until the pool has disks,
-  `/var` is 128 MiB in RAM: no image fits, and nothing lasts past a reboot.
-  The storage tools give the pool its disks (the `configure-storage` skill),
-  and `resize_volume` grows `var`. A Debian base takes about 240 MB.
+  `/var` is 128 MiB in RAM: no image fits, and nothing lasts past a reboot,
+  an enabled environment included. The storage tools give the pool its
+  disks (the `configure-storage` skill), and `resize_volume` grows `var`. A
+  Debian base takes about 240 MB.
 - Building runs the distribution's package manager from its mirrors, so
   the machine needs to reach them.

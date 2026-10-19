@@ -40,7 +40,9 @@ config BR2_PACKAGE_CHERRY
 	  person, one per distribution) or /var/lib/cherry/profiles,
 	  and never started; an environment is a clone of an image
 	  (machinectl clone: on the disk's btrfs, a snapshot of it),
-	  started, stopped and removed on its own.
+	  started, stopped and removed on its own, and enabled to
+	  start at boot, which cherry-autostart.service does once /var
+	  is mounted, as machinectl enable cannot on a read-only /etc.
 	  OpenChamber gets a built-in extension for them, Environments:
 	  a panel, the /env command and a service with the verbs.
 
