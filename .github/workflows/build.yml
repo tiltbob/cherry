@@ -26,7 +26,6 @@ on:
       - 'scripts/update_packages.py'
       - 'tests/bootstrap.sh'
       - 'tests/ceremony.sh'
-      - 'tests/exocarp.py'
       - 'tests/extension.js'
       - 'tests/firewall.sh'
       - 'tests/image.sh'
@@ -102,7 +101,7 @@ jobs:
             printf '%s\n' "$files"
             # The same files as the push trigger's paths-ignore above.
             ignore='^coordination/|\.md$|^\.github/workflows/sdk\.yml$|^scripts/(prune_dl|update_packages)\.py$'
-            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(extension\.js|machines-standins\.js|mcp\.js|storage-mcp\.js|polkit\.js|pcrsign\.py|scenarios\.py|storage\.py|exocarp\.py)$"
+            ignore="$ignore|^tests/(bootstrap|ceremony|firewall|image|postbuild|secureboot|syntax|units|var|version)\.sh$|^tests/(extension\.js|machines-standins\.js|mcp\.js|storage-mcp\.js|polkit\.js|pcrsign\.py|scenarios\.py|storage\.py)$"
             ignore="$ignore|^\.shellcheckrc$"
             grep -qvE "$ignore" <<<"$files" || build=false
           fi
@@ -136,10 +135,7 @@ jobs:
       # openssl; the key ceremony's a SoftHSM token and OpenSC; the polkit and
       # MCP tests node, which the runner has; the firewall and cherry-image
       # tests busybox and user namespaces, which Ubuntu's AppArmor keeps from
-      # unprivileged users unless told otherwise, and the firewall test nft;
-      # the host key agent's test a C compiler, which the runner has, tpm2-tss's
-      # development files, swtpm, tpm2-tools and sshd, with the ssh client the
-      # runner has.
+      # unprivileged users unless told otherwise, and the firewall test nft.
       - name: Check out Buildroot
         run: git submodule update --init --depth 1 buildroot
 
@@ -148,8 +144,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             shellcheck python3-flake8 python3-magic python3-yaml systemd \
-            nftables busybox-static softhsm2 opensc \
-            libtss2-dev swtpm tpm2-tools openssh-server
+            nftables busybox-static softhsm2 opensc
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Check
@@ -307,6 +302,7 @@ jobs:
         run: |
           mkdir -p artifacts
           cp output/cherry_x86_64/images/cherry-x86_64.efi artifacts/ || true
+          cp output/cherry_x86_64/images/cherry-x86_64-prod.efi artifacts/ || true
           cp output/cherry_x86_64/test/serial.log artifacts/ || true
           if [ -n "$RELEASE" ]; then
             cp output/cherry_x86_64/images/cherry-x86_64-release.efi artifacts/ || true
@@ -353,10 +349,10 @@ jobs:
       # digests of its PCR 11 policy, unsigned (board/x86_64/post-image.sh):
       # signed here with the key's private half (PCR_KEY, from
       # scripts/secureboot.py pcr), it unlocks the disks every release sealed,
-      # and the image the smoke test ran, signed with the build's own key, is
-      # left behind. Before the repository has the key, the tested image goes
-      # out as it is, and unlocks only the disks it sealed itself; once it has,
-      # a missing or wrong key fails the release.
+      # and the images the smoke test ran, dev and prod, signed with the build's
+      # own key, are left behind. Before the repository has the key, the prod
+      # image goes out as built, and unlocks only the disks it sealed itself;
+      # once it has, a missing or wrong key fails the release.
       - name: Sign the PCR policy
         id: pcr
         env:
@@ -440,7 +436,7 @@ jobs:
             gh release upload --clobber "$TAG" cherry-x86_64.efi cherry-x86_64.efi.sha256
           else
             {
-              echo "Cherry $TAG: \`cherry-x86_64.efi\`, built from $GITHUB_SHA by run $GITHUB_RUN_ID of the build workflow, which smoke-tested it."
+              echo "Cherry $TAG: \`cherry-x86_64.efi\`, built from $GITHUB_SHA by run $GITHUB_RUN_ID of the build workflow, which smoke-tested the build."
               echo
               echo "Serve it over HTTP and point a machine's UEFI HTTP boot at it (the README's Booting section)."
               echo

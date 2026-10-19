@@ -36,7 +36,7 @@ checks it out).
 | `configs/cherry_x86_64_defconfig` | the image's configuration; `make savedefconfig` writes it back here |
 | `configs/cherry_sdk_x86_64_defconfig` | the cross toolchain alone, which `make sdk` builds and the `sdk` workflow publishes as a release; the main defconfig downloads that release as its external toolchain |
 | `board/x86_64/` | `post-build.sh`, `post-fakeroot.sh`, `post-image.sh` (os-release, `/root` on `/var`, the initramfs and the UKI, with its signed PCR policy); `linux.fragment` and `check-kconfig.sh`; `rootfs-overlay/` (the image's `/init`, Cherry's units and presets, the firewall, the no-TPM script); `secureboot/` (the public half of the Secure Boot keys and of the PCR key, and `dbx.auth`, the revoked release keys, once there is one) |
-| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot`, `exocarp` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
+| `package/<name>/` | one Buildroot package each: `Config.in`, `<name>.mk`, `<name>.hash`, and the files it installs (units, scripts, rules). Cherry's own code is in `cherry`, `cherry-pit`, `cherry-secureboot` and `rpmstrap`; `opencode` and `bun` are upstream's prebuilt binaries; `openchamber` is an npm tree, listed in `npm-modules.list` |
 | `patches/` | `BR2_GLOBAL_PATCH_DIR`: patches to Buildroot's packages, by name and version, and the external toolchain's hash |
 | `scripts/` | host-side tools: `run_qemu.py`, `update_packages.py`, `prune_dl.py`, `secureboot.py`, `pcrsign.py`; each one's docstring is its manual |
 | `tests/` | the checks that `make check` runs, one file each, and `smoke.py`, the end-to-end test in QEMU |
@@ -81,9 +81,15 @@ is, what runs it and what it needs. Read that before the code.
   `io.systemd.nat`. What comes in is the README's list, and nothing more:
   `tests/firewall.sh` and the smoke test pin it.
 - **A TPM 2.0 is mandatory.** The machine ID and hostname come from its
-  endorsement key, in `/init`, before systemd starts, and sshd's host key is
-  its primary key, which `exocarp` signs with: no host key is stored. Without
-  one, boot stops at `cherry-no-tpm.target`.
+  endorsement key, in `/init`, before systemd starts. Without one, boot stops
+  at `cherry-no-tpm.target`.
+- **Two images from one build, and no SSH.** `cherry-x86_64.efi`, the dev
+  image, has root on the console for `make qemu` and the smoke test;
+  `cherry-x86_64-prod.efi`, the prod image, which releases are, has root
+  locked out by `cherry.prod` on its command line (`rootfs-overlay/init`),
+  and nothing else differs. Neither has sshd: a machine is managed through
+  OpenChamber, paired from its console. Nothing may give prod a way in that
+  the README doesn't list.
 - **The disks' keys are sealed to the boot state:** PCR 7, and PCR 11 under
   the image's signed policy (`scripts/pcrsign.py`, which `post-image.sh` signs
   it with; `cherry-pit` hands the signature and key to `/run/systemd`). Every
@@ -148,16 +154,15 @@ them all, `make -k check` goes on after a failure, `make check-<name>` runs one.
 | `ceremony` | `scripts/secureboot.py init`, `issue` and `revoke`, on a SoftHSM token | softhsm2, opensc |
 | `storage` | `cherry-storage` claims only the disks it may, drives LVM as it should, seals the keys to the boot state, and gives `/var` the pool `cherry`, in RAM at boot and moved onto its disks by `extend`, against a stand-in sysfs and stand-ins for LVM (a small model of it) and the disk tools | python3, flock |
 | `pcrsign` | `scripts/pcrsign.py` measures, signs and checks a UKI's PCR 11 policy as systemd does: on PE binaries the test makes, against systemd's vectors | openssl |
-| `exocarp` | the SSH host key agent, built here, against a swtpm: its key is the TPM's primary key, the same after a restart and a clear; ssh-add lists it, ssh-keygen signs with it, raw requests get their answers, and sshd completes a key exchange with it (`tests/exocarp.py`) | cc, libtss2-dev, swtpm, openssl, openssh-client; tpm2-tools and sshd for all of it |
 | `version` | the image is named after the nearest `v*` tag | git |
 
 A check whose tool is missing says `SKIPPED` and passes (`polkit`, `mcp`,
-`extension`, `image`, `firewall`, `ceremony`, `exocarp`); `package`, `flake8`
-and `syntax` fail without theirs. CI installs all of them (`build.yml`,
-"Install check tools"). An agent sandbox usually has python3, node, make,
-git, systemd and openssl, and lacks shellcheck, busybox, `ip`, softhsm2,
-opensc, swtpm, libtss2-dev and the submodule: then `make -k check` runs
-twelve checks, skips four and fails three for want of tools. Get the
+`extension`, `image`, `firewall`, `ceremony`); `package`, `flake8` and
+`syntax` fail without theirs. CI installs all of them (`build.yml`, "Install
+check tools"). An agent sandbox usually has python3, node, make, git, systemd
+and openssl, and lacks shellcheck, busybox, `ip`, softhsm2, opensc and the
+submodule: then `make -k check` runs twelve checks, skips three and fails
+three for want of tools. Get the
 submodule with `git submodule update --init --depth 1 buildroot` and install
 what you can; in the pull request, say which checks ran.
 
@@ -166,9 +171,10 @@ what you can; in the pull request, say which checks ran.
 `make` needs a Buildroot host ([README: Building](README.md#building)), about
 20 GB of disk, and one to two hours from cold, or half an hour with `main`'s
 ccache. `make test` boots the result in QEMU with OVMF and swtpm
-([README: Booting](README.md#booting)); its fifteen scenarios take about
-seven minutes under KVM, and hours without (the timeouts scale by
-`CHERRY_TEST_TIMEOUT_MULT`, 4 without KVM).
+([README: Booting](README.md#booting)); its sixteen scenarios take about
+eight minutes under KVM, and hours without (the timeouts scale by
+`CHERRY_TEST_TIMEOUT_MULT`, 4 without KVM). The last one boots the prod
+image, and can only watch its console: root is locked out of it.
 Scenarios that need a distribution mirror probe for it first and skip when the
 guest can't reach it.
 
@@ -196,10 +202,10 @@ Reading a CI failure:
   `post-build` failures come at the end, after the packages.
 - `build` job, step "Smoke test": one `=== N. passed`, `=== N. skipped` or
   `FAILED: <message>` per scenario. The run's artifact, `cherry-x86_64`, holds
-  the image and `serial.log`, the VM's console across every boot of the run:
-  the first place to look. To run the smoke test against that image without
-  building, put `cherry-x86_64.efi` in a directory and run
-  `python3 tests/smoke.py --images <dir> --state <dir>/test`.
+  both images and `serial.log`, the VM's console across every boot of the
+  run: the first place to look. To run the smoke test against them without
+  building, put `cherry-x86_64.efi` and `cherry-x86_64-prod.efi` in a
+  directory and run `python3 tests/smoke.py --images <dir> --state <dir>/test`.
 
 ## How a change gets in
 
@@ -394,7 +400,7 @@ two defconfigs' toolchain options must stay the same.
 |---|---|---|---|
 | Boot, initramfs, UKI | `package/cherry-pit/`, `board/x86_64/post-image.sh`, `rootfs-overlay/init`, `linux.fragment` | s1 | How it starts |
 | Machine identity, no TPM | `rootfs-overlay/init`, `cherry-no-tpm.{service,target}`, `usr/lib/cherry/no-tpm` | s1, s4, s12 | Machine identity |
-| SSH host key in the TPM | `package/exocarp/` (`src/exocarp.c`, `exocarp.socket`, `exocarp.service`, `sshd.conf`) | `tests/exocarp.py`, s1, s4, s12 | SSH host key |
+| The dev and prod images | `board/x86_64/post-image.sh`, `rootfs-overlay/init` (`cherry.prod`), `scripts/run_qemu.py --prod` | s16 | Building |
 | `/var` on the pool `cherry`, in RAM until it has disks | `package/cherry/cherry-storage` (`boot start`), `cherry-storage.service`, `lvm.conf`; the overlay's `var.mount.d/` | `tests/storage.py`, s1, s2, s4 | Disks |
 | The disks' keys sealed to the boot state | `scripts/pcrsign.py`, `board/x86_64/post-image.sh`, `package/cherry-pit/src/cherry-pit.c`, `package/cherry/cherry-storage`, `scripts/secureboot.py pcr`, the `release` job of `build.yml` | `tests/pcrsign.py`, `tests/storage.py`, `tests/ceremony.sh`, s2, s4, s15 | Disks, Secure Boot |
 | Swap in RAM | `cherry-zram-swap.service`, `usr/lib/sysctl.d/50-cherry-zram.conf` | s11 | Memory |

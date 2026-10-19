@@ -32,6 +32,6 @@ config BR2_PACKAGE_OPENCODE_SERVICE
 	  127.0.0.1:4096 only, with its state (sessions, provider
 	  credentials, logs) under /var/lib/opencode and a password
 	  for the boot in /var/lib/opencode/server-password. Clients
-	  reach it over SSH port forwarding.
+	  reach it from the machine itself.
 
 endif

@@ -75,13 +75,12 @@ test:
 # shellcheck, flake8, python3-magic and python3-yaml, systemd-analyze and
 # openssl; node for the polkit rules, the MCP servers and the extension
 # (skipped without it); nft, ip, busybox and user namespaces for the firewall
-# and cherry-image, softhsm2 and opensc for the key ceremony, and a C
-# compiler, tpm2-tss's development files, swtpm and OpenSSH's tools for the
-# host key agent (each skipped without them).
+# and cherry-image, and softhsm2 and opensc for the key ceremony (each skipped
+# without them).
 CHECKS = check-package check-flake8 check-yaml check-syntax check-units \
 	check-scenarios check-polkit check-bootstrap check-image check-mcp \
 	check-extension check-postbuild check-firewall check-secureboot \
-	check-ceremony check-storage check-pcrsign check-exocarp check-version
+	check-ceremony check-storage check-pcrsign check-version
 
 check: $(CHECKS)
 	@echo "make check: $(words $(CHECKS)) checks passed"
@@ -170,12 +169,6 @@ check-storage:
 # systemd does.
 check-pcrsign:
 	python3 tests/pcrsign.py
-
-# exocarp, the SSH host key agent, against a swtpm: the key is the TPM's, the
-# same at every start, and sshd signs with it (skipped without cc, libtss2-dev,
-# swtpm, ssh-add and ssh-keygen).
-check-exocarp:
-	python3 tests/exocarp.py
 
 # The image is named after the nearest release tag, and a given name wins.
 check-version:

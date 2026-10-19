@@ -4,9 +4,9 @@
 #
 # Loopback only, port 3000: neither OpenChamber nor OpenCode can listen on a
 # Unix socket, and the unit keeps the OpenCode it runs on loopback too
-# (OPENCHAMBER_OPENCODE_HOSTNAME). Reach it through SSH port forwarding, or
-# from another device through the relay of a pairing link. The browser UI has
-# no password.
+# (OPENCHAMBER_OPENCODE_HOSTNAME). Reach it from the machine itself, or from
+# another device through the relay of a pairing link. The browser UI has no
+# password.
 set -eu
 
 exec /usr/bin/openchamber serve --foreground --host 127.0.0.1 --port 3000

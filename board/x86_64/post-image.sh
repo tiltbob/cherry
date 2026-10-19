@@ -1,10 +1,12 @@
 #!/bin/sh
 # Buildroot post-image script: check the kernel configuration, then wrap the
-# kernel, the initramfs and the kernel command line into a single EFI binary
-# (UKI) for UEFI HTTP boot, with the signed PCR 11 policy that binds the
-# disks' keys to it, and signed for Secure Boot when the build has a local
-# chain. The initramfs holds the root filesystem as a compressed EROFS image,
-# which its /init mounts straight from the file.
+# kernel, the initramfs and the kernel command line into EFI binaries (UKIs)
+# for UEFI HTTP boot, with the signed PCR 11 policy that binds the disks' keys
+# to them, and signed for Secure Boot when the build has a local chain: the
+# dev image, the prod image (root locked out, by cherry.prod on its command
+# line) and the release image, prod with the release PCR key. The initramfs
+# holds the root filesystem as a compressed EROFS image, which its /init
+# mounts straight from the file.
 set -eu
 
 BOARD_DIR=$(dirname "$(readlink -f "$0")")
@@ -49,20 +51,32 @@ ln -s "$tree/scripts/pcrsign.py" "$tools/systemd-measure"
 # EROFS mounts files only from filesystems that can read_folio(), and tmpfs
 # can't. ramfs pages can't be swapped either, which suits an image that is
 # compressed already.
+cmdline="console=tty0 console=ttyS0,115200 panic=10 rootfstype=ramfs"
+# uki <cmdline> <ukify option>...
 uki() {
+	uki_cmdline=$1
+	shift
 	"$HOST_DIR/bin/python3" "$HOST_DIR/bin/ukify" build \
 		--linux="$BINARIES_DIR/bzImage" \
 		--initrd="$initramfs" \
 		--stub="$TARGET_DIR/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
 		--os-release="@$TARGET_DIR/usr/lib/os-release" \
-		--cmdline="console=tty0 console=ttyS0,115200 panic=10 rootfstype=ramfs" \
+		--cmdline="$uki_cmdline" \
 		--pcr-banks=sha256 --tools="$tools" "$@"
 }
+# Two images from the one root filesystem (README, Building): the dev image,
+# whose root logs in on the console without a password, and the prod image,
+# the same but for cherry.prod on its command line, which has /init lock root
+# out (rootfs-overlay/init). Releases are the prod image.
 efi="$BINARIES_DIR/cherry-x86_64.efi"
-rm -f "$efi"
-uki --pcr-private-key="$key" --pcr-public-key="$public" --output="$efi"
-"$HOST_DIR/bin/python3" "$tree/scripts/pcrsign.py" check "$efi"
-echo "post-image: $(du -h "$efi" | cut -f1) $efi, its PCR policy signed with $key"
+prod="$BINARIES_DIR/cherry-x86_64-prod.efi"
+rm -f "$efi" "$prod"
+uki "$cmdline" --pcr-private-key="$key" --pcr-public-key="$public" --output="$efi"
+uki "$cmdline cherry.prod" --pcr-private-key="$key" --pcr-public-key="$public" --output="$prod"
+for image in "$efi" "$prod"; do
+	"$HOST_DIR/bin/python3" "$tree/scripts/pcrsign.py" check "$image"
+	echo "post-image: $(du -h "$image" | cut -f1) $image, its PCR policy signed with $key"
+done
 
 # A local chain (README, Secure Boot): the image carries the Secure Boot keys
 # of BR2_PACKAGE_CHERRY_SECUREBOOT_KEYS (package/cherry-secureboot), the
@@ -84,24 +98,26 @@ if [ -n "$keys" ] && [ -s "$keys/release.key" ]; then
 			exit 1
 		fi
 	done
-	sbsign --key "$keys/release.key" --cert "$keys/release.crt" --output "$efi.signed" "$efi"
-	sbverify --cert "$keys/release.crt" "$efi.signed"
-	mv "$efi.signed" "$efi"
-	echo "post-image: $efi signed for Secure Boot with $keys/release.key, the local chain's"
+	for image in "$efi" "$prod"; do
+		sbsign --key "$keys/release.key" --cert "$keys/release.crt" --output "$image.signed" "$image"
+		sbverify --cert "$keys/release.crt" "$image.signed"
+		mv "$image.signed" "$image"
+		echo "post-image: $image signed for Secure Boot with $keys/release.key, the local chain's"
+	done
 fi
 
-# The release image: the same, with the release PCR key
+# The release image: the prod image, with the release PCR key
 # (board/x86_64/secureboot/pcr.pem, from scripts/secureboot.py pcr) as its
 # .pcrpkey, and its policy digests in .pcrsig, unsigned, with room for the
 # signatures: the release job of .github/workflows/build.yml signs them with
 # the key's private half, which only it has. Until the repository has that
-# key, a release carries the build's key, and unlocks only the disks it sealed
-# itself.
+# key, a release is the prod image as built, with the build's key, and unlocks
+# only the disks it sealed itself.
 release_key=$BOARD_DIR/secureboot/pcr.pem
 release="$BINARIES_DIR/cherry-x86_64-release.efi"
 rm -f "$release"
 if [ -s "$release_key" ]; then
-	uki --pcr-public-key="$release_key" --policy-digest --output="$release" >/dev/null
+	uki "$cmdline cherry.prod" --pcr-public-key="$release_key" --policy-digest --output="$release" >/dev/null
 	"$HOST_DIR/bin/python3" "$tree/scripts/pcrsign.py" check --unsigned "$release"
 	echo "post-image: $(du -h "$release" | cut -f1) $release, its PCR policy to be signed with the release key"
 fi

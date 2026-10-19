@@ -34,12 +34,14 @@ Once booted:
   containers (see [Firewall](#firewall)).
 - **Services:** systemd 258, built with seccomp so that units' system call
   filters apply, with networkd (DHCP), resolved, timesyncd, journald,
-  machined/machinectl and systemd-nspawn, plus OpenSSH, whose host key is
-  the TPM's and never leaves it (see [SSH host key](#ssh-host-key)), and
-  OpenChamber running the OpenCode agent, as the `cherry` user (see
-  [Cherry service](#cherry-service)), with tools to build and run container
-  images, which never leave the machine (see
-  [Building images](#building-images)).
+  machined/machinectl and systemd-nspawn, and OpenChamber running the
+  OpenCode agent, as the `cherry` user (see [Cherry service](#cherry-service)),
+  with tools to build and run container images, which never leave the
+  machine (see [Building images](#building-images)). There is no SSH: a
+  machine is managed through OpenChamber, paired from its console.
+- **Two images:** the dev image, whose `root` logs in on the console, and the
+  prod image, which releases are, with root locked out (see
+  [Building](#building)).
 
 Cherry targets x86_64 UEFI machines and VMs with a TPM 2.0.
 
@@ -51,7 +53,7 @@ A Buildroot host with the [usual prerequisites](https://buildroot.org/downloads/
 ```sh
 git clone --recurse-submodules https://github.com/tiltbob/cherry
 cd cherry
-make        # output/cherry_x86_64/images/cherry-x86_64.efi
+make        # output/cherry_x86_64/images/cherry-x86_64.efi, and cherry-x86_64-prod.efi
 ```
 
 Buildroot 2026.08 is a git submodule. This repository is a
@@ -66,6 +68,19 @@ Buildroot 2026.08 is a git submodule. This repository is a
 | `make test` | end-to-end smoke test in QEMU ([tests/smoke.py](tests/smoke.py)) |
 | `make check` | fast checks that need no build (below) |
 | `make clean` | remove `output/cherry_x86_64` |
+
+**Two images come out of a build,** from the one root filesystem:
+`cherry-x86_64.efi`, the dev image, whose `root` logs in on the console
+without a password, for `make qemu` and the smoke test; and
+`cherry-x86_64-prod.efi`, the prod image, the same but for `cherry.prod` on
+its kernel command line, which has `/init` lock root out: root's password
+field becomes `*`, in copies of `/etc/passwd` and `/etc/shadow` bound over
+the read-only originals, and the console refuses `root` without asking for a
+password, with the `agetty.autologin` credential as without it. The command
+line is the UKI's, which the firmware cannot change and PCR 11 measures, so
+prod is a property of the signed image. Releases are the prod image: a
+release machine has no root, and is managed through OpenChamber alone (see
+[Cherry service](#cherry-service)).
 
 The image takes its version (`/usr/lib/os-release`, the boot banner) from
 `git describe` and the nearest release tag: `v0.0.1` for a build of the
@@ -130,18 +145,15 @@ stand-ins for LVM, the disks' tools and sysfs, `post-build.sh`'s check of
 `opencode`, the firewall's rules, in network namespaces standing in for a
 host, its LAN and its containers, the Secure Boot keys in
 `board/x86_64/secureboot/` and what `cherry-secureboot` enrolls from them, the
-key ceremony on a SoftHSM token, the `exocarp` host key agent against a
-swtpm, the UKI's PCR policy as `scripts/pcrsign.py` computes, signs and
-checks it, against systemd's vectors, and the image's version from the
-release tags. `make -k check` runs on after a failure; `make check-<name>`
-runs one. They need shellcheck, flake8, python3-magic, python3-yaml,
-systemd's `systemd-analyze`, openssl and util-linux's flock; node for the
-polkit rules, the MCP servers and the extension; busybox and user namespaces
-for `cherry-image` and the firewall, and nft and ip for the firewall;
-softhsm2 and opensc for the ceremony; a C compiler, tpm2-tss's development
-files, swtpm and OpenSSH's `ssh-add` and `ssh-keygen` for the host key
-agent, with tpm2-tools and `sshd` for the whole of its check (each skipped
-without them).
+key ceremony on a SoftHSM token, the UKI's PCR policy as `scripts/pcrsign.py`
+computes, signs and checks it, against systemd's vectors, and the image's
+version from the release tags. `make -k check` runs on after a failure; `make
+check-<name>` runs one. They need shellcheck, flake8, python3-magic,
+python3-yaml, systemd's `systemd-analyze`, openssl and util-linux's flock;
+node for the polkit rules, the MCP servers and the extension; busybox and
+user namespaces for `cherry-image` and the firewall, and nft and ip for the
+firewall; and softhsm2 and opensc for the ceremony (each skipped without
+them).
 
 `scripts/update_packages.py` bumps Cherry's packages to their latest upstream
 releases, hashes included: it looks up GitHub and GitLab tags and releases,
@@ -152,11 +164,12 @@ OpenChamber. Then build, run `make test`, and update the sizes below.
 
 ## Booting
 
-The image is `output/cherry_x86_64/images/cherry-x86_64.efi` from a build, or
-the asset of a [GitHub release](https://github.com/tiltbob/cherry/releases):
-CI builds every published release from its tag and, once the smoke test
-passed, signs `cherry-x86_64.efi` for Secure Boot (see
-[Secure Boot](#secure-boot)) and attaches it and its SHA-256. To cut a release
+The image is `output/cherry_x86_64/images/cherry-x86_64.efi` or
+`cherry-x86_64-prod.efi` from a build (see [Building](#building)), or the
+asset of a [GitHub release](https://github.com/tiltbob/cherry/releases), the
+prod image: CI builds every published release from its tag and, once the
+smoke test passed, signs it for Secure Boot (see [Secure Boot](#secure-boot))
+and attaches it, as `cherry-x86_64.efi`, with its SHA-256. To cut a release
 without a tag, run the `build` workflow by hand on `main` with the release's
 name, `v<version>`, as its input: the run builds the image under that name,
 tests it, then creates the release and its tag on the commit it built.
@@ -178,10 +191,10 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
 `make qemu` does all of this locally:
 - serves `images/` on a free port
 - writes an OVMF variable store with an HTTP boot entry for
-  `http://10.0.2.2:<port>/cherry-x86_64.efi`
+  `http://10.0.2.2:<port>/cherry-x86_64.efi` (`--prod`: the prod image)
 - starts a software TPM, swtpm, whose state in
-  `output/cherry_x86_64/qemu/tpm` makes the VM the same machine, with the
-  same SSH host key, on every run. Delete it for a new machine.
+  `output/cherry_x86_64/qemu/tpm` makes the VM the same machine on every
+  run. Delete it for a new machine.
 - boots QEMU with the serial console on your terminal
 
 `make qemu` and `make test` need:
@@ -190,23 +203,20 @@ or the firmware TPM (Intel PTT, AMD fTPM). A VM needs a virtual TPM.
 - `virt-fw-vars`: `apt install python3-virt-firmware`, or
   `pip install virt-firmware` (set `VIRT_FW_VARS` to use a specific copy)
 - for the smoke test's Secure Boot scenario, `sbsign` (`apt install
-  sbsigntool`) and openssl, and for its host key check, `ssh`
+  sbsigntool`) and openssl
 
 The TPM is attached through CRB, as firmware TPMs are. Pass `--tpm tis` to
 `scripts/run_qemu.py` for the TIS interface of discrete TPMs, or `--tpm none`
 to see Cherry stop without a TPM. `--secure-boot` boots OVMF's Secure Boot
 build instead, in setup mode at first (see [Secure Boot](#secure-boot)).
 
-`root` logs in without a password on the console. SSH is forwarded from host
-port 2222, but the firewall drops it (see [Firewall](#firewall)). To log in
-over SSH, pass a key as a [systemd credential](https://systemd.io/CREDENTIALS/),
-then let SSH in from the console:
-
-```sh
-python3 scripts/run_qemu.py --credential "ssh.authorized_keys.root=$(cat ~/.ssh/id_ed25519.pub)"
-nft add rule inet cherry input tcp dport 22 accept    # on the console
-ssh -p 2222 root@localhost
-```
+On the dev image, `root` logs in without a password on the console; the prod
+image (`python3 scripts/run_qemu.py --prod`) refuses it (see
+[Building](#building)). There is no SSH: the firewall lets nothing in (see
+[Firewall](#firewall)), and the machine is managed through OpenChamber, paired
+from the console (see [Cherry service](#cherry-service)). `--credential
+KEY=VALUE` passes a [systemd credential](https://systemd.io/CREDENTIALS/)
+through SMBIOS, as a platform would.
 
 ## How it starts
 
@@ -226,6 +236,9 @@ ssh -p 2222 root@localhost
    - mounts `/dev`, `/proc` and `/sys`
    - derives the machine's identity from the TPM (see
      [Machine identity](#machine-identity))
+   - on the prod image, locks root out: copies of `/etc/passwd` and
+     `/etc/shadow` with root's password field `*`, bound over the read-only
+     files (see [Building](#building))
    - starts systemd with that machine ID, or, without a usable TPM, with
      `cherry-no-tpm.target` instead of the default target
 5. **systemd:**
@@ -240,10 +253,7 @@ ssh -p 2222 root@localhost
    - when the firmware is in Secure Boot setup mode, enrolls Cherry's keys
      and reboots, before anything else starts (see [Secure Boot](#secure-boot))
 
-Because `/etc` is read-only:
-- sshd has no host key file: its host key is the TPM's, which signs for it
-  through `exocarp` (see [SSH host key](#ssh-host-key))
-- `/root` is a symlink into `/var`
+Because `/etc` is read-only, `/root` is a symlink into `/var`.
 
 ## Memory
 
@@ -320,50 +330,7 @@ cannot create its EK. `/init` writes the reason to
 `/run/cherry/identity/error` and starts systemd with `cherry-no-tpm.target`
 instead of the default target. That target brings up only the basic system and
 a login prompt on the console, and shows the error on every console.
-Networking, sshd and containers never start.
-
-## SSH host key
-
-sshd's host key is a key of the machine's TPM, which signs with it: the
-private key never leaves the TPM, and nothing stores it. It is the TPM's
-primary ECC NIST P-256 signing key in the endorsement hierarchy, for a fixed
-template, which the TPM derives from its endorsement seed, as it does the EK
-(see [Machine identity](#machine-identity)). So every boot gets the same key,
-`tpm2_clear` keeps it, and a machine without a disk keeps its host key across
-boots too. `tpm2_createprimary` shows the same key for the template:
-
-```sh
-tpm2_createprimary -C e -G ecc256:ecdsa-sha256 -g sha256 \
-  -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign|noda' \
-  -c /tmp/key.ctx -f pem -o /tmp/key.pem && ssh-keygen -i -m PKCS8 -f /tmp/key.pem
-```
-
-`exocarp`, Cherry's own ([`package/exocarp`](package/exocarp/src/exocarp.c)),
-is sshd's host key agent, in the ssh-agent protocol (sshd's `HostKeyAgent`):
-
-- **At boot,** `exocarp.socket` has the TPM create the key and writes its
-  public key to `/run/exocarp/ssh_host_ecdsa_key.pub`, in OpenSSH's format,
-  before sshd starts: sshd's `HostKey` is that file, and it has no other
-  (`sshd.service.d/10-exocarp.conf`).
-- **Per connection,** sshd asks the agent, on `/run/exocarp/socket`, to sign
-  the key exchange, and the TPM signs. `exocarp.service` starts at sshd's
-  first request and serves every connection in turn, as the `exocarp` user,
-  with the TPM (`/dev/tpmrm0`, the kernel's resource manager) as all it may
-  reach. A signature takes a discrete TPM about a hundred milliseconds, a
-  firmware TPM less; connections queue on it.
-- **Who can sign:** the socket is root's alone, as whoever connects can have
-  the host key sign anything. So can whoever can use the TPM, root or the
-  `tss` group; the key isn't bound to the boot state (see
-  [Security notes](#security-notes)).
-- **ECDSA NIST P-256 only:** TPMs have no Ed25519, and an RSA primary key
-  takes a discrete TPM seconds to derive. Every current client accepts
-  `ecdsa-sha2-nistp256`; one configured for Ed25519 and RSA alone needs it
-  added to its `HostKeyAlgorithms`. Clients that trusted a Cherry machine
-  before it had this, when sshd generated keys under `/var/lib/sshd`, see a
-  changed key: `ssh-keygen -R <host>` drops the old ones.
-
-`ssh-add -L`, as root with `SSH_AUTH_SOCK=/run/exocarp/socket`, lists the
-key. Without a usable TPM, neither the agent nor sshd starts.
+Networking, OpenChamber and containers never start.
 
 ## Disks
 
@@ -621,7 +588,7 @@ comes in unasked but ping, to the host or through it to its containers:
   IPv6 neighbor discovery, router advertisements and multicast listener
   queries, and DHCPv6 replies. DHCPv4 needs no rule: networkd's client takes
   its offers on a raw socket, which sees packets before the firewall.
-- **Dropped,** silently: everything else, SSH included.
+- **Dropped,** silently: everything else.
 - **Containers,** on the `ve-*` links of `--network-veth` (which `machinectl
   start` uses) and the `vz-*` bridges of `--network-zone=`, however many:
   - lease their addresses from networkd's DHCP server on the host, ping it,
@@ -644,7 +611,7 @@ To let something in until the next boot, add a rule from the console.
 Restarting the service puts the image's rules back:
 
 ```sh
-nft add rule inet cherry input tcp dport 22 accept      # SSH to the host
+nft add rule inet cherry input tcp dport 8080 accept    # a port of the host's
 nft add rule inet cherry forward ct status dnat accept  # nspawn's port forwards
 systemctl restart cherry-firewall
 ```
@@ -1158,8 +1125,8 @@ serves the browser UI.
 ## Cherry service
 
 `cherry.service`, from the `cherry` package, runs OpenChamber's server as the
-`cherry` user, with `/var/lib/cherry` as its home. Like sshd, it starts only
-on a machine with a TPM.
+`cherry` user, with `/var/lib/cherry` as its home. It starts only on a
+machine with a TPM.
 
 - **User and state:** everything runs as `cherry`: OpenChamber, the OpenCode
   it starts, and the agent's tools and terminals. Their data is under
@@ -1174,8 +1141,8 @@ on a machine with a TPM.
   `@system-service` set, less `@privileged`, whose calls fail with `EPERM`).
 - **Ports:** loopback only, both: OpenChamber on 127.0.0.1:3000, and the
   OpenCode it runs on 127.0.0.1 and a free port. Neither can listen on a Unix
-  socket. Reach the UI through SSH port forwarding (below), once the firewall
-  lets SSH in, or from another device through the relay of a pairing link.
+  socket. Reach the UI from another device, through the relay of a pairing
+  link (below): the firewall lets nothing in, and there is no SSH.
   `/health` reports OpenChamber's version, `/api/opencode/compatibility` the
   OpenCode it runs.
 - **Password:** none, on the browser UI or its API (see
@@ -1190,19 +1157,22 @@ on a machine with a TPM.
   local network can use it; it is single-use and expires after 10 minutes.
   `systemctl restart cherry-connect-url.service` shows a fresh one.
 
-To use it, let SSH in (see [Booting](#booting)), forward the port over SSH,
-then open `http://127.0.0.1:3000/` in a browser:
-
-```sh
-ssh -L 3000:127.0.0.1:3000 -p 2222 root@localhost  # the VM of make qemu
-```
+To use it, open the link, or scan the QR code, in another OpenChamber app:
+the desktop or mobile app, or a browser's. That is the whole way in, on the
+prod image as on the dev image; the dev image's root on the console is the
+other.
 
 ## Security notes
 
-This is a development image:
-- `root` has no password on the console (Buildroot's default).
-- The firewall lets nothing in unasked but ping (see [Firewall](#firewall)).
-  SSH, once let in, accepts keys only.
+The dev image is for development, and releases are the prod image (see
+[Building](#building)):
+- On the dev image, `root` has no password on the console (Buildroot's
+  default). On the prod image, root is locked out: nothing logs in as root,
+  on the console or otherwise, and nothing on the machine can set a password,
+  as `/etc` is read-only. A prod machine is managed through OpenChamber
+  alone, as the `cherry` user.
+- There is no SSH on either image, and the firewall lets nothing in unasked
+  but ping (see [Firewall](#firewall)).
 - OpenChamber's browser UI has no password: any local user can use it, and so
   run commands as the `cherry` user. It is on loopback only, as is the
   OpenCode behind it. The device-pairing relay forwards its requests from
@@ -1222,7 +1192,7 @@ This is a development image:
   between a container and the host or bind-mount host directories into one
   (`machinectl copy-to`, `copy-from`, `bind`): systemd-machined does those as
   root, on host paths the caller picks, so they would give it the host (any
-  file to read, root's `/var/roothome/.ssh/authorized_keys` to write).
+  file to read, root's `/var/roothome/.profile` to write).
 - The `cherry` user claims disks through polkit (see [Storage](#storage)),
   which erases them: any disk nothing uses, as `cherry-storage` runs as root
   for it, with checked arguments. A process running as that user, the agent
@@ -1234,12 +1204,9 @@ This is a development image:
   the machine (an HTTP boot server, a USB stick) can unlock them. Any
   release signed with that key does, older ones with their holes included,
   until their release key is revoked, which takes every release it signed
-  (see [Secure Boot](#secure-boot)); and `root` on the console then has the
-  disks open.
-  A build tree's images unlock only the disks they sealed themselves. The
-  SSH host key is the TPM's, and sealed to nothing: it never leaves the TPM,
-  but whatever boots the machine, and root or the `tss` group on it, can
-  sign with it (see [SSH host key](#ssh-host-key)).
+  (see [Secure Boot](#secure-boot)); and `root` on the dev image's console
+  then has the disks open. A build tree's images unlock only the disks they
+  sealed themselves.
 - Releases are signed for Secure Boot, and a machine in setup mode enrolls
   Cherry's keys (see [Secure Boot](#secure-boot)). Local builds are not
   signed, unless the build has a local chain, which only machines that

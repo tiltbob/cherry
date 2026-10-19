@@ -4,8 +4,9 @@
 Serves the images directory over HTTP on the host, writes a fresh OVMF
 variable store whose BootNext is an HTTP boot entry for the EFI binary
 (http://10.0.2.2:<port>/cherry-x86_64.efi, as seen from QEMU's user-mode
-network), starts a software TPM 2.0 (swtpm), and starts QEMU with the serial
-console on this terminal.
+network; with --prod, cherry-x86_64-prod.efi, the prod image, whose root is
+locked out of the console), starts a software TPM 2.0 (swtpm), and starts
+QEMU with the serial console on this terminal.
 
 The swtpm state in <state>/tpm is the VM's TPM, and so its identity: it stays
 the same machine across runs until that directory is deleted. Without a disk,
@@ -47,6 +48,7 @@ import threading
 import time
 
 EFI_NAME = "cherry-x86_64.efi"
+PROD_NAME = "cherry-x86_64-prod.efi"
 TPM_INTERFACES = ("crb", "tis")
 
 OVMF_CANDIDATES = [
@@ -178,11 +180,12 @@ class Swtpm:
         shutil.rmtree(self.sock_dir, ignore_errors=True)
 
 
-def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), memory="3072", cpus="2",
+def qemu_command(vars_path, serial="mon:stdio", forward=None, credentials=(), memory="3072", cpus="2",
                  tpm=None, tpm_interface="crb", secure_boot=False, disks=(), ssds=()):
     """With secure_boot, OVMF's Secure Boot build, whose variables only SMM may write; and QEMU exits when the
-    guest reboots, as the firmware would not HTTP boot again. disks are raw images on virtio-blk, which the guest
-    sees as rotational, hard disks; ssds raw images on NVMe, which it sees as SSDs."""
+    guest reboots, as the firmware would not HTTP boot again. forward is (host port, guest port): a TCP port of the
+    host's loopback forwarded to the guest's, for tests/smoke.py's firewall probe. disks are raw images on
+    virtio-blk, which the guest sees as rotational, hard disks; ssds raw images on NVMe, which it sees as SSDs."""
     code, _ = find_ovmf(secure_boot)
     cmd = ["qemu-system-x86_64", "-machine", "q35,smm=on" if secure_boot else "q35", "-m", str(memory),
            "-smp", str(cpus)]
@@ -205,8 +208,8 @@ def qemu_command(vars_path, serial="mon:stdio", ssh_port=None, credentials=(), m
     if not serial.startswith("mon:"):
         cmd += ["-monitor", "none"]
     netdev = "user,model=virtio-net-pci"
-    if ssh_port:
-        netdev += f",hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
+    if forward:
+        netdev += f",hostfwd=tcp:127.0.0.1:{forward[0]}-:{forward[1]}"
     cmd += ["-nic", netdev]
     if tpm:
         cmd += ["-chardev", f"socket,id=chrtpm,path={tpm.socket}",
@@ -231,10 +234,10 @@ def main():
     parser.add_argument("--state", default="output/cherry_x86_64/qemu",
                         help="directory for the variable store and the TPM state")
     parser.add_argument("--port", type=int, default=0, help="HTTP server port (default: any free port)")
-    parser.add_argument("--ssh-port", type=int, default=2222, help="host port forwarded to the guest's SSH")
+    parser.add_argument("--prod", action="store_true",
+                        help=f"boot {PROD_NAME}, the prod image, whose root is locked out (default: {EFI_NAME})")
     parser.add_argument("--credential", action="append", default=[], metavar="KEY=VALUE",
-                        help="pass a systemd credential via SMBIOS, e.g. "
-                             "ssh.authorized_keys.root=\"$(cat ~/.ssh/id_ed25519.pub)\" (repeatable)")
+                        help="pass a systemd credential via SMBIOS type 11 (repeatable)")
     parser.add_argument("--tpm", choices=TPM_INTERFACES + ("none",), default="crb",
                         help="TPM interface, or none to see Cherry stop without a TPM (default: crb)")
     parser.add_argument("--disk", type=parse_size, metavar="SIZE",
@@ -250,12 +253,13 @@ def main():
     args = parser.parse_args()
 
     images = os.path.abspath(args.images)
-    if not os.path.exists(os.path.join(images, EFI_NAME)):
-        sys.exit(f"{os.path.join(images, EFI_NAME)} not found; build first")
+    name = PROD_NAME if args.prod else EFI_NAME
+    if not os.path.exists(os.path.join(images, name)):
+        sys.exit(f"{os.path.join(images, name)} not found; build first")
     os.makedirs(args.state, exist_ok=True)
 
     server = serve(images, args.port)
-    url = boot_url(server)
+    url = boot_url(server, name)
     if args.secure_boot:
         vars_path = os.path.join(args.state, SECBOOT_VARS)
         if os.path.exists(vars_path):
@@ -278,8 +282,8 @@ def main():
         ssds.append(os.path.join(args.state, f"ssd{i}.img"))
         make_disk(ssds[-1], size)
     tpm = Swtpm(os.path.join(args.state, "tpm")) if args.tpm != "none" else None
-    cmd = qemu_command(vars_path, ssh_port=args.ssh_port, credentials=args.credential,
-                       tpm=tpm, tpm_interface=args.tpm, secure_boot=args.secure_boot, disks=disks, ssds=ssds)
+    cmd = qemu_command(vars_path, credentials=args.credential, tpm=tpm, tpm_interface=args.tpm,
+                       secure_boot=args.secure_boot, disks=disks, ssds=ssds)
     print(f"HTTP boot from {url}", file=sys.stderr)
     if args.secure_boot:
         print("Secure Boot: QEMU exits when the guest reboots; run this again to boot on.", file=sys.stderr)
